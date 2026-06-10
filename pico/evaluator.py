@@ -384,7 +384,9 @@ class BenchmarkEvaluator:
         model_client_factory=None,
     ):
         self.benchmark_path = Path(benchmark_path)
+        # tmp_path / "benchmark-v1.json"
         self.artifact_path = Path(artifact_path)
+        # tmp/workspaces目录
         self.workspace_root = Path(workspace_root) if workspace_root is not None else Path(
             tempfile.mkdtemp(prefix="pico-benchmark-")
         )
@@ -395,6 +397,7 @@ class BenchmarkEvaluator:
         self.max_new_tokens = max_new_tokens
         self.timezone_name = timezone_name
         self.model_client_factory = model_client_factory
+        # pico 根目录
         self.repo_root = self.benchmark_path.resolve().parent.parent
 
     def load(self):
@@ -481,6 +484,7 @@ class BenchmarkEvaluator:
 
         artifact_path = _artifact_path_for_task(task)
         artifact_file = fixture_copy_root / artifact_path
+        # 最终产物文件存在
         expected_artifact_exists = artifact_file.exists()
         artifact_digest = _digest_file(artifact_file) if expected_artifact_exists else ""
 
@@ -492,8 +496,11 @@ class BenchmarkEvaluator:
             text=True,
         )
 
+        # 工具预算
         within_budget = task_state.tool_steps <= int(task["step_budget"])
+        # veriifer命令成功
         verifier_passed = verifier.returncode == 0
+        # 正常final asnwer返回
         non_failure_stop_reason = task_state.stop_reason == STOP_REASON_FINAL_ANSWER_RETURNED
         passed = within_budget and verifier_passed and expected_artifact_exists and non_failure_stop_reason
         failure_category = None if passed else self._failure_category(

@@ -34,10 +34,9 @@ def find_project_env(start):
     current = Path(start).resolve()
     if current.is_file():
         current = current.parent
-    for path in (current, *current.parents):
-        env_path = path / ".env"
-        if env_path.exists():
-            return env_path
+    env_path = current / ".env"
+    if env_path.exists():
+        return env_path
     return None
 
 

@@ -109,33 +109,44 @@ class Pico:
         self.approval_policy = approval_policy
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
+        # 子agent深度
         self.depth = depth
         self.max_depth = max_depth
         self.read_only = read_only
+        # 允许传给shell的环境变量
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
+        # 需要脱敏的环境变量名称
         self.secret_env_names = {str(name).upper() for name in (secret_env_names or ())}
+        # 功能开关，测试中可临时关掉某些功能
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
+        # 用于保存单次ask()的运行状态
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
             "workspace_root": workspace.repo_root,
             "history": [],
-            "memory": memorylib.default_memory_state(),
+            "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
         }
+        # 补齐字段
         self._ensure_session_shape()
+        # 负责管理当前会话的短期工作记忆、文件摘要、长期记忆并进行相关的笔记召回，为session的一部分
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
+        # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
+        # 可复用的前缀提示词，包括 agent的身份、可用的工具、git仓库状态等等
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
+        # 上下文管理器，组装上下文，进行上下文压缩
         self.context_manager = ContextManager(self)
         self.resume_state = self.evaluate_resume_state()
+        # 保存当前session状态文件
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
         self.current_run_dir = None
@@ -210,6 +221,7 @@ class Pico:
 
     def evaluate_resume_state(self):
         previous_resume_state = dict(self.session.get("resume_state", {}) or {})
+        # 清理过期(被修改过)的文件摘要
         invalidated = self.invalidate_stale_memory()
         checkpoint = self.current_checkpoint()
         status = CHECKPOINT_NONE_STATUS
@@ -229,6 +241,7 @@ class Pico:
                         stale_paths.append(path)
                 saved_identity = dict(checkpoint.get("runtime_identity", {}) or self.session.get("runtime_identity", {}) or {})
                 current_identity = self.current_runtime_identity()
+                # 检查运行环境、仓库上下文是否一致
                 identity_keys = (
                     "cwd",
                     "model",
@@ -557,6 +570,12 @@ class Pico:
         return prompt, metadata
 
     def emit_trace(self, task_state, event, payload=None):
+        """
+        业务事件 payload
+        -> 脱敏
+        -> 添加 event/created_at
+        -> 写 trace.jsonl
+        """
         payload = self.redact_artifact(payload or {})
         payload["event"] = event
         payload["created_at"] = now()
@@ -608,6 +627,13 @@ class Pico:
             file_freshness = memorylib.file_freshness(path, self.root)
             freshness[path] = file_freshness
             key_files.append({"path": path, "freshness": file_freshness})
+
+        """
+        current_goal = user_message
+        current_blocker = task_state.stop_reason 的一部分
+        next_step = task_state.status / stop_reason / last_tool 的规则推断
+        completed = task_state.final_answer
+        """
         checkpoint = {
             "checkpoint_id": checkpoint_id,
             "parent_checkpoint_id": current.get("checkpoint_id", "") if current else "",
@@ -665,11 +691,14 @@ class Pico:
         # 不是所有工具结果都进入工作记忆。
         # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
         if name in {"read_file", "write_file", "patch_file"}:
+            # 最近访问过的文件
             self.memory.remember_file(canonical_path)
         if name == "read_file":
+            # 读文件之后保存摘要，前三个非空行最多 180 字符的结果
             summary = memorylib.summarize_read_result(result)
             self.memory.set_file_summary(canonical_path, summary)
             self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
+            # 改动过的文件去除摘要
         elif name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
 
@@ -683,10 +712,13 @@ class Pico:
         affected_paths = [str(path).strip() for path in metadata.get("affected_paths", []) if str(path).strip()]
         path_text = ", ".join(affected_paths) or "workspace"
         if status == "partial_success":
+            # 不要直接重试，先检查 diff / 文件状态
             text = f"{name} partial_success on {path_text}; inspect diff before retry"
         elif status == "error":
+            # 先看失败原因，再决定下一步
             text = f"{name} error on {path_text}; check the failure before retry"
         else:
+            # reject 表示被拦截，使用其他行动
             text = f"{name} rejected; choose a different action before retry"
         tags = ["process", status, *affected_paths]
         self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
@@ -773,10 +805,11 @@ class Pico:
         如果新人想理解 pico 是怎么“从一句话跑成一个 agent 流程”的，
         这里就是最关键的入口。
         """
+        # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
         run_started_at = time.monotonic()
         self.memory.set_task_summary(user_message)
         self.record({"role": "user", "content": user_message, "created_at": now()})
-
+        # 记录当前ask的执行状态，工具和模型调用次数、任务完成情况等
         task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
         task_state.resume_status = self.resume_state.get("status", CHECKPOINT_NONE_STATUS)
         self.current_task_state = task_state
@@ -801,6 +834,7 @@ class Pico:
         # 4. 记录：把结果写回 history / task_state / trace / memory
         # 然后进入下一轮，直到停机条件满足
         while tool_steps < self.max_steps and attempts < max_attempts:
+            # 2. 每一轮先落盘当前 attempt，再组装模型要看的 prompt。
             attempts += 1
             task_state.record_attempt()
             self.run_store.write_task_state(task_state)
@@ -814,6 +848,7 @@ class Pico:
                     "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
+            # 3. prompt 构造阶段发现恢复风险或上下文压缩时，先创建恢复锚点。
             if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
                 checkpoint = self.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
                 self.run_store.write_task_state(task_state)
@@ -854,6 +889,7 @@ class Pico:
                         "trigger": "context_reduction",
                     },
                 )
+            # 4. 调模型前记录请求事件；支持缓存的后端会收到稳定 prefix 的 cache key。
             self.emit_trace(
                 task_state,
                 "model_requested",
@@ -883,7 +919,9 @@ class Pico:
                 prompt_metadata.update(completion_metadata)
             self.last_completion_metadata = completion_metadata
             self.last_prompt_metadata = prompt_metadata
+            # 若解析不到任何tool / final标记，则直接将原始文本当作最终回答，若回答为空，则返回retry
             kind, payload = self.parse(raw)
+            # 5. 模型输出先解析成 tool / final / retry，再进入对应分支。
             self.emit_trace(
                 task_state,
                 "model_parsed",
@@ -895,6 +933,7 @@ class Pico:
             )
 
             if kind == "tool":
+                # 6. tool 分支：执行工具，把结果写回 history，再创建下一轮恢复锚点。
                 tool_steps += 1
                 name = payload.get("name", "")
                 args = payload.get("args", {})
@@ -935,37 +974,41 @@ class Pico:
                 continue
 
             if kind == "retry":
+                # 7. retry 分支：模型格式不合法，只记录纠错提示并进入下一轮。
                 self.record({"role": "assistant", "content": payload, "created_at": now()})
                 self.run_store.write_task_state(task_state)
                 continue
 
-            final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now()})
-            task_state.finish_success(final)
-            self.promote_durable_memory(user_message, final)
-            checkpoint = self.create_checkpoint(task_state, user_message, trigger="run_finished")
-            self.run_store.write_task_state(task_state)
-            self.emit_trace(
-                task_state,
-                "checkpoint_created",
-                {
-                    "checkpoint_id": checkpoint["checkpoint_id"],
-                    "trigger": "run_finished",
-                },
-            )
-            self.emit_trace(
-                task_state,
-                "run_finished",
-                {
-                    "status": task_state.status,
-                    "stop_reason": task_state.stop_reason,
-                    "final_answer": final,
-                    "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                },
-            )
-            self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
-            return final
+            # 8. final 分支：记录最终答案、晋升长期记忆、写 report 后返回给 CLI。
+            if kind == "final":
+                final = (payload or raw).strip()
+                self.record({"role": "assistant", "content": final, "created_at": now()})
+                task_state.finish_success(final)
+                self.promote_durable_memory(user_message, final)
+                checkpoint = self.create_checkpoint(task_state, user_message, trigger="run_finished")
+                self.run_store.write_task_state(task_state)
+                self.emit_trace(
+                    task_state,
+                    "checkpoint_created",
+                    {
+                        "checkpoint_id": checkpoint["checkpoint_id"],
+                        "trigger": "run_finished",
+                    },
+                )
+                self.emit_trace(
+                    task_state,
+                    "run_finished",
+                    {
+                        "status": task_state.status,
+                        "stop_reason": task_state.stop_reason,
+                        "final_answer": final,
+                        "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+                    },
+                )
+                self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
+                return final
 
+        # 9. 没拿到 final 时安全停机：区分格式重试耗尽和工具步数耗尽。
         if attempts >= max_attempts and tool_steps < self.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
@@ -1033,6 +1076,7 @@ class Pico:
             }
             return f"error: unknown tool '{name}'"
         try:
+            # 路径限制在workspace内 + 参数有效性校验
             self.validate_tool(name, args)
         except Exception as exc:
             example = self.tool_example(name)
@@ -1051,6 +1095,7 @@ class Pico:
                 "diff_summary": [],
             }
             return message
+        # 拦截重复调用过两次的工具，若最近两次工具调用请求均和当前一样(包括args)，则拒绝当次请求
         if self.repeated_tool_call(name, args):
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -1063,6 +1108,7 @@ class Pico:
                 "diff_summary": [],
             }
             return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
+        # 根据安全规则和工具的危险程度进行审批
         if tool["risky"] and not self.approve(name, args):
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -1075,11 +1121,13 @@ class Pico:
                 "diff_summary": [],
             }
             return f"error: approval denied for {name}"
+        # 危险工具执行前记录仓库文件快照计算 sha256，用于比较哪些文件有改变
         before_snapshot = self.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
         try:
             result = clip(tool["run"](args))
             after_snapshot = self.capture_workspace_snapshot() if tool["risky"] else before_snapshot
+            # 返回有哪些文件不同，修改了、删除了、新增了哪些文件
             affected_paths, diff_summary = self.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
             tool_status = "ok"
@@ -1093,6 +1141,11 @@ class Pico:
                 elif exit_code != 0:
                     tool_status = "error"
                     tool_error_code = "tool_failed"
+            
+            # 提取高价值信息
+            # 最近接触过哪些文件
+            # 某个文件刚刚读到的短摘要
+            # 写文件后旧摘要需要失效
             self.update_memory_after_tool(name, args, result)
             self._last_tool_result_metadata = {
                 "tool_status": tool_status,
@@ -1105,6 +1158,7 @@ class Pico:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
             }
+            # 工具调用出问题的话，记录调用情况作为 notes 
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
             return result
         except Exception as exc:
@@ -1146,6 +1200,7 @@ class Pico:
     def build_report(self, task_state):
         # report 是一次运行的最终摘要；
         # 和 trace 的区别在于，trace 关注过程，report 关注结果与关键指标。
+        # 记录 (1)运行结果, (2)循环次数, (3)checkpointer状态, (4)提示词指标, (5)长期记忆提取
         return {
             "run_id": task_state.run_id,
             "task_id": task_state.task_id,

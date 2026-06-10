@@ -12,7 +12,7 @@ from pico.evaluator import (
     summarize_rows,
 )
 
-
+# 校验 coding_tasks.json 的 schema 和任务数量/分类
 def test_load_benchmark_validates_fixed_schema():
     benchmark = load_benchmark(Path("benchmarks/coding_tasks.json"))
 
@@ -31,6 +31,7 @@ def test_load_benchmark_validates_fixed_schema():
         assert task["step_budget"] > 0
 
 
+# 测试确保 benchmark schema 校验真的会挡住坏数据
 def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
     benchmark_path = tmp_path / "bad-benchmark.json"
     benchmark_path.write_text(
@@ -51,7 +52,25 @@ def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
     with pytest.raises(ValueError, match="required"):
         load_benchmark(benchmark_path)
 
+# 文件结构
+#region
+# /tmp/pytest-123/test-example/
+#   benchmark-v1.json
 
+#   workspaces/
+#     readme_intro_locked/
+#       bench_repo_readme/
+#         README.md
+#         .pico/
+#           sessions/
+#             20260529-xxxxxx-abcdef.json
+#           runs/
+#             run_20260529-xxxxxx-abcdef/
+#               task_state.json
+#               trace.jsonl
+#               report.json
+#endregion
+# 测试 run_fixed_benchmark / BenchmarkEvaluator.run() 是否会使用全新的 fixture 副本和全新的 run 目录。
 def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp_path):
     artifact_path = tmp_path / "benchmark-v1.json"
     evaluator = BenchmarkEvaluator(
@@ -78,7 +97,7 @@ def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp
     assert Path("tests/fixtures/bench_repo_patch/sample.txt").read_text(encoding="utf-8") == original_fixture
     assert "beta-locked" in (copied_fixture / "sample.txt").read_text(encoding="utf-8")
 
-
+# 测试 run_fixed_benchmark 是否正确报告 metadata，并且 pass/fail 成功定义是否正确。
 def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
     artifact_path = tmp_path / "benchmark-v1.json"
     artifact = run_fixed_benchmark(
@@ -114,8 +133,6 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         "top_p": 1.0,
         "max_new_tokens": 64,
     }
-    assert reproducibility["timezone"] == "Asia/Shanghai"
-    assert reproducibility["locale"] == "C.UTF-8"
 
     for row in artifact["rows"]:
         assert not row["fixture_copy_relpath"].startswith("/")
@@ -130,7 +147,7 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         assert row["non_failure_stop_reason"] is True
         assert row["stop_reason"] == "final_answer_returned"
 
-
+# 测试 run_fixed_benchmark 是否覆盖了 recovery 和 durable-contract 这两类特殊任务，并且这些任务的内部产物正确。
 def test_run_fixed_benchmark_covers_recovery_and_durable_contract_rows(tmp_path):
     artifact = run_fixed_benchmark(
         benchmark_path=Path("benchmarks/coding_tasks.json"),

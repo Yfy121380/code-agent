@@ -4,6 +4,14 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 不同 provider 在 HTTP 接口、响应结构、是否支持 prompt cache 上都有差异，
 这些差异都在这里被抹平成统一的 complete() 接口。
 """
+"""
+provider    client	                        endpoint	    prompt字段	                响应文本
+
+ollama	    OllamaModelClient	            /api/generate	prompt		                data["response"]
+openai	    OpenAICompatibleModelClient	    /v1/responses	input[].content[].text	    output_text / output[].content[].text / choices[].message.content
+anthropic	AnthropicCompatibleModelClient	/v1/messages	messages[].content[].text	content[].text
+deepseek	AnthropicCompatibleModelClient	/v1/messages	messages[].content[].text	content[].text
+"""
 
 import json
 import time
@@ -87,7 +95,12 @@ def _normalize_versioned_base_url(base_url):
         base += "/v1"
     return base
 
+# 兼容几类 OpenAI 风格响应格式：
 
+# Responses API 的简化字段：output_text
+# Responses API 的标准字段：output[].content[].text
+# Chat Completions API 的字段：choices[0].message.content
+# 多模态/新版格式里 message.content 是 list 的情况
 def _extract_openai_text(data):
     if data.get("output_text"):
         return data["output_text"]
@@ -271,7 +284,7 @@ class OpenAICompatibleModelClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
-        # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
+        # runtime 传入的是“稳定前缀prefix”的签名，而不是整段 prompt 的签名。
         # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key

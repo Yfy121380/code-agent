@@ -141,6 +141,7 @@ class DurableMemoryStore:
                 return subject or None
         return None
 
+    # 关键词匹配提取所有长期记忆中最匹配的三个notes，优先级 tag是否命中 -> 关键词重叠数量 -> 时间新旧
     def retrieval_candidates(self, query, limit=3):
         query_tokens = _tokenize(query)
         ranked = []
@@ -158,6 +159,7 @@ class DurableMemoryStore:
         ranked.sort(key=lambda item: item[0], reverse=True)
         return [note for _, note in ranked[:limit]]
 
+    # 重写整个MEMORY.md
     def _write_index(self, topics):
         self.root.mkdir(parents=True, exist_ok=True)
         self.topics_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +170,7 @@ class DurableMemoryStore:
             lines.append(f"  - tags: {', '.join(topic['tags'])}")
         self.index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
+    # 重写单个 topic 文件
     def _write_topic(self, topic, notes):
         self.topics_dir.mkdir(parents=True, exist_ok=True)
         meta = DURABLE_TOPIC_DEFAULTS[topic]
@@ -185,6 +188,7 @@ class DurableMemoryStore:
             lines.append(f"- {note}")
         (self.topics_dir / f"{topic}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
+    # 将会话结果晋升为长期记忆
     def promote(self, promotions):
         if not promotions:
             return [], []
@@ -330,15 +334,49 @@ def _normalize_note(note, index):
         "kind": kind,
     }
 
+# 规范化层的作用，是把“磁盘里可能长得不太一样的旧状态”
+# 统一整理成当前 runtime 可直接使用的紧凑结构。
+# 规范化后的state结构如下：
+#region
+# {
+#     "working": {
+#         "task_summary": "...",
+#         "recent_files": ["..."]
+#     },
+#     "episodic_notes": [
+#         {
+#             "text": "...",
+#             "tags": [...],
+#             "source": "...",
+#             "created_at": "...",
+#             "note_index": 0,
+#             "kind": "episodic"
+#         }
+#     ],
+#     "file_summaries": {
+#         "path": {
+#             "summary": "...",
+#             "created_at": "...",
+#             "freshness": "sha256 or None"
+#         }
+#     },
+#     "next_note_index": 1,
+
+#     "task": "...",
+#     "files": [...],
+#     "notes": [...],
+#     "durable_topics": [...]
+# }
+#endregion
 
 def normalize_memory_state(state, workspace_root=None):
+    # 1、处理空值
     if state is None:
         state = default_memory_state()
     elif not isinstance(state, dict):
         raise TypeError("memory state must be a mapping")
 
-    # 规范化层的作用，是把“磁盘里可能长得不太一样的旧状态”
-    # 统一整理成当前 runtime 可直接使用的紧凑结构。
+    # 2、规范化working字段
     working = state.get("working")
     if not isinstance(working, dict):
         working = {}
@@ -353,7 +391,7 @@ def normalize_memory_state(state, workspace_root=None):
         ]
     )[-WORKING_FILE_LIMIT:]
     state["working"] = working
-
+    # 3、兼容旧字段 task、files、notes
     if not str(working["task_summary"]).strip() and state.get("task"):
         working["task_summary"] = clip(str(state.get("task", "")).strip(), 300)
     if not working["recent_files"] and state.get("files"):
@@ -384,7 +422,7 @@ def normalize_memory_state(state, workspace_root=None):
         episodic_notes = normalized_notes
     episodic_notes = episodic_notes[-EPISODIC_NOTE_LIMIT:]
     state["episodic_notes"] = episodic_notes
-
+    # 4、规范化file_summaries
     file_summaries = state.get("file_summaries")
     if not isinstance(file_summaries, dict):
         file_summaries = {}
@@ -442,7 +480,7 @@ def remember_file(state, path, workspace_root=None):
     state["files"] = list(state["working"]["recent_files"])
     return state
 
-
+# 添加一条短笔记
 def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic"):
     state = normalize_memory_state(state, workspace_root)
     text = clip(str(text).strip(), 500)
@@ -467,6 +505,8 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
     state["episodic_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
     state["notes"] = [item["text"] for item in state["episodic_notes"]]
     return state
+
+# 保存文件短摘要，读取文件后会自动保存
 def set_file_summary(state, path, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
@@ -480,7 +520,7 @@ def set_file_summary(state, path, summary, workspace_root=None):
     }
     return state
 
-
+# 删除文件摘要，在 write_file 或者 patch_file 之后调用。
 def invalidate_file_summary(state, path, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
@@ -489,7 +529,7 @@ def invalidate_file_summary(state, path, workspace_root=None):
     state["file_summaries"].pop(path, None)
     return state
 
-
+# 扫描文件摘要，并删除已经过期的摘要
 def invalidate_stale_file_summaries(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     invalidated = []
@@ -632,24 +672,30 @@ class LayeredMemory:
     def set_file_summary(self, path, summary):
         self.state = set_file_summary(self.state, path, summary, self.workspace_root)
         return self
-
+    
+    # 删除文件摘要，在 write_file 或者 patch_file 之后调用。
     def invalidate_file_summary(self, path):
         self.state = invalidate_file_summary(self.state, path, self.workspace_root)
         return self
-
+    
+    # 扫描文件摘要，并删除已经过期的摘要
     def invalidate_stale_file_summaries(self):
         self.state, invalidated = invalidate_stale_file_summaries(self.state, self.workspace_root)
         return invalidated
 
+    # 按照关键词从session notes 和 长期记忆 中检索记忆(用于上下文的记忆检索)，优先级 tag命中 -> 关键词重叠数 -> 创建时间
     def retrieval_candidates(self, query, limit=3):
         return retrieval_candidates(self.state, query, limit=limit, workspace_root=self.workspace_root)
 
+    # 将检索结果渲染成文本（仅作调试时展示用）
     def retrieval_view(self, query, limit=3):
         return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
 
+    # 展示 memory 状态，不会展开所有的 episodic_notes, 只显示数量
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)
 
+    # 晋升长期记忆
     def promote_durable(self, promotions):
         if self.durable_store is None:
             return [], []

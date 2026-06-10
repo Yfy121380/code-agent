@@ -56,6 +56,38 @@ class SectionRender:
     def rendered_chars(self):
         return len(self.rendered)
 
+# ContextManager 功能总结
+#region
+# 1. 组装最终 prompt
+#    prefix + memory + relevant_memory + history + current_request
+
+# 2. 控制 prompt 大小
+#    默认总预算 12000 字符
+
+# 3. 按 section 分配预算
+#    prefix/memory/relevant_memory/history 各有预算
+
+# 4. 超预算时按顺序压缩
+#    relevant_memory -> history -> memory -> prefix
+
+# 5. 永远保留当前用户请求
+#    current_request 不参与裁剪
+
+# 6. 检索相关记忆
+#    从 LayeredMemory 取 top 3 relevant notes
+
+# 7. 渲染 relevant memory
+#    多条 note 平分预算，避免单条挤占
+
+# 8. 压缩历史
+#    最近 6 条优先保留
+#    旧 read_file 复用 file summary
+#    旧重复 read_file 折叠
+#    旧 shell 输出压成一行摘要
+
+# 9. 生成 prompt metadata
+#    记录每块 raw/rendered/budget、压缩日志、召回记忆、历史压缩指标
+#endregion
 
 class ContextManager:
     def __init__(
@@ -313,6 +345,9 @@ class ContextManager:
             )
 
         # 优先保留最近的历史，因为下一步决策通常最依赖刚刚发生的工具结果。
+        # 最近上下文优先
+        # 旧上下文能摘要就摘要
+        # 塞不下的旧上下文可以丢
         recent_window = 6
         recent_start = max(0, len(history) - recent_window)
         history_entries, history_details = self._compressed_history_entries(history, recent_start)

@@ -25,7 +25,7 @@ def build_agent(tmp_path, outputs, **kwargs):
         **kwargs,
     )
 
-
+# 路径逃逸拒绝
 def test_workspace_escape_is_rejected(tmp_path):
     (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
@@ -34,7 +34,7 @@ def test_workspace_escape_is_rejected(tmp_path):
 
     assert "path escapes workspace" in result
 
-
+# 符号链接逃逸拒绝
 def test_symlink_path_traversal_is_rejected(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
@@ -45,7 +45,7 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
 
     assert "path escapes workspace" in result
 
-
+# 危险工具审批拒绝
 def test_risky_tool_deny_behavior(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
 
@@ -53,7 +53,13 @@ def test_risky_tool_deny_behavior(tmp_path):
 
     assert result == "error: approval denied for run_shell"
 
-
+"""
+secret来源
+命令行 --secret-env-name
+默认根据环境中敏感名称推断
+.env 中的 provider key
+MINI_CODING_AGENT_SECRET_ENV_NAMES 配置
+"""
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
     class DummyModelClient:
         def __init__(self, *args, **kwargs):
@@ -142,7 +148,7 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
         agent = mini_cli.build_agent(args)
         assert agent.secret_env_summary()["secret_env_names"] == ["MCA_CUSTOM_SECRET"]
 
-
+# run_shell只传allow_list，读不到MCA_ALLOWLIST_SECRET
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     secret = "shh-allowlist-secret"
     agent = build_agent(tmp_path, [], approval_policy="auto")
@@ -177,7 +183,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
 
-
+# delegate 超过 max_depth 会被拒绝
 def test_delegate_depth_limit_is_enforced(tmp_path):
     agent = build_agent(tmp_path, [], depth=1, max_depth=1)
 
@@ -188,7 +194,7 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
     else:
         raise AssertionError("delegate depth validation did not fail")
 
-
+# delegate 创建的 child agent 是 read_only
 def test_delegate_child_is_read_only(tmp_path):
     target = tmp_path / "child-was-not-allowed.txt"
     agent = build_agent(
@@ -209,7 +215,7 @@ def test_delegate_child_is_read_only(tmp_path):
     assert tool_events[0]["name"] == "delegate"
     assert "delegate_result" in tool_events[0]["content"]
 
-
+# 构造包含 secret 值的 payload，然后写 trace 和 report。
 def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
     github_pat = "ghp_configured_secret_123"
     gh_pat = "ghp_configured_secret_456"

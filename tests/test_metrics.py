@@ -68,7 +68,10 @@ def test_run_memory_ablation_v2_writes_expected_artifact(tmp_path):
     assert artifact["artifact_type"] == "memory-ablation-v2"
     assert artifact["task_count"] == 12
     assert set(artifact["variants"]) == {"memory_on", "memory_off", "memory_irrelevant"}
-    assert "memory_hit_rate" in artifact["variants"]["memory_on"]
+    assert artifact["variants"]["memory_on"]["repeated_reads"] == 3
+    assert artifact["variants"]["memory_off"]["repeated_reads"] == 12
+    assert artifact["variants"]["memory_irrelevant"]["repeated_reads"] == 12
+    assert artifact["variants"]["memory_on"]["memory_hit_rate"] == 0.75
 
 
 def test_run_recovery_ablation_v2_writes_expected_artifact(tmp_path):

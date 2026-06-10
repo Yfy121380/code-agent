@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import textwrap
+from pathlib import Path
 
 from .config import load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
@@ -221,7 +222,10 @@ def build_agent(args):
     # 这里是 CLI 到 runtime 的装配点：
     # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型后端和 session。
     workspace = WorkspaceContext.build(args.cwd)
+    # 读取项目级环境
     load_project_env(workspace.repo_root)
+    # 读取库环境配置(模型url、api key等等)
+    load_project_env(Path(__file__).resolve().parent.parent)
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)

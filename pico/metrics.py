@@ -330,15 +330,33 @@ def run_memory_dependency_experiment(repetitions=3):
 MEMORY_EXPERIMENT_TASKS = [
     {"id": "fact_color", "category": "fact_lookup", "filename": "facts.txt", "fact": "deploy key is red"},
     {"id": "fact_api", "category": "fact_lookup", "filename": "settings.txt", "fact": "api base path is /v1/internal"},
-    {"id": "fact_budget", "category": "fact_lookup", "filename": "limits.txt", "fact": "default step budget is 6"},
+    {
+        "id": "fact_budget",
+        "category": "fact_lookup",
+        "filename": "limits.txt",
+        "fact": "default step budget is 6",
+        "summary_covered": False,
+    },
     {"id": "fact_timeout", "category": "fact_lookup", "filename": "runtime.txt", "fact": "timeout ceiling is 120 seconds"},
     {"id": "edit_intro", "category": "edit_dependency", "filename": "README.md", "fact": "first bullet is the locked intro line"},
     {"id": "edit_token", "category": "edit_dependency", "filename": "sample.txt", "fact": "second token is placeholder"},
-    {"id": "edit_field", "category": "edit_dependency", "filename": "config.txt", "fact": "fixed field name is benchmark_schema"},
+    {
+        "id": "edit_field",
+        "category": "edit_dependency",
+        "filename": "config.txt",
+        "fact": "fixed field name is benchmark_schema",
+        "summary_covered": False,
+    },
     {"id": "edit_line", "category": "edit_dependency", "filename": "notes.txt", "fact": "locked marker is on line three"},
     {"id": "history_file", "category": "history_reference", "filename": "history.txt", "fact": "deploy fact came from facts.txt"},
     {"id": "history_line", "category": "history_reference", "filename": "history.txt", "fact": "benchmark note came from line two"},
-    {"id": "history_token", "category": "history_reference", "filename": "history.txt", "fact": "placeholder token was beta"},
+    {
+        "id": "history_token",
+        "category": "history_reference",
+        "filename": "history.txt",
+        "fact": "placeholder token was beta",
+        "summary_covered": False,
+    },
     {"id": "history_tool", "category": "history_reference", "filename": "history.txt", "fact": "inspection tool was read_file"},
 ]
 
@@ -346,6 +364,16 @@ MEMORY_EXPERIMENT_TASKS = [
 def _write_memory_task_files(workspace_root, task):
     filename = task["filename"]
     payload = task["fact"]
+    if task.get("summary_covered", True) is False:
+        payload = "\n".join(
+            [
+                "overview: this benchmark file intentionally starts with filler",
+                "details: the useful fact is below the short summary window",
+                "notes: working memory should not store the whole file",
+                "padding: " + ("context " * 40).strip(),
+                payload,
+            ]
+        )
     (workspace_root / filename).write_text(payload + "\n", encoding="utf-8")
 
 
@@ -435,6 +463,11 @@ def run_large_scale_memory_experiment(repetitions=5):
     }
 
 
+"""
+history short/medium/long：历史消息数量不同
+note low/high：记忆笔记数量不同
+request short/long：当前请求长度不同
+"""
 def run_context_stress_matrix(repetitions=5):
     repetitions = int(repetitions)
     history_levels = [("short", 4), ("medium", 12), ("long", 24)]
@@ -473,7 +506,9 @@ def run_context_stress_matrix(repetitions=5):
                                 }
                             )
                         metrics = measure_feature_ablation_metrics(agent, request_text)
+                        # 默认开启上下文压缩，记录chars
                         full_chars = metrics["full"]["prompt_chars"]
+                        # 关闭上下文压缩时的prompt长度
                         raw_chars = metrics["no_context_reduction"]["prompt_chars"]
                         ratio = _safe_ratio(raw_chars - full_chars, raw_chars)
                         per_run.append(
@@ -1595,6 +1630,7 @@ def run_recovery_ablation_v2(artifact_path=DEFAULT_RECOVERY_ABLATION_V2_PATH, re
     for task in RECOVERY_ABLATION_TASKS:
         for _ in range(repetitions):
             for variant in variants:
+                # 不仅需要提示词里包含正确结果，也需要report.json和trace.json中包含freshness_mismatch、runtime_identity_mismatch等信息
                 variants[variant].append(_run_recovery_task_variant(task, variant))
     artifact = {
         "schema_version": METRICS_SCHEMA_VERSION,
