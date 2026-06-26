@@ -224,8 +224,8 @@ def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     # 读取项目级环境
     load_project_env(workspace.repo_root)
-    # 读取库环境配置(模型url、api key等等)
-    load_project_env(Path(__file__).resolve().parent.parent)
+    # 读取工具仓库环境配置作为兜底，不覆盖目标项目或父进程已设置的变量。
+    load_project_env(Path(__file__).resolve().parent.parent, override=False)
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)
