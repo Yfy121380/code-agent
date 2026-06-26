@@ -55,6 +55,28 @@ def test_run_store_writes_report_json(tmp_path):
     assert report["task_state"]["final_answer"] == "Done."
 
 
+def test_run_store_preserves_unicode_text_on_disk(tmp_path):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    state = TaskState.create(run_id="run_unicode", task_id="task_unicode", user_request="检查中文")
+    store.start_run(state)
+    state.finish_success("完成。")
+
+    store.write_task_state(state)
+    store.append_trace(state, {"event": "run_finished", "final_answer": "完成。"})
+    store.write_report(state, {"task_state": state.to_dict(), "final_answer": "完成。"})
+
+    task_state_text = store.task_state_path(state).read_text(encoding="utf-8")
+    trace_text = store.trace_path(state).read_text(encoding="utf-8")
+    report_text = store.report_path(state).read_text(encoding="utf-8")
+
+    assert "检查中文" in task_state_text
+    assert "完成。" in trace_text
+    assert "完成。" in report_text
+    assert "\\u" not in task_state_text
+    assert "\\u" not in trace_text
+    assert "\\u" not in report_text
+
+
 def test_run_store_tolerates_missing_final_report(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
     state = TaskState.create(run_id="run_004", task_id="task_004", user_request="Crash before finalize.")

@@ -31,12 +31,6 @@ DEFAULT_FEATURE_FLAGS = {
     "context_reduction": True,
     "prompt_cache": True,
 }
-CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
-CHECKPOINT_NONE_STATUS = "no-checkpoint"
-CHECKPOINT_FULL_VALID_STATUS = "full-valid"
-CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"
-CHECKPOINT_WORKSPACE_MISMATCH_STATUS = "workspace-mismatch"
-CHECKPOINT_SCHEMA_MISMATCH_STATUS = "schema-mismatch"
 DURABLE_MEMORY_INTENT_PATTERN = re.compile(r"(?i)\b(capture|remember|save|store|persist|note)\b")
 DURABLE_MEMORY_INTENT_ZH_PATTERN = re.compile(r"(记住|保存|记录|沉淀|长期记忆|持久记忆)")
 DURABLE_MEMORY_LINE_PATTERNS = (
@@ -73,7 +67,7 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
 
     def load(self, session_id):
@@ -145,7 +139,7 @@ class Pico:
         self.prefix = self.prefix_state.text
         # 上下文管理器，组装上下文，进行上下文压缩
         self.context_manager = ContextManager(self)
-        self.resume_state = self.evaluate_resume_state()
+        self.invalidate_stale_memory()
         # 保存当前session状态文件
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
@@ -174,138 +168,14 @@ class Pico:
     def _ensure_session_shape(self):
         self.session.setdefault("history", [])
         self.session.setdefault("memory", memorylib.default_memory_state())
-        checkpoints = self.session.setdefault("checkpoints", {})
-        if not isinstance(checkpoints, dict):
-            checkpoints = {}
-            self.session["checkpoints"] = checkpoints
-        checkpoints.setdefault("current_id", "")
-        checkpoints.setdefault("items", {})
-        runtime_identity = self.session.setdefault("runtime_identity", {})
-        if not isinstance(runtime_identity, dict):
-            self.session["runtime_identity"] = {}
-        resume_state = self.session.setdefault("resume_state", {})
-        if not isinstance(resume_state, dict):
-            self.session["resume_state"] = {}
-
-    def current_runtime_identity(self):
-        return {
-            "session_id": self.session.get("id", ""),
-            "cwd": str(self.root),
-            "model": str(getattr(self.model_client, "model", "")),
-            "model_client": self.model_client.__class__.__name__,
-            "approval_policy": self.approval_policy,
-            "read_only": bool(self.read_only),
-            "max_steps": int(self.max_steps),
-            "max_new_tokens": int(self.max_new_tokens),
-            "feature_flags": dict(self.feature_flags),
-            "shell_env_allowlist": list(self.shell_env_allowlist),
-            "workspace_fingerprint": getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", self.workspace.fingerprint()),
-            "tool_signature": self.tool_signature(),
-        }
-
-    def checkpoint_state(self):
-        self._ensure_session_shape()
-        return self.session["checkpoints"]
-
-    def current_checkpoint(self):
-        state = self.checkpoint_state()
-        checkpoint_id = str(state.get("current_id", "")).strip()
-        if not checkpoint_id:
-            return None
-        return state.get("items", {}).get(checkpoint_id)
+        self.session.pop("checkpoints", None)
+        self.session.pop("resume_state", None)
+        self.session.pop("runtime_identity", None)
 
     def invalidate_stale_memory(self):
         invalidated = self.memory.invalidate_stale_file_summaries()
         self.session["memory"] = self.memory.to_dict()
         return invalidated
-
-    def evaluate_resume_state(self):
-        previous_resume_state = dict(self.session.get("resume_state", {}) or {})
-        # 清理过期(被修改过)的文件摘要
-        invalidated = self.invalidate_stale_memory()
-        checkpoint = self.current_checkpoint()
-        status = CHECKPOINT_NONE_STATUS
-        stale_paths = list(invalidated)
-        mismatch_fields = []
-        if checkpoint:
-            if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-                status = CHECKPOINT_SCHEMA_MISMATCH_STATUS
-            else:
-                for item in checkpoint.get("key_files", []):
-                    path = str(item.get("path", "")).strip()
-                    if not path:
-                        continue
-                    expected = item.get("freshness")
-                    current = memorylib.file_freshness(path, self.root)
-                    if expected != current and path not in stale_paths:
-                        stale_paths.append(path)
-                saved_identity = dict(checkpoint.get("runtime_identity", {}) or self.session.get("runtime_identity", {}) or {})
-                current_identity = self.current_runtime_identity()
-                # 检查运行环境、仓库上下文是否一致
-                identity_keys = (
-                    "cwd",
-                    "model",
-                    "model_client",
-                    "approval_policy",
-                    "read_only",
-                    "max_steps",
-                    "max_new_tokens",
-                    "feature_flags",
-                    "shell_env_allowlist",
-                    "workspace_fingerprint",
-                    "tool_signature",
-                )
-                for key in identity_keys:
-                    if key not in saved_identity:
-                        continue
-                    if saved_identity.get(key) != current_identity.get(key):
-                        mismatch_fields.append(key)
-                mismatch_fields.sort()
-                if stale_paths:
-                    status = CHECKPOINT_PARTIAL_STALE_STATUS
-                elif mismatch_fields:
-                    status = CHECKPOINT_WORKSPACE_MISMATCH_STATUS
-                else:
-                    status = CHECKPOINT_FULL_VALID_STATUS
-
-        resume_state = {
-            "status": status,
-            "stale_paths": stale_paths,
-            "runtime_identity_mismatch_fields": mismatch_fields,
-            "stale_summary_invalidations": max(
-                len(invalidated),
-                int(previous_resume_state.get("stale_summary_invalidations", 0))
-                if status == CHECKPOINT_PARTIAL_STALE_STATUS
-                else 0,
-            ),
-        }
-        self.session["resume_state"] = resume_state
-        self.session["runtime_identity"] = self.current_runtime_identity()
-        return resume_state
-
-    def render_checkpoint_text(self):
-        checkpoint = self.current_checkpoint()
-        if not checkpoint:
-            return ""
-        lines = [
-            "Task checkpoint:",
-            f"- Resume status: {self.resume_state.get('status', CHECKPOINT_NONE_STATUS)}",
-            f"- Current goal: {checkpoint.get('current_goal', '-') or '-'}",
-            f"- Current blocker: {checkpoint.get('current_blocker', '-') or '-'}",
-            f"- Next step: {checkpoint.get('next_step', '-') or '-'}",
-        ]
-        key_files = [str(item.get("path", "")).strip() for item in checkpoint.get("key_files", []) if str(item.get("path", "")).strip()]
-        lines.append(f"- Key files: {', '.join(key_files) or '-'}")
-        if checkpoint.get("completed"):
-            lines.append("- Completed: " + " | ".join(str(item) for item in checkpoint.get("completed", [])))
-        if checkpoint.get("excluded"):
-            lines.append("- Excluded: " + " | ".join(str(item) for item in checkpoint.get("excluded", [])))
-        if self.resume_state.get("stale_paths"):
-            lines.append("- Stale paths: " + ", ".join(self.resume_state["stale_paths"]))
-        summary = str(checkpoint.get("summary", "")).strip()
-        if summary:
-            lines.append(f"- Summary: {summary}")
-        return "\n".join(lines)
 
     @staticmethod
     def remember(bucket, item, limit):
@@ -439,7 +309,7 @@ class Pico:
 
             if item["role"] == "tool":
                 limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}")
                 lines.append(clip(item["content"], limit))
             else:
                 limit = 900 if recent else 220
@@ -539,7 +409,7 @@ class Pico:
 
     def _build_prompt_and_metadata(self, user_message):
         refresh = self.refresh_prefix()
-        self.resume_state = self.evaluate_resume_state()
+        self.invalidate_stale_memory()
         prompt, metadata = self.context_manager.build(user_message)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
         # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
@@ -560,10 +430,6 @@ class Pico:
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
                 "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
-                "resume_status": self.resume_state.get("status", CHECKPOINT_NONE_STATUS),
-                "stale_summary_invalidations": int(self.resume_state.get("stale_summary_invalidations", 0)),
-                "stale_paths": list(self.resume_state.get("stale_paths", [])),
-                "runtime_identity_mismatch_fields": list(self.resume_state.get("runtime_identity_mismatch_fields", [])),
             }
         )
         metadata.update(self.detected_secret_env_summary())
@@ -616,54 +482,6 @@ class Pico:
             else:
                 summaries.append(f"modified:{path}")
         return changed_paths, summaries
-
-    def create_checkpoint(self, task_state, user_message, trigger):
-        state = self.checkpoint_state()
-        current = self.current_checkpoint()
-        checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
-        key_files = []
-        freshness = {}
-        for path in self.memory.to_dict()["working"]["recent_files"]:
-            file_freshness = memorylib.file_freshness(path, self.root)
-            freshness[path] = file_freshness
-            key_files.append({"path": path, "freshness": file_freshness})
-
-        """
-        current_goal = user_message
-        current_blocker = task_state.stop_reason 的一部分
-        next_step = task_state.status / stop_reason / last_tool 的规则推断
-        completed = task_state.final_answer
-        """
-        checkpoint = {
-            "checkpoint_id": checkpoint_id,
-            "parent_checkpoint_id": current.get("checkpoint_id", "") if current else "",
-            "schema_version": CHECKPOINT_SCHEMA_VERSION,
-            "created_at": now(),
-            "current_goal": str(user_message),
-            "completed": [task_state.final_answer] if task_state.final_answer else [],
-            "excluded": [],
-            "current_blocker": "" if str(task_state.stop_reason or "") in ("", "final_answer_returned") else str(task_state.stop_reason),
-            "next_step": self.infer_next_step(task_state),
-            "key_files": key_files,
-            "freshness": freshness,
-            "summary": f"{trigger}: {clip(str(user_message), 120)}",
-            "runtime_identity": self.current_runtime_identity(),
-        }
-        state["items"][checkpoint_id] = checkpoint
-        state["current_id"] = checkpoint_id
-        task_state.checkpoint_id = checkpoint_id
-        self.session["runtime_identity"] = checkpoint["runtime_identity"]
-        self.session_path = self.session_store.save(self.session)
-        return checkpoint
-
-    def infer_next_step(self, task_state):
-        if task_state.status == "completed":
-            return "No next step recorded."
-        if task_state.stop_reason == "step_limit_reached":
-            return "Resume from the latest checkpoint and continue the task."
-        if task_state.last_tool:
-            return f"Decide the next action after {task_state.last_tool}."
-        return "Continue the task from the latest checkpoint."
 
     def update_memory_after_tool(self, name, args, result):
         """把少量高价值工具结果沉淀到 working memory。
@@ -731,7 +549,7 @@ class Pico:
             return "empty"
         if REDACTED_VALUE in text or SECRET_SHAPED_TEXT_PATTERN.search(text):
             return "secret_shaped"
-        checkpoint_like_prefixes = (
+        transient_state_prefixes = (
             "current goal",
             "current blocker",
             "next step",
@@ -746,7 +564,7 @@ class Pico:
             "已完成",
             "已排除",
         )
-        if any(lowered.startswith(prefix) for prefix in checkpoint_like_prefixes):
+        if any(lowered.startswith(prefix) for prefix in transient_state_prefixes):
             return "transient_task_state"
         if re.search(r"(?i)\b(stdout|stderr|traceback|exit_code)\b", text) or len(text) > 220:
             return "noisy_output"
@@ -811,7 +629,6 @@ class Pico:
         self.record({"role": "user", "content": user_message, "created_at": now()})
         # 记录当前ask的执行状态，工具和模型调用次数、任务完成情况等
         task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
-        task_state.resume_status = self.resume_state.get("status", CHECKPOINT_NONE_STATUS)
         self.current_task_state = task_state
         self.current_run_dir = self.run_store.start_run(task_state)
         self.emit_trace(
@@ -848,47 +665,6 @@ class Pico:
                     "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
-            # 3. prompt 构造阶段发现恢复风险或上下文压缩时，先创建恢复锚点。
-            if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "freshness_mismatch",
-                    },
-                )
-            elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
-                self.emit_trace(
-                    task_state,
-                    "runtime_identity_mismatch",
-                    {
-                        "fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", [])),
-                    },
-                )
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "workspace_mismatch",
-                    },
-                )
-            if prompt_metadata.get("budget_reductions"):
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="context_reduction")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "context_reduction",
-                    },
-                )
             # 4. 调模型前记录请求事件；支持缓存的后端会收到稳定 prefix 的 cache key。
             self.emit_trace(
                 task_state,
@@ -933,7 +709,7 @@ class Pico:
             )
 
             if kind == "tool":
-                # 6. tool 分支：执行工具，把结果写回 history，再创建下一轮恢复锚点。
+                # 6. tool 分支：执行工具，把结果写回 history。
                 tool_steps += 1
                 name = payload.get("name", "")
                 args = payload.get("args", {})
@@ -961,16 +737,6 @@ class Pico:
                         **dict(self._last_tool_result_metadata or {}),
                     },
                 )
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="tool_executed")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "tool_executed",
-                    },
-                )
                 continue
 
             if kind == "retry":
@@ -985,16 +751,7 @@ class Pico:
                 self.record({"role": "assistant", "content": final, "created_at": now()})
                 task_state.finish_success(final)
                 self.promote_durable_memory(user_message, final)
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="run_finished")
                 self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "run_finished",
-                    },
-                )
                 self.emit_trace(
                     task_state,
                     "run_finished",
@@ -1018,15 +775,6 @@ class Pico:
         self.record({"role": "assistant", "content": final, "created_at": now()})
         self.promote_durable_memory(user_message, final)
         self.run_store.write_task_state(task_state)
-        checkpoint = self.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
-        self.emit_trace(
-            task_state,
-            "checkpoint_created",
-            {
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "trigger": task_state.stop_reason or "run_stopped",
-            },
-        )
         self.emit_trace(
             task_state,
             "run_finished",
@@ -1200,7 +948,7 @@ class Pico:
     def build_report(self, task_state):
         # report 是一次运行的最终摘要；
         # 和 trace 的区别在于，trace 关注过程，report 关注结果与关键指标。
-        # 记录 (1)运行结果, (2)循环次数, (3)checkpointer状态, (4)提示词指标, (5)长期记忆提取
+        # 记录 (1)运行结果, (2)循环次数, (3)提示词指标, (4)长期记忆提取
         return {
             "run_id": task_state.run_id,
             "task_id": task_state.task_id,
@@ -1209,8 +957,6 @@ class Pico:
             "final_answer": task_state.final_answer,
             "tool_steps": task_state.tool_steps,
             "attempts": task_state.attempts,
-            "checkpoint_id": task_state.checkpoint_id,
-            "resume_status": task_state.resume_status,
             "task_state": task_state.to_dict(),
             "prompt_metadata": self.last_prompt_metadata,
             "durable_promotions": list(self.last_durable_promotions),

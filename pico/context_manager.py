@@ -143,11 +143,6 @@ class ContextManager:
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
-        checkpoint_text = ""
-        if hasattr(self.agent, "render_checkpoint_text"):
-            checkpoint_text = str(self.agent.render_checkpoint_text() or "").strip()
-        if checkpoint_text:
-            section_texts["prefix"] = section_texts["prefix"] + "\n\n" + checkpoint_text
         selected_notes = []
         if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
@@ -463,7 +458,7 @@ class ContextManager:
         lines = []
         for item in history:
             if item["role"] == "tool":
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}")
                 lines.append(str(item["content"]))
             else:
                 lines.append(f"[{item['role']}] {item['content']}")
@@ -471,7 +466,7 @@ class ContextManager:
 
     def _render_history_item(self, item, line_limit):
         if item["role"] == "tool":
-            prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
+            prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}"
             content = _tail_clip(item["content"], max(20, line_limit))
             return [prefix, content]
         return [f"[{item['role']}] {_tail_clip(item['content'], line_limit)}"]
