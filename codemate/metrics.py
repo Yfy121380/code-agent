@@ -7,14 +7,14 @@ from pathlib import Path
 from .config import load_project_env, provider_env
 from .evaluator import run_fixed_benchmark
 from .models import AnthropicCompatibleModelClient, FakeModelClient, OpenAICompatibleModelClient
-from .runtime import Pico, SessionStore
+from .runtime import CodeMate, SessionStore
 from .workspace import WorkspaceContext
 
 METRICS_SCHEMA_VERSION = 2
 DEFAULT_HARNESS_REGRESSION_V2_PATH = Path("artifacts/harness-regression-v2.json")
 DEFAULT_CONTEXT_ABLATION_V2_PATH = Path("artifacts/context-ablation-v2.json")
 DEFAULT_MEMORY_ABLATION_V2_PATH = Path("artifacts/memory-ablation-v2.json")
-DEFAULT_CORE_REPORT_PATH = Path("docs/metrics/pico-benchmark-core-report.md")
+DEFAULT_CORE_REPORT_PATH = Path("docs/metrics/codemate-benchmark-core-report.md")
 
 
 def _safe_mean(values):
@@ -188,12 +188,12 @@ def measure_feature_ablation_metrics(agent, user_message):
 
 
 def build_stress_agent_metrics():
-    with tempfile.TemporaryDirectory(prefix="pico-metrics-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="codemate-metrics-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         workspace = WorkspaceContext.build(workspace_root)
-        store = SessionStore(workspace_root / ".pico" / "sessions")
-        agent = Pico(
+        store = SessionStore(workspace_root / ".codemate" / "sessions")
+        agent = CodeMate(
             model_client=FakeModelClient([]),
             workspace=workspace,
             session_store=store,
@@ -254,8 +254,8 @@ class _MemoryExperimentModelClient(FakeModelClient):
 
 def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
-    return Pico(
+    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    return CodeMate(
         model_client=_MemoryExperimentModelClient(expected_fact, filename),
         workspace=workspace,
         session_store=store,
@@ -281,7 +281,7 @@ def _set_irrelevant_memory(agent):
 
 
 def _run_memory_variant(mode):
-    with tempfile.TemporaryDirectory(prefix="pico-memory-experiment-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="codemate-memory-experiment-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         (workspace_root / "facts.txt").write_text("deploy key is red\n", encoding="utf-8")
@@ -406,7 +406,7 @@ def _set_irrelevant_memory_for_task(agent):
 
 
 def _run_memory_task_variant(task, variant):
-    with tempfile.TemporaryDirectory(prefix="pico-memory-large-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="codemate-memory-large-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         _write_memory_task_files(workspace_root, task)
@@ -479,12 +479,12 @@ def run_context_stress_matrix(repetitions=5):
             for request_label, request_text in request_levels:
                 per_run = []
                 for _ in range(repetitions):
-                    with tempfile.TemporaryDirectory(prefix="pico-context-matrix-") as temp_dir:
+                    with tempfile.TemporaryDirectory(prefix="codemate-context-matrix-") as temp_dir:
                         workspace_root = Path(temp_dir)
                         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                         workspace = WorkspaceContext.build(workspace_root)
-                        store = SessionStore(workspace_root / ".pico" / "sessions")
-                        agent = Pico(
+                        store = SessionStore(workspace_root / ".codemate" / "sessions")
+                        agent = CodeMate(
                             model_client=FakeModelClient([]),
                             workspace=workspace,
                             session_store=store,
@@ -555,8 +555,8 @@ def run_context_stress_matrix(repetitions=5):
 
 def _security_agent(workspace_root, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
-    return Pico(
+    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    return CodeMate(
         model_client=FakeModelClient([]),
         workspace=workspace,
         session_store=store,
@@ -664,7 +664,7 @@ def run_security_experiment_suite(repetitions=3):
     tool_error_code_counts = {}
     for scenario_id, runner in SECURITY_SCENARIOS:
         for _ in range(repetitions):
-            with tempfile.TemporaryDirectory(prefix="pico-security-exp-") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix="codemate-security-exp-") as temp_dir:
                 workspace_root = Path(temp_dir)
                 (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                 metadata = runner(workspace_root)
@@ -714,38 +714,38 @@ def _provider_summary_from_artifact(payload):
 def _provider_profile(provider):
     load_project_env(Path.cwd())
     if provider == "gpt":
-        api_key = provider_env("PICO_OPENAI_API_KEY", ("OPENAI_API_KEY",))
+        api_key = provider_env("CODEMATE_OPENAI_API_KEY", ("OPENAI_API_KEY",))
         if not api_key:
-            return {"provider": provider, "status": "blocked", "reason": "PICO_OPENAI_API_KEY or OPENAI_API_KEY missing"}
+            return {"provider": provider, "status": "blocked", "reason": "CODEMATE_OPENAI_API_KEY or OPENAI_API_KEY missing"}
         return {
             "provider": provider,
             "status": "ready",
-            "model": provider_env("PICO_OPENAI_MODEL", ("OPENAI_MODEL",), "gpt-5.4"),
-            "base_url": provider_env("PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), "https://api.openai.com/v1"),
+            "model": provider_env("CODEMATE_OPENAI_MODEL", ("OPENAI_MODEL",), "gpt-5.4"),
+            "base_url": provider_env("CODEMATE_OPENAI_API_BASE", ("OPENAI_API_BASE",), "https://api.openai.com/v1"),
             "api_key": api_key,
         }
     if provider == "deepseek":
-        api_key = provider_env("PICO_DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",))
+        api_key = provider_env("CODEMATE_DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",))
         if not api_key:
-            return {"provider": provider, "status": "blocked", "reason": "PICO_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY missing"}
+            return {"provider": provider, "status": "blocked", "reason": "CODEMATE_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY missing"}
         return {
             "provider": provider,
             "status": "ready",
-            "model": provider_env("PICO_DEEPSEEK_MODEL", ("DEEPSEEK_MODEL",), "deepseek-v4-pro"),
-            "base_url": provider_env("PICO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), "https://api.deepseek.com/anthropic"),
+            "model": provider_env("CODEMATE_DEEPSEEK_MODEL", ("DEEPSEEK_MODEL",), "deepseek-v4-pro"),
+            "base_url": provider_env("CODEMATE_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), "https://api.deepseek.com/anthropic"),
             "api_key": api_key,
         }
     api_key = provider_env(
-        "PICO_ANTHROPIC_API_KEY",
-        ("ANTHROPIC_API_KEY", "PICO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "PICO_OPENAI_API_KEY", "OPENAI_API_KEY"),
+        "CODEMATE_ANTHROPIC_API_KEY",
+        ("ANTHROPIC_API_KEY", "CODEMATE_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "CODEMATE_OPENAI_API_KEY", "OPENAI_API_KEY"),
     )
     if not api_key:
-        return {"provider": "claude", "status": "blocked", "reason": "PICO_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY missing"}
+        return {"provider": "claude", "status": "blocked", "reason": "CODEMATE_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY missing"}
     return {
         "provider": "claude",
         "status": "ready",
-        "model": provider_env("PICO_ANTHROPIC_MODEL", ("ANTHROPIC_MODEL",), "claude-sonnet-4-6"),
-        "base_url": provider_env("PICO_ANTHROPIC_API_BASE", ("ANTHROPIC_API_BASE",), "https://www.right.codes/claude/v1"),
+        "model": provider_env("CODEMATE_ANTHROPIC_MODEL", ("ANTHROPIC_MODEL",), "claude-sonnet-4-6"),
+        "base_url": provider_env("CODEMATE_ANTHROPIC_API_BASE", ("ANTHROPIC_API_BASE",), "https://www.right.codes/claude/v1"),
         "api_key": api_key,
     }
 
@@ -870,8 +870,8 @@ def _truncate_read_history(agent):
 
 def _build_real_agent(workspace_root, provider, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".pico" / "sessions")
-    return Pico(
+    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    return CodeMate(
         model_client=_make_provider_client(provider),
         workspace=workspace,
         session_store=store,
@@ -889,7 +889,7 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
         category_counts[task["category"]] = category_counts.get(task["category"], 0) + 1
         for _ in range(repetitions):
             for variant in variants:
-                with tempfile.TemporaryDirectory(prefix="pico-real-memory-") as temp_dir:
+                with tempfile.TemporaryDirectory(prefix="codemate-real-memory-") as temp_dir:
                     workspace_root = Path(temp_dir)
                     (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                     _write_memory_task_files(workspace_root, task)
@@ -963,7 +963,7 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                 per_run = []
                 for _ in range(repetitions):
                     for variant_name, updates in (("full", {}), ("no_context_reduction", {"context_reduction": False})):
-                        with tempfile.TemporaryDirectory(prefix="pico-real-context-") as temp_dir:
+                        with tempfile.TemporaryDirectory(prefix="codemate-real-context-") as temp_dir:
                             workspace_root = Path(temp_dir)
                             (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                             agent = _build_real_agent(workspace_root, provider)
@@ -1060,7 +1060,7 @@ def _security_result_row(scenario_id, provider, metadata):
 
 
 def _run_real_repeated_call_scenario(provider):
-    with tempfile.TemporaryDirectory(prefix="pico-real-security-repeat-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="codemate-real-security-repeat-") as temp_dir:
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         agent = _build_real_agent(workspace_root, provider)
@@ -1080,7 +1080,7 @@ def run_real_security_experiment_suite(provider="gpt", repetitions=1):
     for _ in range(repetitions):
         rows.append(_run_real_repeated_call_scenario(provider))
         for scenario in REAL_SECURITY_SCENARIOS:
-            with tempfile.TemporaryDirectory(prefix="pico-real-security-") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix="codemate-real-security-") as temp_dir:
                 workspace_root = Path(temp_dir)
                 _setup_real_security_workspace(workspace_root, scenario["id"])
                 agent = _build_real_agent(
@@ -1185,7 +1185,7 @@ def render_resume_metrics_markdown(metrics):
     security = metrics["security_experiment"]
     provider_payload = metrics.get("provider_experiments", {})
     lines = [
-        "# Pico Resume Metrics",
+        "# CodeMate Resume Metrics",
         "",
         "## Key Numbers",
         f"- Experiment mode: {metrics.get('experiment_mode', 'synthetic')}",
@@ -1239,7 +1239,7 @@ def render_large_scale_experiment_report(metrics):
         or "unknown"
     )
     lines = [
-        "# Pico Large-Scale Experiment Report",
+        "# CodeMate Large-Scale Experiment Report",
         "",
         "## Executive Summary",
         (
@@ -1341,7 +1341,7 @@ def write_benchmark_core_report(
     memory = json.loads(Path(memory_artifact_path).read_text(encoding="utf-8"))
 
     lines = [
-        "# Pico Benchmark Core Report",
+        "# CodeMate Benchmark Core Report",
         "",
         "这轮 benchmark 只收缩到 Harness regression、context ablation 和 working memory ablation 三层，不把 provider、run aggregation 或 durable memory 的别的结论揉进来。",
         "",

@@ -4,7 +4,7 @@ from collections import Counter
 
 import pytest
 
-from pico.evaluator import (
+from codemate.evaluator import (
     BenchmarkEvaluator,
     load_benchmark,
     run_harness_regression_v2,
@@ -60,7 +60,7 @@ def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
 #     readme_intro_locked/
 #       bench_repo_readme/
 #         README.md
-#         .pico/
+#         .codemate/
 #           sessions/
 #             20260529-xxxxxx-abcdef.json
 #           runs/
