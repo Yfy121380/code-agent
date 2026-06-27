@@ -66,6 +66,23 @@ def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
 
     assert "sample.txt" not in memory.to_dict()["file_summaries"]
 
+def test_has_fresh_file_summary_requires_recent_file_and_matching_freshness(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("alpha\n", encoding="utf-8")
+    memory = LayeredMemory(workspace_root=tmp_path)
+
+    memory.set_file_summary("sample.txt", "sample.txt: alpha")
+
+    assert not memory.has_fresh_file_summary("sample.txt")
+
+    memory.remember_file("sample.txt")
+
+    assert memory.has_fresh_file_summary("sample.txt")
+
+    file_path.write_text("beta\n", encoding="utf-8")
+
+    assert not memory.has_fresh_file_summary("sample.txt")
+
 
 def test_process_notes_keep_kind_and_latest_duplicate_wins():
     memory = LayeredMemory()

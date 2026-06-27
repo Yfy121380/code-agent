@@ -3,13 +3,17 @@
 可以把这个文件看成 agent 的能力白名单：模型能申请哪些动作、这些动作
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
-
+# 现在的工具系统不行，不能只在prompt里面添加工具说明和工具示例，需要将tool schema接到模型的tools当中才行，这样的话要对整个项目进行大改，包括提示词，要构建各个工具的schema，针对模型返回值的解析也需要改变，需要好好地设计一下
 import shutil
 import subprocess
 import textwrap
+import re
 from functools import partial
 
 from .workspace import IGNORED_PATH_NAMES, clip
+
+GREP_MODES = {"files_with_matches", "count", "content"}
+MAX_GREP_CONTEXT_LINES = 20
 
 BASE_TOOL_SPECS = {
     "list_files": {
@@ -22,10 +26,24 @@ BASE_TOOL_SPECS = {
         "risky": False,
         "description": "Read a UTF-8 file by line range.",
     },
-    "search": {
-        "schema": {"pattern": "str", "path": "str='.'"},
+    "grep": {
+        "schema": {
+            "pattern": "str",
+            "path": "str='.'",
+            "mode": "str='content'",
+            "after": "int=0",
+            "before": "int=0",
+            "context": "int=0",
+        },
         "risky": False,
-        "description": "Search the workspace with rg or a simple fallback.",
+        "description": (
+            "Search files with rg-style output. mode controls output shape: "
+            "files_with_matches returns only matching file paths and is best for locating relevant files; "
+            "count returns per-file match counts plus total_matches and is best for estimating match/change scale; "
+            "content returns matching lines with file paths and line numbers and is best for reading concrete matches. "
+            "In content mode, before/after/context control surrounding lines like rg -B/-A/-C; "
+            "explicit before/after override context for that side."
+        ),
     },
     "run_shell": {
         "schema": {"command": "str", "timeout": "int=20"},
@@ -53,7 +71,7 @@ DELEGATE_TOOL_SPEC = {
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
     "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-    "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
+    "grep": '<tool>{"name":"grep","args":{"pattern":"binary_search","path":".","mode":"content","context":2}}</tool>',
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
@@ -98,11 +116,27 @@ def validate_tool(agent, name, args):
             raise ValueError("invalid line range")
         return
 
-    if name == "search":
+    if name == "grep":
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
-        agent.path(args.get("path", "."))
+        path = agent.path(args.get("path", "."))
+        if not path.exists():
+            raise ValueError("path does not exist")
+        if not (path.is_file() or path.is_dir()):
+            raise ValueError("path must be a file or directory")
+        mode = str(args.get("mode", "content"))
+        if mode not in GREP_MODES:
+            raise ValueError("mode must be one of: files_with_matches, count, content")
+        before = int(args.get("before", 0))
+        after = int(args.get("after", 0))
+        context = int(args.get("context", 0))
+        if before < 0 or after < 0 or context < 0:
+            raise ValueError("before, after, and context must be non-negative")
+        if before > MAX_GREP_CONTEXT_LINES or after > MAX_GREP_CONTEXT_LINES or context > MAX_GREP_CONTEXT_LINES:
+            raise ValueError(f"before, after, and context must be <= {MAX_GREP_CONTEXT_LINES}")
+        if mode != "content" and (before or after or context):
+            raise ValueError("before/after/context are only valid when mode='content'")
         return
 
     if name == "run_shell":
@@ -174,34 +208,142 @@ def tool_read_file(agent, args):
     return f"# {path.relative_to(agent.root)}\n{body}"
 
 
-def tool_search(agent, args):
+def _grep_context_args(args):
+    context = int(args.get("context", 0))
+    before = int(args["before"]) if "before" in args else context
+    after = int(args["after"]) if "after" in args else context
+    return before, after
+
+
+def _grep_files(agent, path):
+    if path.is_file():
+        return [path]
+    return [
+        item for item in path.rglob("*")
+        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts)
+    ]
+
+
+def _format_grep_count_output(stdout):
+    counts = []
+    total = 0
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        file_path, separator, raw_count = text.rpartition(":")
+        if not separator:
+            continue
+        try:
+            count = int(raw_count)
+        except ValueError:
+            continue
+        counts.append((file_path, count))
+        total += count
+    if not counts:
+        return "total_matches: 0"
+    lines = [f"total_matches: {total}"]
+    lines.extend(f"{file_path}: {count}" for file_path, count in counts)
+    return "\n".join(lines)
+
+
+def _tool_grep_rg(agent, pattern, path, mode, args):
+    command = ["rg", "--smart-case"]
+    if mode == "files_with_matches":
+        command.append("--files-with-matches")
+    elif mode == "count":
+        command.extend(["--count-matches", "--with-filename"])
+    else:
+        before, after = _grep_context_args(args)
+        command.extend(["-n", "--with-filename"])
+        if before:
+            command.extend(["-B", str(before)])
+        if after:
+            command.extend(["-A", str(after)])
+    command.extend(["--", pattern, str(path)])
+    result = subprocess.run(
+        command,
+        cwd=agent.root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1:
+        return "total_matches: 0" if mode == "count" else "(no matches)"
+    if result.returncode > 1:
+        return result.stderr.strip() or "error: grep failed"
+    if mode == "count":
+        return _format_grep_count_output(result.stdout)
+    return result.stdout.strip() or "(no matches)"
+
+
+def _compile_grep_pattern(pattern):
+    flags = 0 if any(char.isupper() for char in pattern) else re.IGNORECASE
+    return re.compile(pattern, flags)
+
+
+def _tool_grep_fallback(agent, pattern, path, mode, args):
+    try:
+        regex = _compile_grep_pattern(pattern)
+    except re.error as exc:
+        return f"error: invalid regex: {exc}"
+
+    files = _grep_files(agent, path)
+    if mode == "files_with_matches":
+        matches = []
+        for file_path in files:
+            lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if any(regex.search(line) for line in lines):
+                matches.append(str(file_path.relative_to(agent.root)))
+        return "\n".join(matches) or "(no matches)"
+
+    if mode == "count":
+        counts = []
+        total = 0
+        for file_path in files:
+            count = 0
+            for line in file_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                count += len(regex.findall(line))
+            if count:
+                counts.append((str(file_path.relative_to(agent.root)), count))
+                total += count
+        if not counts:
+            return "total_matches: 0"
+        lines = [f"total_matches: {total}"]
+        lines.extend(f"{file_path}: {count}" for file_path, count in counts)
+        return "\n".join(lines)
+
+    before, after = _grep_context_args(args)
+    matches = []
+    for file_path in files:
+        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        emitted = set()
+        for index, line in enumerate(lines):
+            if not regex.search(line):
+                continue
+            start = max(0, index - before)
+            end = min(len(lines), index + after + 1)
+            for emit_index in range(start, end):
+                if emit_index in emitted:
+                    continue
+                emitted.add(emit_index)
+                separator = ":" if emit_index == index else "-"
+                matches.append(f"{file_path.relative_to(agent.root)}{separator}{emit_index + 1}{separator}{lines[emit_index]}")
+                if len(matches) >= 200:
+                    return "\n".join(matches)
+    return "\n".join(matches) or "(no matches)"
+
+
+def tool_grep(agent, args):
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
         raise ValueError("pattern must not be empty")
     path = agent.path(args.get("path", "."))
+    mode = str(args.get("mode", "content"))
 
     if shutil.which("rg"):
         # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
-        result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
-            cwd=agent.root,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip() or result.stderr.strip() or "(no matches)"
-
-    matches = []
-    files = [path] if path.is_file() else [
-        item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts)
-    ]
-    for file_path in files:
-        for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-            if pattern.lower() in line.lower():
-                matches.append(f"{file_path.relative_to(agent.root)}:{number}:{line}")
-                if len(matches) >= 200:
-                    return "\n".join(matches)
-    return "\n".join(matches) or "(no matches)"
+        return _tool_grep_rg(agent, pattern, path, mode, args)
+    return _tool_grep_fallback(agent, pattern, path, mode, args)
 
 
 def tool_run_shell(agent, args):
@@ -291,7 +433,7 @@ def tool_delegate(agent, args):
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
-    "search": tool_search,
+    "grep": tool_grep,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,

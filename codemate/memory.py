@@ -520,6 +520,20 @@ def set_file_summary(state, path, summary, workspace_root=None):
     }
     return state
 
+
+def has_fresh_file_summary(state, path, workspace_root=None):
+    state = normalize_memory_state(state, workspace_root)
+    path = canonicalize_path(path, workspace_root).strip()
+    if not path:
+        return False
+    if path not in state["working"]["recent_files"]:
+        return False
+    summary = state["file_summaries"].get(path)
+    if not isinstance(summary, dict) or not summary.get("summary"):
+        return False
+    return summary.get("freshness") == file_freshness(path, workspace_root)
+
+
 # 删除文件摘要，在 write_file 或者 patch_file 之后调用。
 def invalidate_file_summary(state, path, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
@@ -672,6 +686,9 @@ class LayeredMemory:
     def set_file_summary(self, path, summary):
         self.state = set_file_summary(self.state, path, summary, self.workspace_root)
         return self
+
+    def has_fresh_file_summary(self, path):
+        return has_fresh_file_summary(self.state, path, self.workspace_root)
     
     # 删除文件摘要，在 write_file 或者 patch_file 之后调用。
     def invalidate_file_summary(self, path):

@@ -214,35 +214,72 @@ class CodeMate:
             [
                 '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
                 '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+                '<tool>{"name":"grep","args":{"pattern":"class CodeMate","path":"codemate","mode":"files_with_matches"}}</tool>',
+                '<tool>{"name":"grep","args":{"pattern":"run_tool","path":"codemate","mode":"count"}}</tool>',
+                '<tool>{"name":"grep","args":{"pattern":"def run_tool","path":"codemate/runtime.py","mode":"content","before":2,"after":4}}</tool>',
                 '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
                 '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
                 '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
                 "<final>Done.</final>",
             ]
         )
-        # prefix 可以理解成 agent 的“工作手册”：
-        # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
-        text = textwrap.dedent(
-            f"""\
-            You are codemate, a small local coding agent working inside a local repository.
-
-            Rules:
-            - Use tools instead of guessing about the workspace.
+        response_protocol = textwrap.dedent(
+            """\
+            Response protocol:
             - Return exactly one <tool>...</tool> or one <final>...</final>.
             - Tool calls must look like:
-              <tool>{{"name":"tool_name","args":{{...}}}}</tool>
+              <tool>{"name":"tool_name","args":{...}}</tool>
             - For write_file and patch_file with multi-line text, prefer XML style:
               <tool name="write_file" path="file.py"><content>...</content></tool>
             - Final answers must look like:
               <final>your answer</final>
             - Never invent tool results.
             - Keep answers concise and concrete.
+            """
+        ).strip()
+        tool_use_rules = textwrap.dedent(
+            """\
+            Tool use:
+            - Use the provided tools for workspace work.
+            - To inspect a file, use read_file.
+            - To search file contents, use grep.
+            - To edit an existing file, use patch_file after read_file.
+            - To create a new file, use write_file.
+            - Do not say tools are unavailable when they are listed in this prompt.
+            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
+            """
+        ).strip()
+        workflow_rules = textwrap.dedent(
+            """\
+            Workflow rules:
+            - After a successful tool result, treat it as an observation and continue with the next required tool call unless the user's request is already complete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
+            - Before editing an existing file with write_file or patch_file, read that exact file first; grep/list_files results are not enough.
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
-            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
-            - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={{}}.
+            - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
+            """
+        ).strip()
+        argument_safety = textwrap.dedent(
+            """\
+            Argument safety:
+            - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.
+            """
+        ).strip()
+        # prefix 可以理解成 agent 的“工作手册”：
+        # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
+        text = textwrap.dedent(
+            f"""\
+            You are codemate, a small local coding agent working inside a local repository.
+
+            {response_protocol}
+
+            {tool_use_rules}
+
+            {workflow_rules}
+
+            {argument_safety}
 
             Tools:
             {tool_text}
@@ -253,6 +290,7 @@ class CodeMate:
             {self.workspace.text()}
             """
         ).strip()
+        print(text)
         return PromptPrefix(
             text=text,
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -971,9 +1009,21 @@ class CodeMate:
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
         toolkit.validate_tool(self, name, args)
+        if name in {"write_file", "patch_file"}:
+            self.require_fresh_read_before_edit(name, args)
         if name == "delegate":
             if self.depth >= self.max_depth:
                 raise ValueError("delegate depth exceeded")
+
+    def require_fresh_read_before_edit(self, name, args):
+        path = self.path(args["path"])
+        if name == "write_file" and not path.exists():
+            return
+        if not self.memory.has_fresh_file_summary(args["path"]):
+            raise ValueError(
+                "existing files must be read with read_file before editing; "
+                "grep/list_files results are not enough"
+            )
 
     def tool_list_files(self, args):
         return toolkit.tool_list_files(self, args)
@@ -981,8 +1031,8 @@ class CodeMate:
     def tool_read_file(self, args):
         return toolkit.tool_read_file(self, args)
 
-    def tool_search(self, args):
-        return toolkit.tool_search(self, args)
+    def tool_grep(self, args):
+        return toolkit.tool_grep(self, args)
 
     def tool_run_shell(self, args):
         return toolkit.tool_run_shell(self, args)
