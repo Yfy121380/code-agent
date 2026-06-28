@@ -1,33 +1,35 @@
-"""Prompt 组装与上下文预算控制。
+"""Prompt/messages 组装与上下文预算控制。
 
 这个模块负责决定：每一轮到底把多少 prefix、memory、相关笔记、历史
-以及当前用户请求送进模型。
+以及当前用户请求送进模型。runtime 使用结构化 messages；指标实验仍可
+使用文本 prompt 视图来观察分层裁剪效果。
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 
 
-DEFAULT_TOTAL_BUDGET = 12000
+DEFAULT_TOTAL_BUDGET = 128000
 DEFAULT_SECTION_BUDGETS = {
-    "prefix": 3600,
-    "memory": 1600,
-    "relevant_memory": 1200,
-    "history": 5200,
+    "prefix": 10000,
+    "memory": 16000,
+    "relevant_memory": 14000,
+    "history": 88000,
 }
 DEFAULT_SECTION_FLOORS = {
-    "prefix": 1200,
-    "memory": 400,
-    "relevant_memory": 300,
-    "history": 1500,
+    "prefix": 5000,
+    "memory": 3000,
+    "relevant_memory": 3000,
+    "history": 20000,
 }
-# 当 prompt 超预算时，会优先压缩这些 section。
 DEFAULT_REDUCTION_ORDER = ("relevant_memory", "history", "memory", "prefix")
 SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
 RELEVANT_MEMORY_LIMIT = 3
+OMITTED_TOOL_RESULT = "[tool result omitted due to context budget]"
 
 
 def _tail_clip(text, limit):
@@ -56,38 +58,13 @@ class SectionRender:
     def rendered_chars(self):
         return len(self.rendered)
 
-# ContextManager 功能总结
-#region
-# 1. 组装最终 prompt
-#    prefix + memory + relevant_memory + history + current_request
 
-# 2. 控制 prompt 大小
-#    默认总预算 12000 字符
+@dataclass
+class MessageBuild:
+    system: str
+    messages: list[dict]
+    metadata: dict
 
-# 3. 按 section 分配预算
-#    prefix/memory/relevant_memory/history 各有预算
-
-# 4. 超预算时按顺序压缩
-#    relevant_memory -> history -> memory -> prefix
-
-# 5. 永远保留当前用户请求
-#    current_request 不参与裁剪
-
-# 6. 检索相关记忆
-#    从 LayeredMemory 取 top 3 relevant notes
-
-# 7. 渲染 relevant memory
-#    多条 note 平分预算，避免单条挤占
-
-# 8. 压缩历史
-#    最近 6 条优先保留
-#    旧 read_file 复用 file summary
-#    旧重复 read_file 折叠
-#    旧 shell 输出压成一行摘要
-
-# 9. 生成 prompt metadata
-#    记录每块 raw/rendered/budget、压缩日志、召回记忆、历史压缩指标
-#endregion
 
 class ContextManager:
     def __init__(
@@ -108,27 +85,40 @@ class ContextManager:
         self.reduction_order = tuple(reduction_order or DEFAULT_REDUCTION_ORDER)
 
     def build(self, user_message):
-        """按预算组装一轮完整 prompt。
-
-        为什么存在：
-        仅靠用户这一轮输入，模型并不知道当前仓库状态、会话里已经读过什么、
-        哪些旧信息还值得继续参考。这个函数负责把“稳定基线 + 工作记忆 +
-        相关笔记 + 历史 + 当前请求”拼成真正发给模型的 prompt。
-
-        输入 / 输出：
-        - 输入：`user_message`，也就是用户当前这一轮的新请求。
-        - 输出：`(prompt, metadata)`。
-          `prompt` 是最终发送给模型的文本；
-          `metadata` 记录了每个 section 的原始长度、裁剪后的长度、是否触发了
-          预算收缩等信息，后续会进入 trace/report，便于解释这轮 prompt
-          是怎么被拼出来的。
-
-        在 agent 链路里的位置：
-        它位于 `CodeMate.ask()` 的每轮模型调用之前，是“真正发请求给模型”
-        的最后一道组装工序。`WorkspaceContext` 提供稳定前缀，`LayeredMemory`
-        提供工作记忆，这个函数则把它们和当前请求合成一份可控大小的 prompt。
-        """
         user_message = str(user_message)
+        rendered, budgets, reduction_log, selected_notes = self._render_with_reduction(user_message, for_messages=False)
+        prompt = self._assemble_prompt(rendered)
+        metadata = self._metadata(
+            prompt=prompt,
+            rendered=rendered,
+            budgets=budgets,
+            reduction_log=reduction_log,
+            selected_notes=selected_notes,
+            user_message=user_message,
+            section_texts=self._section_texts(user_message),
+        )
+        return prompt, metadata
+
+    def build_messages(self, user_message):
+        user_message = str(user_message)
+        rendered, budgets, reduction_log, selected_notes = self._render_with_reduction(user_message, for_messages=True)
+        system, messages = self._assemble_messages(rendered, user_message)
+        prompt_view = self._messages_prompt_view(system, messages)
+        metadata = self._metadata(
+            prompt=prompt_view,
+            rendered=rendered,
+            budgets=budgets,
+            reduction_log=reduction_log,
+            selected_notes=selected_notes,
+            user_message=user_message,
+            section_texts=self._section_texts(user_message),
+        )
+        metadata["message_count"] = len(messages)
+        metadata["system_chars"] = len(system)
+        metadata["messages_chars"] = sum(len(str(message.get("content", ""))) for message in messages)
+        return MessageBuild(system=system, messages=messages, metadata=metadata)
+
+    def _render_with_reduction(self, user_message, for_messages):
         self.section_floors = self._compute_section_floors()
         memory_enabled = True
         relevant_memory_enabled = True
@@ -137,41 +127,23 @@ class ContextManager:
             memory_enabled = self.agent.feature_enabled("memory")
             relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
             context_reduction_enabled = self.agent.feature_enabled("context_reduction")
-        section_texts = {
-            "prefix": str(getattr(self.agent, "prefix", "")),
-            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
-            "history": "",
-            CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
-        }
+        section_texts = self._section_texts(user_message, memory_enabled=memory_enabled)
         selected_notes = []
         if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
 
         if not context_reduction_enabled:
-            rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes)
-            prompt = self._assemble_prompt(rendered)
-            metadata = self._metadata(
-                prompt=prompt,
-                rendered=rendered,
-                budgets={section: render.budget for section, render in rendered.items() if section != CURRENT_REQUEST_SECTION},
-                reduction_log=[],
-                selected_notes=selected_notes,
-                user_message=user_message,
-                section_texts=section_texts,
-            )
-            return prompt, metadata
+            rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes, user_message=user_message)
+            budgets = {section: rendered[section].budget for section in SECTION_ORDER if section != CURRENT_REQUEST_SECTION}
+            return rendered, budgets, [], selected_notes
 
         budgets = dict(self.section_budgets)
-        rendered = self._render_sections(section_texts, budgets, selected_notes=selected_notes)
-        prompt = self._assemble_prompt(rendered)
+        rendered = self._render_sections(section_texts, budgets, selected_notes=selected_notes, user_message=user_message)
+        current_size = self._rendered_size(rendered, user_message, for_messages=for_messages)
         reduction_log = []
 
-        # 如果 prompt 超预算，就按固定顺序不断压缩。
-        # 这里的顺序体现了平台偏好：
-        # 先牺牲 relevant_memory，再牺牲 history，然后才动 memory 和 prefix。
-        # 最新用户请求永远不裁剪，因为那是本轮最重要的输入。
-        while len(prompt) > self.total_budget:
-            overflow = len(prompt) - self.total_budget
+        while current_size > self.total_budget:
+            overflow = current_size - self.total_budget
             reduced = False
             for section in self.reduction_order:
                 floor = int(self.section_floors.get(section, 0))
@@ -190,25 +162,29 @@ class ContextManager:
                     }
                 )
                 budgets[section] = new_budget
-                rendered = self._render_sections(section_texts, budgets, selected_notes=selected_notes)
-                prompt = self._assemble_prompt(rendered)
+                rendered = self._render_sections(section_texts, budgets, selected_notes=selected_notes, user_message=user_message)
+                current_size = self._rendered_size(rendered, user_message, for_messages=for_messages)
                 reduced = True
                 break
             if not reduced:
                 break
+        return rendered, budgets, reduction_log, selected_notes
 
-        metadata = self._metadata(
-            prompt=prompt,
-            rendered=rendered,
-            budgets=budgets,
-            reduction_log=reduction_log,
-            selected_notes=selected_notes,
-            user_message=user_message,
-            section_texts=section_texts,
-        )
-        return prompt, metadata
+    def _section_texts(self, user_message, memory_enabled=True):
+        return {
+            "prefix": str(getattr(self.agent, "prefix", "")),
+            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "history": "",
+            CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
+        }
 
-    def _render_sections_without_reduction(self, section_texts, selected_notes=None):
+    def _rendered_size(self, rendered, user_message, for_messages):
+        if not for_messages:
+            return len(self._assemble_prompt(rendered))
+        system, messages = self._assemble_messages(rendered, user_message)
+        return len(self._messages_prompt_view(system, messages))
+
+    def _render_sections_without_reduction(self, section_texts, selected_notes=None, user_message=""):
         selected_notes = selected_notes or []
         relevant_lines = ["Relevant memory:"]
         if selected_notes:
@@ -216,8 +192,9 @@ class ContextManager:
         else:
             relevant_lines.append("- none")
         relevant_raw = "\n".join(relevant_lines)
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._history_for_request(user_message)
         history_raw = self._raw_history_text(history)
+        history_render = self._render_history_section(len(history_raw), user_message=user_message)
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
             "memory": SectionRender(raw=section_texts["memory"], budget=len(section_texts["memory"]), rendered=section_texts["memory"], details={}),
@@ -233,7 +210,7 @@ class ContextManager:
                     "note_budget": 0,
                 },
             ),
-            "history": SectionRender(raw=history_raw, budget=len(history_raw), rendered=history_raw, details={"rendered_entries": []}),
+            "history": history_render,
             CURRENT_REQUEST_SECTION: SectionRender(
                 raw=section_texts[CURRENT_REQUEST_SECTION],
                 budget=0,
@@ -243,14 +220,11 @@ class ContextManager:
         }
 
     def _compute_section_floors(self):
-        floors = {
-            section: max(20, int(budget) // 4)
-            for section, budget in self.section_budgets.items()
-        }
+        floors = {section: max(20, int(budget) // 4) for section, budget in self.section_budgets.items()}
         floors.update(self._section_floor_overrides)
         return floors
 
-    def _render_sections(self, section_texts, budgets, selected_notes=None):
+    def _render_sections(self, section_texts, budgets, selected_notes=None, user_message=""):
         rendered = {}
         for section in SECTION_ORDER:
             budget = budgets.get(section)
@@ -260,7 +234,7 @@ class ContextManager:
             elif section == "relevant_memory":
                 rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0))
             elif section == "history":
-                rendered[section] = self._render_history_section(int(budget or 0))
+                rendered[section] = self._render_history_section(int(budget or 0), user_message=user_message)
             else:
                 raw = section_texts[section]
                 rendered_text = _tail_clip(raw, int(budget)) if budget is not None else raw
@@ -273,24 +247,16 @@ class ContextManager:
         raw_lines = [header] + [f"- {text}" for text in note_texts]
         raw = "\n".join(raw_lines) if note_texts else "\n".join([header, "- none"])
         if not note_texts:
-            rendered = raw
             return SectionRender(
                 raw=raw,
                 budget=budget,
-                rendered=rendered,
-                details={
-                    "selected_notes": [],
-                    "rendered_notes": [],
-                    "selected_count": 0,
-                    "rendered_count": 0,
-                    "note_budget": 0,
-                },
+                rendered=raw,
+                details={"selected_notes": [], "rendered_notes": [], "selected_count": 0, "rendered_count": 0, "note_budget": 0},
             )
 
         per_note_budget = self._per_note_budget(budget, len(note_texts), header)
         rendered_notes = []
         while True:
-            # 让每条 note 平分这一段的预算，避免一条超长笔记把其他笔记都挤掉。
             rendered_notes = [_tail_clip(text, per_note_budget) for text in note_texts]
             rendered = "\n".join([header] + [f"- {text}" for text in rendered_notes])
             if len(rendered) <= budget or per_note_budget <= 1:
@@ -321,8 +287,8 @@ class ContextManager:
         usable = max(0, budget - overhead)
         return max(1, usable // note_count)
 
-    def _render_history_section(self, budget):
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+    def _render_history_section(self, budget, user_message=""):
+        history = self._history_for_request(user_message)
         raw = self._raw_history_text(history)
         if not history:
             rendered = "Transcript:\n- empty"
@@ -331,6 +297,7 @@ class ContextManager:
                 budget=budget,
                 rendered=rendered,
                 details={
+                    "messages": [],
                     "rendered_entries": [],
                     "older_entries_count": 0,
                     "collapsed_duplicate_reads": 0,
@@ -339,58 +306,10 @@ class ContextManager:
                 },
             )
 
-        # 优先保留最近的历史，因为下一步决策通常最依赖刚刚发生的工具结果。
-        # 最近上下文优先
-        # 旧上下文能摘要就摘要
-        # 塞不下的旧上下文可以丢
-        recent_window = 6
-        recent_start = max(0, len(history) - recent_window)
-        history_entries, history_details = self._compressed_history_entries(history, recent_start)
-        rendered_entries = []
-        for entry in reversed(history_entries):
-            recent = bool(entry.get("recent", False))
-            candidate_lines = list(entry.get("lines", []))
-            candidate_entries = candidate_lines + rendered_entries
-            candidate_rendered = "\n".join(["Transcript:", *candidate_entries])
-            if len(candidate_rendered) <= budget:
-                rendered_entries = candidate_entries
-                continue
-            if recent:
-                available = budget - len("Transcript:")
-                if rendered_entries:
-                    available -= sum(len(line) + 1 for line in rendered_entries)
-                available = max(20, available - 1)
-                candidate_lines = [_tail_clip(line, available) for line in candidate_lines]
-                candidate_entries = candidate_lines + rendered_entries
-                candidate_rendered = "\n".join(["Transcript:", *candidate_entries])
-                if len(candidate_rendered) <= budget:
-                    rendered_entries = candidate_entries
-            else:
-                smaller_lines = [_tail_clip(line, 20) for line in candidate_lines]
-                smaller_entries = smaller_lines + rendered_entries
-                smaller_rendered = "\n".join(["Transcript:", *smaller_entries])
-                if len(smaller_rendered) <= budget:
-                    rendered_entries = smaller_entries
-        rendered = "\n".join(["Transcript:", *rendered_entries])
-
-        if len(rendered) > budget and budget > 0:
-            rendered = _tail_clip(raw, budget)
-
-        return SectionRender(
-            raw=raw,
-            budget=budget,
-            rendered=rendered,
-            details={
-                "recent_window": recent_window,
-                "recent_start": recent_start,
-                "rendered_entries": rendered_entries,
-                **history_details,
-            },
-        )
-
-    def _compressed_history_entries(self, history, recent_start):
-        entries = []
-        seen_older_reads = set()
+        groups = self._history_groups(history)
+        selected = []
+        selected_messages = []
+        seen_read_paths = set()
         details = {
             "older_entries_count": 0,
             "collapsed_duplicate_reads": 0,
@@ -398,41 +317,130 @@ class ContextManager:
             "summarized_tool_count": 0,
         }
 
-        for index, item in enumerate(history):
-            recent = index >= recent_start
-            if recent:
-                line_limit = 900
-                entries.append(
-                    {
-                        "recent": True,
-                        "lines": self._render_history_item(item, line_limit),
-                    }
-                )
+        for group in reversed(groups):
+            read_paths = self._read_paths_for_group(group)
+            if read_paths and all(path in seen_read_paths for path in read_paths):
+                details["collapsed_duplicate_reads"] += 1
+                continue
+            candidate_messages = self._group_messages(group) + selected_messages
+            candidate_rendered = self._render_history_messages(candidate_messages)
+            if len(candidate_rendered) <= budget:
+                selected.insert(0, group)
+                selected_messages = candidate_messages
+                seen_read_paths.update(read_paths)
                 continue
 
-            if item["role"] == "tool" and item["name"] == "read_file":
-                path = str(item["args"].get("path", "")).strip()
-                if path in seen_older_reads:
-                    details["collapsed_duplicate_reads"] += 1
-                    continue
-                seen_older_reads.add(path)
+            if group.get("type") == "tool_interaction":
+                available = max(0, budget - len(self._render_history_messages(selected_messages)) - len("\n"))
+                clipped = self._clip_tool_group(group, available, prefer_summary=True, details=details)
+                clipped_messages = self._group_messages(clipped) + selected_messages
+                clipped_rendered = self._render_history_messages(clipped_messages)
+                if len(clipped_rendered) <= budget or not selected_messages:
+                    selected.insert(0, clipped)
+                    selected_messages = clipped_messages
+                    seen_read_paths.update(read_paths)
+                break
+
+            if not selected_messages:
+                clipped = self._clip_text_group(group, max(20, budget - len("Transcript:\n")))
+                selected_messages = self._group_messages(clipped)
+            break
+
+        rendered = self._render_history_messages(selected_messages)
+        return SectionRender(
+            raw=raw,
+            budget=budget,
+            rendered=rendered,
+            details={
+                "messages": selected_messages,
+                "rendered_entries": rendered.splitlines()[1:] if rendered.startswith("Transcript:") else rendered.splitlines(),
+                **details,
+            },
+        )
+
+    def _history_for_request(self, user_message):
+        history = [copy.deepcopy(item) for item in getattr(self.agent, "session", {}).get("history", [])]
+        if history and history[-1].get("role") == "user" and str(history[-1].get("content", "")) == str(user_message):
+            history = history[:-1]
+        return history
+
+    def _history_groups(self, history):
+        groups = []
+        index = 0
+        while index < len(history):
+            item = history[index]
+            role = item.get("role")
+            if role == "assistant" and item.get("tool_calls"):
+                calls = [dict(call or {}) for call in item.get("tool_calls") or []]
+                call_ids = {str(call.get("id", "")) for call in calls}
+                messages = [{"role": "assistant", "content": str(item.get("content", "")), "tool_calls": calls}]
+                index += 1
+                while index < len(history) and history[index].get("role") == "tool":
+                    tool_item = dict(history[index])
+                    if str(tool_item.get("tool_call_id", "")) not in call_ids:
+                        break
+                    messages.append(tool_item)
+                    index += 1
+                groups.append({"type": "tool_interaction", "messages": messages})
+                continue
+            if role == "tool":
+                index += 1
+                continue
+            groups.append({"type": "message", "messages": [copy.deepcopy(item)]})
+            index += 1
+        return groups
+
+    def _group_messages(self, group):
+        return [copy.deepcopy(message) for message in group.get("messages", [])]
+
+    def _read_paths_for_group(self, group):
+        paths = []
+        if group.get("type") != "tool_interaction":
+            return paths
+        assistant = group.get("messages", [{}])[0]
+        for call in assistant.get("tool_calls", []) or []:
+            if call.get("name") == "read_file":
+                path = str((call.get("args") or {}).get("path", "")).strip()
+                if path:
+                    paths.append(path)
+        return paths
+
+    def _clip_text_group(self, group, budget):
+        clipped = copy.deepcopy(group)
+        for message in clipped.get("messages", []):
+            if message.get("role") in {"user", "assistant"} and not message.get("tool_calls"):
+                message["content"] = _tail_clip(message.get("content", ""), budget)
+        return clipped
+
+    def _clip_tool_group(self, group, budget, prefer_summary=False, details=None):
+        clipped = copy.deepcopy(group)
+        messages = clipped.get("messages", [])
+        if len(messages) < 2:
+            return clipped
+        tool_messages = [message for message in messages[1:] if message.get("role") == "tool"]
+        per_tool_budget = max(1, budget // max(1, len(tool_messages)))
+        for tool_message in tool_messages:
+            content = str(tool_message.get("content", ""))
+            if prefer_summary and tool_message.get("name") == "read_file":
+                path = self._path_for_tool_result(messages[0], tool_message)
                 summary = self._reusable_file_summary(path)
                 if summary:
-                    entries.append({"recent": False, "lines": [f"{path} -> {summary}"]})
-                    details["older_entries_count"] += 1
-                    details["reused_file_summary_count"] += 1
-                    continue
+                    content = f"# {path}\n{summary}"
+                    if details is not None:
+                        details["reused_file_summary_count"] += 1
+            if per_tool_budget <= len(OMITTED_TOOL_RESULT) + 8:
+                content = OMITTED_TOOL_RESULT
+            else:
+                content = _tail_clip(content, per_tool_budget)
+            tool_message["content"] = content
+        return clipped
 
-            if item["role"] == "tool":
-                summary_line = self._summarize_old_tool_item(item)
-                entries.append({"recent": False, "lines": [summary_line]})
-                details["older_entries_count"] += 1
-                details["summarized_tool_count"] += 1
-                continue
-
-            entries.append({"recent": False, "lines": self._render_history_item(item, 60)})
-
-        return entries, details
+    def _path_for_tool_result(self, assistant_message, tool_message):
+        tool_call_id = str(tool_message.get("tool_call_id", ""))
+        for call in assistant_message.get("tool_calls", []) or []:
+            if str(call.get("id", "")) == tool_call_id:
+                return str((call.get("args") or {}).get("path", "")).strip()
+        return ""
 
     def _reusable_file_summary(self, path):
         memory = getattr(self.agent, "memory", None)
@@ -444,35 +452,27 @@ class ContextManager:
             return ""
         return str(summary.get("summary", "")).strip()
 
-    def _summarize_old_tool_item(self, item):
-        if item["name"] == "run_shell":
-            command = str(item["args"].get("command", "")).strip() or "shell"
-            lines = [line.strip() for line in str(item.get("content", "")).splitlines() if line.strip()]
-            summary = " | ".join(lines[:3]) if lines else "(empty)"
-            return f"{command} -> {summary}"
-        return self._render_history_item(item, 60)[0]
-
     def _raw_history_text(self, history):
         if not history:
             return "Transcript:\n- empty"
-        lines = []
-        for item in history:
-            if item["role"] == "tool":
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}")
-                lines.append(str(item["content"]))
-            else:
-                lines.append(f"[{item['role']}] {item['content']}")
-        return "\n".join(["Transcript:", *lines])
+        return self._render_history_messages(history)
 
-    def _render_history_item(self, item, line_limit):
-        if item["role"] == "tool":
-            prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}"
-            content = _tail_clip(item["content"], max(20, line_limit))
-            return [prefix, content]
-        return [f"[{item['role']}] {_tail_clip(item['content'], line_limit)}"]
+    def _render_history_messages(self, messages):
+        if not messages:
+            return "Transcript:\n- empty"
+        lines = ["Transcript:"]
+        for item in messages:
+            role = item.get("role")
+            if role == "assistant" and item.get("tool_calls"):
+                lines.append(f"[assistant:tool_calls] {json.dumps(item.get('tool_calls'), sort_keys=True, ensure_ascii=False)}")
+            elif role == "tool":
+                lines.append(f"[tool:{item.get('name', '')}] {item.get('tool_call_id', '')}")
+                lines.append(str(item.get("content", "")))
+            else:
+                lines.append(f"[{role}] {item.get('content', '')}")
+        return "\n".join(lines)
 
     def _assemble_prompt(self, rendered):
-        # 顺序是刻意设计的：稳定规则放前面，最新请求放最后。
         return "\n\n".join(
             [
                 rendered["prefix"].rendered,
@@ -482,6 +482,31 @@ class ContextManager:
                 rendered[CURRENT_REQUEST_SECTION].rendered,
             ]
         ).strip()
+
+    def _assemble_messages(self, rendered, user_message):
+        context_content = "\n\n".join(
+            [
+                "Runtime context, not a new user request. Use it as background; the current user request has priority.",
+                rendered["memory"].rendered,
+                rendered["relevant_memory"].rendered,
+            ]
+        ).strip()
+        messages = [{"role": "user", "content": context_content}]
+        messages.extend(copy.deepcopy(rendered["history"].details.get("messages", [])))
+        messages.append({"role": "user", "content": str(user_message)})
+        return rendered["prefix"].rendered, messages
+
+    def _messages_prompt_view(self, system, messages):
+        lines = [system]
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant" and message.get("tool_calls"):
+                lines.append(f"[assistant:tool_calls] {json.dumps(message.get('tool_calls'), ensure_ascii=False, sort_keys=True)}")
+            elif role == "tool":
+                lines.append(f"[tool:{message.get('name', '')}] {message.get('content', '')}")
+            else:
+                lines.append(f"[{role}] {message.get('content', '')}")
+        return "\n\n".join(lines).strip()
 
     def _metadata(self, prompt, rendered, budgets, reduction_log, selected_notes, user_message, section_texts):
         section_metadata = {}

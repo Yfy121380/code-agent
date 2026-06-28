@@ -1,20 +1,16 @@
 """模型后端适配层。
 
-runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
-不同 provider 在 HTTP 接口、响应结构、是否支持 prompt cache 上都有差异，
+runtime 只关心一件事：给模型一组 messages 和可用 tools，拿回结构化决策。
+不同 provider 在 HTTP 接口、工具 schema、响应结构、usage 字段上都有差异，
 这些差异都在这里被抹平成统一的 complete() 接口。
 """
-"""
-provider    client	                        endpoint	    prompt字段	                响应文本
 
-ollama	    OllamaModelClient	            /api/generate	prompt		                data["response"]
-openai	    OpenAICompatibleModelClient	    /v1/responses	input[].content[].text	    output_text / output[].content[].text / choices[].message.content
-anthropic	AnthropicCompatibleModelClient	/v1/messages	messages[].content[].text	content[].text
-deepseek	AnthropicCompatibleModelClient	/v1/messages	messages[].content[].text	content[].text
-"""
+from __future__ import annotations
 
 import json
 import time
+import uuid
+from dataclasses import dataclass, field
 from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
@@ -22,71 +18,61 @@ import urllib.request
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
 
 
-class FakeModelClient:
-    def __init__(self, outputs):
-        self.outputs = list(outputs)
-        self.prompts = []
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
+@dataclass
+class ModelToolCall:
+    id: str
+    name: str
+    args: dict = field(default_factory=dict)
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        self.prompts.append(prompt)
-        if not getattr(self, "last_completion_metadata", None):
-            self.last_completion_metadata = {}
-        if not self.outputs:
-            raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
-
-
-class OllamaModelClient:
-    def __init__(self, model, host, temperature, top_p, timeout):
-        self.model = model
-        self.host = host.rstrip("/")
-        self.temperature = temperature
-        self.top_p = top_p
-        self.timeout = timeout
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
-
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        # Ollama 当前不支持我们这里接入的 prompt cache 语义，
-        # 所以 runtime 传下来的缓存参数会被忽略。
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        request = urllib.request.Request(
-            self.host + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+    @classmethod
+    def create(cls, name, args=None, call_id=None):
+        return cls(
+            id=str(call_id or f"call_{uuid.uuid4().hex[:12]}"),
+            name=str(name),
+            args=dict(args or {}),
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
-                f"Host: {self.host}\n"
-                f"Model: {self.model}"
-            ) from exc
 
-        if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
+    def to_dict(self):
+        return {"id": self.id, "name": self.name, "args": dict(self.args or {})}
+
+
+@dataclass
+class ModelResponse:
+    kind: str
+    text: str = ""
+    tool_calls: list[ModelToolCall] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+    raw: dict | None = None
+
+    @classmethod
+    def final(cls, text, metadata=None, raw=None):
+        return cls(kind="final", text=str(text or ""), metadata=dict(metadata or {}), raw=raw)
+
+    @classmethod
+    def tool_call(cls, name, args=None, call_id=None, text="", metadata=None, raw=None):
+        return cls.from_tool_calls(
+            [ModelToolCall.create(name, args=args, call_id=call_id)],
+            text=text,
+            metadata=metadata,
+            raw=raw,
+        )
+
+    @classmethod
+    def from_tool_calls(cls, calls, text="", metadata=None, raw=None):
+        normalized = []
+        for call in calls or []:
+            if isinstance(call, ModelToolCall):
+                normalized.append(call)
+                continue
+            if isinstance(call, dict):
+                normalized.append(
+                    ModelToolCall.create(
+                        call.get("name", ""),
+                        args=call.get("args", call.get("input", {})) or {},
+                        call_id=call.get("id") or call.get("call_id"),
+                    )
+                )
+        return cls(kind="tool_calls", text=str(text or ""), tool_calls=normalized, metadata=dict(metadata or {}), raw=raw)
 
 
 def _normalize_versioned_base_url(base_url):
@@ -95,17 +81,152 @@ def _normalize_versioned_base_url(base_url):
         base += "/v1"
     return base
 
-# 兼容几类 OpenAI 风格响应格式：
 
-# Responses API 的简化字段：output_text
-# Responses API 的标准字段：output[].content[].text
-# Chat Completions API 的字段：choices[0].message.content
-# 多模态/新版格式里 message.content 是 list 的情况
+def _normalize_messages(messages, system=None):
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+    normalized = []
+    if system:
+        normalized.append({"role": "system", "content": str(system)})
+    for message in messages or []:
+        item = dict(message or {})
+        role = str(item.get("role", "user"))
+        normalized.append({**item, "role": role})
+    return normalized
+
+
+def _messages_to_text(messages, system=None):
+    lines = []
+    if system:
+        lines.append(str(system))
+    for message in messages or []:
+        role = str(message.get("role", ""))
+        if role == "assistant" and message.get("tool_calls"):
+            lines.append(f"[assistant tool_calls] {json.dumps(message.get('tool_calls'), ensure_ascii=False, sort_keys=True)}")
+            continue
+        if role == "tool":
+            lines.append(f"[tool:{message.get('name', '')}] {message.get('content', '')}")
+            continue
+        lines.append(f"[{role}] {message.get('content', '')}")
+    return "\n".join(lines).strip()
+
+
+def _as_model_response(output):
+    if isinstance(output, ModelResponse):
+        return output
+    if isinstance(output, ModelToolCall):
+        return ModelResponse.from_tool_calls([output])
+    if isinstance(output, dict):
+        if output.get("kind") == "tool_calls":
+            return ModelResponse.from_tool_calls(output.get("tool_calls", []), text=output.get("text", ""), raw=output)
+        if output.get("kind") == "final":
+            return ModelResponse.final(output.get("text", ""), raw=output)
+        if output.get("name"):
+            return ModelResponse.tool_call(output.get("name"), output.get("args", {}), call_id=output.get("id"), raw=output)
+    return ModelResponse.final(str(output or ""))
+
+
+class FakeModelClient:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.prompts = []
+        self.supports_prompt_cache = False
+        self.supports_tools = True
+        self.last_completion_metadata = {}
+
+    def complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
+        del max_new_tokens, tools, kwargs
+        self.prompts.append(_messages_to_text(_normalize_messages(messages), system=system))
+        self.last_completion_metadata = {}
+        if not self.outputs:
+            raise RuntimeError("fake model ran out of outputs")
+        response = _as_model_response(self.outputs.pop(0))
+        self.last_completion_metadata = dict(response.metadata or {})
+        return response
+
+
+def _tool_specs_to_openai(tools):
+    converted = []
+    for tool in tools or []:
+        spec = dict(tool)
+        converted.append(
+            {
+                "type": "function",
+                "name": spec["name"],
+                "description": spec.get("description", ""),
+                "parameters": spec.get("input_schema", {"type": "object", "properties": {}}),
+            }
+        )
+    return converted
+
+
+def _tool_specs_to_openai_chat(tools):
+    converted = []
+    for tool in tools or []:
+        spec = dict(tool)
+        converted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": spec["name"],
+                    "description": spec.get("description", ""),
+                    "parameters": spec.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+        )
+    return converted
+
+
+def _tool_specs_to_anthropic(tools):
+    converted = []
+    for tool in tools or []:
+        spec = dict(tool)
+        converted.append(
+            {
+                "name": spec["name"],
+                "description": spec.get("description", ""),
+                "input_schema": spec.get("input_schema", {"type": "object", "properties": {}}),
+            }
+        )
+    return converted
+
+
+def _tool_specs_to_ollama(tools):
+    converted = []
+    for tool in tools or []:
+        spec = dict(tool)
+        converted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": spec["name"],
+                    "description": spec.get("description", ""),
+                    "parameters": spec.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+        )
+    return converted
+
+
+def _json_args(value):
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _extract_openai_text(data):
     if data.get("output_text"):
         return data["output_text"]
 
     for item in data.get("output", []):
+        if item.get("type") in {"function_call", "tool_call"}:
+            continue
         for content in item.get("content", []):
             if isinstance(content, dict):
                 text = content.get("text")
@@ -128,54 +249,42 @@ def _extract_openai_text(data):
     return ""
 
 
-def _extract_openai_text_from_sse(body_text):
-    last_response = None
-    deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
+def _extract_openai_tool_calls(data):
+    calls = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
             continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
+        if item.get("type") not in {"function_call", "tool_call"}:
             continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
+        name = item.get("name") or item.get("function", {}).get("name")
+        if not name:
             continue
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        if event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text
-        part = event.get("part")
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str) and text:
-                return text
-        item = event.get("item")
-        if isinstance(item, dict):
-            text = _extract_openai_text({"output": [item]})
-            if text:
-                return text
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            text = _extract_openai_text(response)
-            if text:
-                return text
-        text = _extract_openai_text(event)
-        if text:
-            return text
-    if deltas:
-        return "".join(deltas)
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response)
-    return ""
+        arguments = item.get("arguments")
+        if arguments is None and isinstance(item.get("function"), dict):
+            arguments = item["function"].get("arguments")
+        calls.append(
+            ModelToolCall.create(
+                name,
+                args=_json_args(arguments),
+                call_id=item.get("call_id") or item.get("id"),
+            )
+        )
+
+    for choice in data.get("choices", []) or []:
+        message = choice.get("message", {}) or {}
+        for call in message.get("tool_calls", []) or []:
+            function = call.get("function", {}) or {}
+            name = function.get("name") or call.get("name")
+            if not name:
+                continue
+            calls.append(
+                ModelToolCall.create(
+                    name,
+                    args=_json_args(function.get("arguments", call.get("arguments"))),
+                    call_id=call.get("id"),
+                )
+            )
+    return calls
 
 
 def _extract_openai_response_from_sse(body_text):
@@ -196,9 +305,7 @@ def _extract_openai_response_from_sse(body_text):
         if isinstance(response, dict):
             last_response = response
             if event.get("type") == "response.completed":
-                text = _extract_openai_text(response)
-                if text:
-                    return text, response
+                return _extract_openai_text(response), response
         event_type = event.get("type", "")
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
@@ -212,16 +319,14 @@ def _extract_openai_response_from_sse(body_text):
             text = _extract_openai_text(event)
             if text:
                 return text, event
-    if deltas:
-        return "".join(deltas), last_response or {}
     if isinstance(last_response, dict):
         return _extract_openai_text(last_response), last_response
+    if deltas:
+        return "".join(deltas), last_response or {}
     return "", {}
 
 
 def _extract_usage_cache_details(data):
-    # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
-    # 让 runtime/trace/report 不需要关心 provider 细节。
     usage = data.get("usage") or {}
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
@@ -236,6 +341,228 @@ def _extract_usage_cache_details(data):
     }
 
 
+def _to_openai_input(messages, system=None):
+    items = []
+    if system:
+        items.append({"role": "system", "content": [{"type": "input_text", "text": str(system)}]})
+    for message in messages or []:
+        role = message.get("role", "user")
+        if role in {"user", "system"}:
+            items.append({"role": role, "content": [{"type": "input_text", "text": str(message.get("content", ""))}]})
+        elif role == "assistant" and message.get("tool_calls"):
+            for call in message.get("tool_calls") or []:
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.get("id"),
+                        "name": call.get("name"),
+                        "arguments": json.dumps(call.get("args", {}) or {}, ensure_ascii=False),
+                    }
+                )
+        elif role == "assistant":
+            items.append({"role": "assistant", "content": [{"type": "output_text", "text": str(message.get("content", ""))}]})
+        elif role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id"),
+                    "output": str(message.get("content", "")),
+                }
+            )
+    return items
+
+
+def _to_openai_chat_messages(messages, system=None):
+    converted = []
+    if system:
+        converted.append({"role": "system", "content": str(system)})
+    for message in messages or []:
+        role = message.get("role", "user")
+        if role in {"user", "system"}:
+            converted.append({"role": role, "content": str(message.get("content", ""))})
+        elif role == "assistant" and message.get("tool_calls"):
+            converted.append(
+                {
+                    "role": "assistant",
+                    "content": str(message.get("content", "")) or None,
+                    "tool_calls": [
+                        {
+                            "id": call.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": call.get("name"),
+                                "arguments": json.dumps(call.get("args", {}) or {}, ensure_ascii=False),
+                            },
+                        }
+                        for call in message.get("tool_calls") or []
+                    ],
+                }
+            )
+        elif role == "assistant":
+            converted.append({"role": "assistant", "content": str(message.get("content", ""))})
+        elif role == "tool":
+            converted.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": message.get("tool_call_id"),
+                    "content": str(message.get("content", "")),
+                }
+            )
+    return converted
+
+
+def _to_anthropic_messages(messages):
+    converted = []
+    for message in messages or []:
+        role = message.get("role", "user")
+        if role == "tool":
+            converted.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.get("tool_call_id"),
+                            "content": str(message.get("content", "")),
+                        }
+                    ],
+                }
+            )
+        elif role == "assistant" and message.get("tool_calls"):
+            converted.append(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": call.get("id"),
+                            "name": call.get("name"),
+                            "input": call.get("args", {}) or {},
+                        }
+                        for call in message.get("tool_calls") or []
+                    ],
+                }
+            )
+        else:
+            converted.append({"role": role, "content": [{"type": "text", "text": str(message.get("content", ""))}]})
+    return converted
+
+
+def _to_ollama_messages(messages, system=None):
+    converted = []
+    if system:
+        converted.append({"role": "system", "content": str(system)})
+    for message in messages or []:
+        role = message.get("role", "user")
+        if role == "assistant" and message.get("tool_calls"):
+            converted.append(
+                {
+                    "role": "assistant",
+                    "content": str(message.get("content", "")),
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": call.get("name"),
+                                "arguments": call.get("args", {}) or {},
+                            }
+                        }
+                        for call in message.get("tool_calls") or []
+                    ],
+                }
+            )
+        elif role == "tool":
+            converted.append({"role": "tool", "content": str(message.get("content", ""))})
+        else:
+            converted.append({"role": role, "content": str(message.get("content", ""))})
+    return converted
+
+
+def _extract_anthropic_response(data):
+    text_parts = []
+    calls = []
+    for item in data.get("content", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        elif item.get("type") == "tool_use":
+            calls.append(
+                ModelToolCall.create(
+                    item.get("name", ""),
+                    args=item.get("input", {}) or {},
+                    call_id=item.get("id"),
+                )
+            )
+    text = "".join(text_parts)
+    if calls:
+        return ModelResponse.from_tool_calls(calls, text=text, raw=data)
+    return ModelResponse.final(text, raw=data)
+
+
+class OllamaModelClient:
+    def __init__(self, model, host, temperature, top_p, timeout):
+        self.model = model
+        self.host = host.rstrip("/")
+        self.temperature = temperature
+        self.top_p = top_p
+        self.timeout = timeout
+        self.supports_prompt_cache = False
+        self.supports_tools = True
+        self.last_completion_metadata = {}
+
+    def complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
+        del kwargs
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "messages": _to_ollama_messages(_normalize_messages(messages), system=system),
+            "stream": False,
+            "think": False,
+            "options": {
+                "num_predict": max_new_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            },
+        }
+        if tools:
+            payload["tools"] = _tool_specs_to_ollama(tools)
+        request = urllib.request.Request(
+            self.host + "/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach Ollama.\n"
+                "Make sure `ollama serve` is running and the model is available.\n"
+                f"Host: {self.host}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        if data.get("error"):
+            raise RuntimeError(f"Ollama error: {data['error']}")
+        message = data.get("message", {}) or {}
+        calls = []
+        for call in message.get("tool_calls", []) or []:
+            function = call.get("function", {}) or {}
+            name = function.get("name") or call.get("name")
+            if not name:
+                continue
+            calls.append(ModelToolCall.create(name, args=_json_args(function.get("arguments", {})), call_id=call.get("id")))
+        if calls:
+            return ModelResponse.from_tool_calls(calls, text=message.get("content", ""), raw=data)
+        return ModelResponse.final(message.get("content", ""), raw=data)
+
+
 class OpenAICompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -243,49 +570,77 @@ class OpenAICompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
-        # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
-        # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
+        self.supports_tools = True
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
-        """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
+    def _complete_chat_completions(self, messages, max_new_tokens, tools=None, system=None):
+        payload = {
+            "model": self.model,
+            "messages": _to_openai_chat_messages(_normalize_messages(messages), system=system),
+            "max_tokens": max_new_tokens,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = _tool_specs_to_openai_chat(tools)
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
 
-        为什么存在：
-        runtime 不应该知道 HTTP 细节、SSE 细节、usage 字段长什么样，
-        更不应该自己去判断 prompt cache 参数要不要带。这个函数把这些后端
-        细节都包起来，对上层暴露统一的 `complete()` 行为。
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
-        输入 / 输出：
-        - 输入：完整 prompt、最大输出 token，以及可选的 prompt cache 参数
-        - 输出：模型最终文本；同时把 usage / cached_tokens 等元数据写进
-          `self.last_completion_metadata`
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI-compatible chat fallback failed with HTTP {exc.code}: {body}") from exc
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "Could not reach the OpenAI-compatible chat fallback.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
 
-        在 agent 链路里的位置：
-        它位于 `CodeMate.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
-        落到 provider API 的地方。
-        """
+        if data.get("error"):
+            raise RuntimeError(f"OpenAI-compatible chat fallback error: {data['error']}")
+        metadata = {
+            "prompt_cache_supported": False,
+            "prompt_cache_key": None,
+            "prompt_cache_retention": None,
+            **_extract_usage_cache_details(data),
+            "openai_compat_fallback": "chat_completions",
+        }
+        self.last_completion_metadata = metadata
+        calls = _extract_openai_tool_calls(data)
+        text = _extract_openai_text(data)
+        if calls:
+            return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
+        return ModelResponse.final(text, metadata=metadata, raw=data)
+
+    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None):
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
+            "input": _to_openai_input(_normalize_messages(messages), system=system),
             "max_output_tokens": max_new_tokens,
             "stream": False,
         }
+        if tools:
+            payload["tools"] = _tool_specs_to_openai(tools)
         if self.temperature is not None:
             payload["temperature"] = self.temperature
-        # runtime 传入的是“稳定前缀prefix”的签名，而不是整段 prompt 的签名。
-        # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
@@ -318,6 +673,13 @@ class OpenAICompatibleModelClient:
                 if exc.code >= 500 and attempt < attempts - 1:
                     time.sleep(0.5 * (attempt + 1))
                     continue
+                if tools and exc.code >= 500:
+                    return self._complete_chat_completions(
+                        messages,
+                        max_new_tokens,
+                        tools=tools,
+                        system=system,
+                    )
                 raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
             except (urllib.error.URLError, RemoteDisconnected) as exc:
                 if attempt < attempts - 1:
@@ -329,47 +691,29 @@ class OpenAICompatibleModelClient:
                     f"Model: {self.model}"
                 ) from exc
 
-        # 有些兼容后端返回普通 JSON，有些返回 SSE。
-        # 这里两种都接住，并尽量统一抽取文本和 usage/cache 元数据。
         if content_type.startswith("text/event-stream") or body_text.lstrip().startswith("data:"):
-            text, response_data = _extract_openai_response_from_sse(body_text)
-            if isinstance(response_data, dict) and response_data:
-                # 这些元数据会一路传回 runtime，进入 trace 和 report，
-                # 用来观察 prompt cache 是否真的命中。
-                self.last_completion_metadata = {
-                    "prompt_cache_supported": self.supports_prompt_cache,
-                    "prompt_cache_key": prompt_cache_key,
-                    "prompt_cache_retention": prompt_cache_retention,
-                    **_extract_usage_cache_details(response_data),
-                }
-            if text:
-                return text
-            raise RuntimeError("OpenAI-compatible error: could not extract text from event stream response")
-
-        try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
-            ) from exc
+            text, data = _extract_openai_response_from_sse(body_text)
+        else:
+            try:
+                data = json.loads(body_text)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
+                ) from exc
+            text = _extract_openai_text(data)
         if data.get("error"):
             raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
-        self.last_completion_metadata = {
+        metadata = {
             "prompt_cache_supported": self.supports_prompt_cache,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_retention": prompt_cache_retention,
             **_extract_usage_cache_details(data),
         }
-        return _extract_openai_text(data)
-
-
-def _extract_anthropic_text(data):
-    for item in data.get("content", []):
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str) and text:
-                return text
-    return ""
+        self.last_completion_metadata = metadata
+        calls = _extract_openai_tool_calls(data)
+        if calls:
+            return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
+        return ModelResponse.final(text, metadata=metadata, raw=data)
 
 
 class AnthropicCompatibleModelClient:
@@ -380,29 +724,22 @@ class AnthropicCompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.supports_prompt_cache = False
+        self.supports_tools = True
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
-        # 为了保持统一接口，runtime 仍然会传缓存参数进来；
-        # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
+    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None):
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
+            "messages": _to_anthropic_messages(_normalize_messages(messages)),
             "max_tokens": max_new_tokens,
             "stream": False,
         }
+        if system:
+            payload["system"] = str(system)
+        if tools:
+            payload["tools"] = _tool_specs_to_anthropic(tools)
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 
@@ -448,7 +785,4 @@ class AnthropicCompatibleModelClient:
             ) from exc
         if data.get("error"):
             raise RuntimeError(f"Anthropic-compatible error: {data['error']}")
-        text = _extract_anthropic_text(data)
-        if text:
-            return text
-        raise RuntimeError("Anthropic-compatible error: could not extract text from response")
+        return _extract_anthropic_response(data)

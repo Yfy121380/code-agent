@@ -3,7 +3,7 @@ import shlex
 import sys
 from unittest.mock import patch
 
-from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
+from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli as mini_cli
 from codemate.task_state import TaskState
 
@@ -140,8 +140,10 @@ def test_patch_file_allows_freshly_read_file(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    read_result = agent.run_tool("read_file", {"path": "target.txt", "start": 1, "end": 10})
-    agent.record({"role": "tool", "name": "read_file", "args": {"path": "target.txt", "start": 1, "end": 10}, "content": read_result, "created_at": "2026-04-09T00:00:00+00:00"})
+    read_args = {"path": "target.txt", "start": 1, "end": 10}
+    read_result = agent.run_tool("read_file", read_args)
+    agent.record({"role": "assistant", "content": "", "tool_calls": [{"id": "call_read_target", "name": "read_file", "args": read_args}], "created_at": "2026-04-09T00:00:00+00:00"})
+    agent.record({"role": "tool", "tool_call_id": "call_read_target", "name": "read_file", "content": read_result, "created_at": "2026-04-09T00:00:00+00:00"})
     result = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
 
     assert result == "patched target.txt"
@@ -152,8 +154,10 @@ def test_patch_file_rejects_stale_read_after_external_change(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    read_result = agent.run_tool("read_file", {"path": "target.txt", "start": 1, "end": 10})
-    agent.record({"role": "tool", "name": "read_file", "args": {"path": "target.txt", "start": 1, "end": 10}, "content": read_result, "created_at": "2026-04-09T00:00:00+00:00"})
+    read_args = {"path": "target.txt", "start": 1, "end": 10}
+    read_result = agent.run_tool("read_file", read_args)
+    agent.record({"role": "assistant", "content": "", "tool_calls": [{"id": "call_read_stale", "name": "read_file", "args": read_args}], "created_at": "2026-04-09T00:00:00+00:00"})
+    agent.record({"role": "tool", "tool_call_id": "call_read_stale", "name": "read_file", "content": read_result, "created_at": "2026-04-09T00:00:00+00:00"})
     (tmp_path / "target.txt").write_text("alpha changed\n", encoding="utf-8")
 
     result = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
@@ -180,6 +184,23 @@ def test_write_file_requires_fresh_read_for_existing_file(tmp_path):
     assert "must be read with read_file before editing" in result
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "alpha\n"
 
+def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(tmp_path):
+    agent = build_agent(tmp_path, [])
+    args = {"path": "README.md", "start": 1, "end": 1}
+
+    first = agent.run_tool("read_file", args)
+    agent.record({"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "name": "read_file", "args": args}], "created_at": "2026-04-09T00:00:00+00:00"})
+    agent.record({"role": "tool", "tool_call_id": "call_1", "name": "read_file", "content": first, "created_at": "2026-04-09T00:00:00+00:00"})
+
+    second = agent.run_tool("read_file", args, current_tool_call_id="call_2")
+    assert "# README.md" in second
+    agent.record({"role": "assistant", "content": "", "tool_calls": [{"id": "call_2", "name": "read_file", "args": args}], "created_at": "2026-04-09T00:00:00+00:00"})
+    agent.record({"role": "tool", "tool_call_id": "call_2", "name": "read_file", "content": second, "created_at": "2026-04-09T00:00:00+00:00"})
+
+    third = agent.run_tool("read_file", args, current_tool_call_id="call_3")
+
+    assert "repeated identical tool call" in third
+
 # 危险工具审批拒绝
 def test_risky_tool_deny_behavior(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
@@ -201,7 +222,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
             self.args = args
             self.kwargs = kwargs
 
-        def complete(self, prompt, max_new_tokens):
+        def complete(self, messages, max_new_tokens, **kwargs):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
@@ -231,7 +252,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
             self.args = args
             self.kwargs = kwargs
 
-        def complete(self, prompt, max_new_tokens):
+        def complete(self, messages, max_new_tokens, **kwargs):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
@@ -250,7 +271,7 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
             self.args = args
             self.kwargs = kwargs
 
-        def complete(self, prompt, max_new_tokens):
+        def complete(self, messages, max_new_tokens, **kwargs):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
@@ -267,7 +288,7 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
             self.args = args
             self.kwargs = kwargs
 
-        def complete(self, prompt, max_new_tokens):
+        def complete(self, messages, max_new_tokens, **kwargs):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
@@ -335,10 +356,10 @@ def test_delegate_child_is_read_only(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
-            "<final>child done</final>",
-            "<final>parent done</final>",
+            ModelResponse.tool_call("delegate", {"task": "write a file", "max_steps": 2}),
+            ModelResponse.tool_call("write_file", {"path": "child-was-not-allowed.txt", "content": "nope"}),
+            ModelResponse.final("child done"),
+            ModelResponse.final("parent done"),
         ],
     )
 

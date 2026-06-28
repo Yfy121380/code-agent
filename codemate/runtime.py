@@ -87,8 +87,8 @@ class CodeMate:
         session=None,
         run_store=None,
         approval_policy="ask",
-        max_steps=6,
-        max_new_tokens=512,
+        max_steps=20,
+        max_new_tokens=4096,
         depth=0,
         max_depth=1,
         read_only=False,
@@ -196,101 +196,77 @@ class CodeMate:
             payload.append(
                 {
                     "name": name,
-                    "schema": tool["schema"],
+                    "input_schema": tool["input_schema"],
                     "risky": tool["risky"],
                     "description": tool["description"],
                 }
             )
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
-    def build_prefix(self):
-        tool_lines = []
+    def model_tools(self):
+        specs = []
         for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
-            risk = "approval required" if tool["risky"] else "safe"
-            tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
-        tool_text = "\n".join(tool_lines)
-        examples = "\n".join(
-            [
-                '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool>{"name":"grep","args":{"pattern":"class CodeMate","path":"codemate","mode":"files_with_matches"}}</tool>',
-                '<tool>{"name":"grep","args":{"pattern":"run_tool","path":"codemate","mode":"count"}}</tool>',
-                '<tool>{"name":"grep","args":{"pattern":"def run_tool","path":"codemate/runtime.py","mode":"content","before":2,"after":4}}</tool>',
-                '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                "<final>Done.</final>",
-            ]
-        )
-        response_protocol = textwrap.dedent(
-            """\
-            Response protocol:
-            - Return exactly one <tool>...</tool> or one <final>...</final>.
-            - Tool calls must look like:
-              <tool>{"name":"tool_name","args":{...}}</tool>
-            - For write_file and patch_file with multi-line text, prefer XML style:
-              <tool name="write_file" path="file.py"><content>...</content></tool>
-            - Final answers must look like:
-              <final>your answer</final>
-            - Never invent tool results.
-            - Keep answers concise and concrete.
-            """
-        ).strip()
+            specs.append(
+                {
+                    "name": name,
+                    "description": tool["description"],
+                    "input_schema": tool["input_schema"],
+                    "risky": tool["risky"],
+                }
+            )
+        return specs
+
+    def build_prefix(self):
         tool_use_rules = textwrap.dedent(
             """\
             Tool use:
+            - Use tools only while they are needed to make progress on the user's request.
+            - Stop using tools and return a final answer when you have completed user's request or have sufficient information to respond fully without further tool invocation.
+            - Do not repeat reads or searches merely to reconfirm information you already have.
+            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
             - Use the provided tools for workspace work.
             - To inspect a file, use read_file.
             - To search file contents, use grep.
             - To edit an existing file, use patch_file after read_file.
             - To create a new file, use write_file.
-            - Do not say tools are unavailable when they are listed in this prompt.
-            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
+            - Do not say tools are unavailable when they are provided by the runtime.
+            - If a tool result says a repeated identical call was rejected, do not retry the same investigation; either choose a materially different action or provide the final answer.
             """
         ).strip()
         workflow_rules = textwrap.dedent(
             """\
             Workflow rules:
-            - After a successful tool result, treat it as an observation and continue with the next required tool call unless the user's request is already complete.
+            - After a successful tool result, treat it as an observation and continue with the next required action unless the user's request is already complete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
             - Before editing an existing file with write_file or patch_file, read that exact file first; grep/list_files results are not enough.
-            - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
             - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
             """
         ).strip()
-        argument_safety = textwrap.dedent(
+        answer_rules = textwrap.dedent(
             """\
-            Argument safety:
-            - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.
+            Answering:
+            - Never invent tool results.
+            - Keep answers concise and concrete.
+            - When the task is complete, answer with a brief summary of what changed and any verification performed.
             """
         ).strip()
         # prefix 可以理解成 agent 的“工作手册”：
-        # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
+        # 它是谁、如何使用工具、当前仓库是什么状态，都写在这里。
         text = textwrap.dedent(
             f"""\
             You are codemate, a small local coding agent working inside a local repository.
-
-            {response_protocol}
 
             {tool_use_rules}
 
             {workflow_rules}
 
-            {argument_safety}
-
-            Tools:
-            {tool_text}
-
-            Valid response examples:
-            {examples}
+            {answer_rules}
 
             {self.workspace.text()}
             """
         ).strip()
-        print(text)
         return PromptPrefix(
             text=text,
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -335,23 +311,18 @@ class CodeMate:
             return "- empty"
 
         lines = []
-        seen_reads = set()
-        recent_start = max(0, len(history) - 6)
+        recent_start = max(0, len(history) - 20)
         for index, item in enumerate(history):
             recent = index >= recent_start
-            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
-                path = str(item["args"].get("path", ""))
-                if path in seen_reads:
-                    continue
-                seen_reads.add(path)
-
-            if item["role"] == "tool":
-                limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True, ensure_ascii=False)}")
-                lines.append(clip(item["content"], limit))
+            limit = 3000 if recent else 1000
+            role = item.get("role", "")
+            if role == "assistant" and item.get("tool_calls"):
+                lines.append(f"[assistant:tool_calls] {json.dumps(item.get('tool_calls'), sort_keys=True, ensure_ascii=False)}")
+            elif role == "tool":
+                lines.append(f"[tool:{item.get('name', '')}] {item.get('tool_call_id', '')}")
+                lines.append(clip(item.get("content", ""), limit))
             else:
-                limit = 900 if recent else 220
-                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
+                lines.append(f"[{role}] {clip(item.get('content', ''), limit)}")
 
         return clip("\n".join(lines), MAX_HISTORY)
 
@@ -472,6 +443,33 @@ class CodeMate:
         )
         metadata.update(self.detected_secret_env_summary())
         return prompt, metadata
+
+    def _build_messages_and_metadata(self, user_message):
+        refresh = self.refresh_prefix()
+        self.invalidate_stale_memory()
+        message_build = self.context_manager.build_messages(user_message)
+        metadata = dict(message_build.metadata)
+        metadata.update(
+            {
+                "prefix_chars": len(self.prefix),
+                "workspace_chars": len(self.workspace.text()),
+                "memory_chars": len(self.memory_text()),
+                "history_chars": len(self.history_text()),
+                "request_chars": len(user_message),
+                "tool_count": len(self.tools),
+                "workspace_docs": len(self.workspace.project_docs),
+                "recent_commits": len(self.workspace.recent_commits),
+                "prefix_hash": self.prefix_state.hash,
+                "prompt_cache_key": self.prefix_state.hash,
+                "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
+                "tool_signature": self.prefix_state.tool_signature,
+                "workspace_changed": refresh["workspace_changed"],
+                "prefix_changed": refresh["prefix_changed"],
+                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
+            }
+        )
+        metadata.update(self.detected_secret_env_summary())
+        return message_build.system, message_build.messages, metadata
 
     def emit_trace(self, task_state, event, payload=None):
         """
@@ -689,12 +687,14 @@ class CodeMate:
         # 4. 记录：把结果写回 history / task_state / trace / memory
         # 然后进入下一轮，直到停机条件满足
         while tool_steps < self.max_steps and attempts < max_attempts:
-            # 2. 每一轮先落盘当前 attempt，再组装模型要看的 prompt。
+            # 2. 每一轮先落盘当前 attempt，再组装模型要看的 messages。
             attempts += 1
             task_state.record_attempt()
             self.run_store.write_task_state(task_state)
             prompt_started_at = time.monotonic()
-            prompt, prompt_metadata = self._build_prompt_and_metadata(user_message)
+            system, messages, prompt_metadata = self._build_messages_and_metadata(user_message)
+            # print(f"system:{system}")
+            # print(f"message:{messages}")
             self.emit_trace(
                 task_state,
                 "prompt_built",
@@ -716,76 +716,101 @@ class CodeMate:
             prompt_cache_key = None
             prompt_cache_retention = None
             if getattr(self.model_client, "supports_prompt_cache", False):
-                # 只有后端明确支持时，才把稳定前缀的 hash 作为 cache key 发出去。
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
                 prompt_cache_retention = "in_memory"
             model_started_at = time.monotonic()
-            raw = self.model_client.complete(
-                prompt,
+            response = self.model_client.complete(
+                messages,
                 self.max_new_tokens,
+                tools=self.model_tools(),
+                system=system,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
             )
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
+            response_metadata = dict(getattr(response, "metadata", {}) or {})
+            completion_metadata.update(response_metadata)
             if completion_metadata:
-                # 把后端返回的 usage/cache 统计并回 prompt_metadata，
-                # 方便统一写入 report 和 trace。
                 prompt_metadata.update(completion_metadata)
             self.last_completion_metadata = completion_metadata
             self.last_prompt_metadata = prompt_metadata
-            # 若解析不到任何tool / final标记，则直接将原始文本当作最终回答，若回答为空，则返回retry
-            kind, payload = self.parse(raw)
-            # 5. 模型输出先解析成 tool / final / retry，再进入对应分支。
+            kind = getattr(response, "kind", "final")
             self.emit_trace(
                 task_state,
                 "model_parsed",
                 {
                     "kind": kind,
+                    "tool_call_count": len(getattr(response, "tool_calls", []) or []),
                     "completion_metadata": completion_metadata,
                     "duration_ms": int((time.monotonic() - model_started_at) * 1000),
                 },
             )
 
-            if kind == "tool":
-                # 6. tool 分支：执行工具，把结果写回 history。
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                task_state.record_tool(name)
-                tool_started_at = time.monotonic()
-                result = self.run_tool(name, args)
-                self.record(
-                    {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
-                        "created_at": now(),
-                    }
-                )
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "tool_executed",
-                    {
-                        "name": name,
-                        "args": args,
-                        "result": clip(result, 500),
-                        "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
-                        **dict(self._last_tool_result_metadata or {}),
-                    },
-                )
+            if kind == "tool_calls":
+                calls = list(getattr(response, "tool_calls", []) or [])
+                if not calls:
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "content": "Runtime notice: model returned an empty tool call list.",
+                            "created_at": now(),
+                        }
+                    )
+                    self.run_store.write_task_state(task_state)
+                    continue
+                for call in calls:
+                    if tool_steps >= self.max_steps:
+                        break
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "content": str(getattr(response, "text", "") or ""),
+                            "tool_calls": [call.to_dict()],
+                            "created_at": now(),
+                        }
+                    )
+                    tool_steps += 1
+                    name = call.name
+                    args = dict(call.args or {})
+                    task_state.record_tool(name)
+                    tool_started_at = time.monotonic()
+                    result = self.run_tool(name, args, current_tool_call_id=call.id)
+                    self.record(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": name,
+                            "content": result,
+                            "created_at": now(),
+                        }
+                    )
+                    self.run_store.write_task_state(task_state)
+                    self.emit_trace(
+                        task_state,
+                        "tool_executed",
+                        {
+                            "name": name,
+                            "args": args,
+                            "tool_call_id": call.id,
+                            "result": clip(result, 4000),
+                            "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
+                            **dict(self._last_tool_result_metadata or {}),
+                        },
+                    )
                 continue
 
-            if kind == "retry":
-                # 7. retry 分支：模型格式不合法，只记录纠错提示并进入下一轮。
-                self.record({"role": "assistant", "content": payload, "created_at": now()})
-                self.run_store.write_task_state(task_state)
-                continue
-
-            # 8. final 分支：记录最终答案、晋升长期记忆、写 report 后返回给 CLI。
             if kind == "final":
-                final = (payload or raw).strip()
+                final = str(getattr(response, "text", "") or "").strip()
+                if not final:
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "content": "Runtime notice: model returned an empty final answer.",
+                            "created_at": now(),
+                        }
+                    )
+                    self.run_store.write_task_state(task_state)
+                    continue
                 self.record({"role": "assistant", "content": final, "created_at": now()})
                 task_state.finish_success(final)
                 self.promote_durable_memory(user_message, final)
@@ -802,6 +827,15 @@ class CodeMate:
                 )
                 self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
                 return final
+
+            self.record(
+                {
+                    "role": "assistant",
+                    "content": f"Runtime notice: unknown model response kind {kind!r}.",
+                    "created_at": now(),
+                }
+            )
+            self.run_store.write_task_state(task_state)
 
         # 9. 没拿到 final 时安全停机：区分格式重试耗尽和工具步数耗尽。
         if attempts >= max_attempts and tool_steps < self.max_steps:
@@ -826,7 +860,7 @@ class CodeMate:
         self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
         return final
 
-    def run_tool(self, name, args):
+    def run_tool(self, name, args, current_tool_call_id=None):
         """执行一次工具调用，并在执行前后套上完整护栏。
 
         为什么存在：
@@ -865,10 +899,7 @@ class CodeMate:
             # 路径限制在workspace内 + 参数有效性校验
             self.validate_tool(name, args)
         except Exception as exc:
-            example = self.tool_example(name)
             message = f"error: invalid arguments for {name}: {exc}"
-            if example:
-                message += f"\nexample: {example}"
             security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -882,7 +913,7 @@ class CodeMate:
             }
             return message
         # 拦截重复调用过两次的工具，若最近两次工具调用请求均和当前一样(包括args)，则拒绝当次请求
-        if self.repeated_tool_call(name, args):
+        if self.repeated_tool_call(name, args, exclude_call_id=current_tool_call_id):
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "repeated_identical_call",
@@ -911,7 +942,7 @@ class CodeMate:
         before_snapshot = self.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
         try:
-            result = clip(tool["run"](args))
+            result = str(tool["run"](args))
             after_snapshot = self.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             # 返回有哪些文件不同，修改了、删除了、新增了哪些文件
             affected_paths, diff_summary = self.diff_workspace_snapshots(before_snapshot, after_snapshot)
@@ -966,14 +997,25 @@ class CodeMate:
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
             return f"error: tool {name} failed: {exc}"
 
-    def repeated_tool_call(self, name, args):
+    def recent_tool_calls(self, exclude_call_id=None):
+        calls = []
+        for item in self.session["history"]:
+            if item.get("role") != "assistant":
+                continue
+            for call in item.get("tool_calls", []) or []:
+                if exclude_call_id is not None and str(call.get("id", "")) == str(exclude_call_id):
+                    continue
+                calls.append({"name": call.get("name", ""), "args": dict(call.get("args", {}) or {})})
+        return calls
+
+    def repeated_tool_call(self, name, args, exclude_call_id=None):
         # agent 很常见的一种坏循环，是在没有新信息的情况下反复发起同一调用。
-        # 这里提前挡掉最简单的这种循环。
-        tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
-        if len(tool_events) < 2:
+        # 新 history 中以 assistant.tool_calls 代表模型的工具请求，tool 消息只记录结果。
+        tool_calls = self.recent_tool_calls(exclude_call_id=exclude_call_id)
+        if len(tool_calls) < 2:
             return False
-        recent = tool_events[-2:]
-        return all(item["name"] == name and item["args"] == args for item in recent)
+        recent = tool_calls[-2:]
+        return all(call["name"] == name and call["args"] == args for call in recent)
 
     @staticmethod
     def new_task_id():
@@ -1002,9 +1044,6 @@ class CodeMate:
             "durable_superseded": list(self.last_durable_superseded),
             "redacted_env": self.detected_secret_env_summary(),
         }
-
-    def tool_example(self, name):
-        return toolkit.tool_example(name)
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
@@ -1058,126 +1097,6 @@ class CodeMate:
         except EOFError:
             return False
         return answer.strip().lower() in {"y", "yes"}
-
-    @staticmethod
-    def parse(raw):
-        """把模型原始输出解析成 runtime 可执行的动作或最终答案。
-
-        为什么存在：
-        模型输出首先是自然语言文本，而 runtime 需要的是结构化决策：
-        “这是工具调用”还是“这是最终答案”。如果没有这层解析，后面的工具校验、
-        审批和执行链路就没法可靠工作。
-
-        输入 / 输出：
-        - 输入：模型返回的原始文本 `raw`
-        - 输出：`(kind, payload)`，其中 `kind` 可能是 `tool`、`final`、`retry`
-
-        在 agent 链路里的位置：
-        它位于 `model_client.complete()` 之后、`run_tool()` 之前，是模型输出
-        进入平台控制流的第一道结构化关口。
-        """
-        raw = str(raw)
-        # 这里支持两种工具格式：
-        # 1. <tool>...</tool> 里包 JSON，适合简短调用
-        # 2. XML 风格属性/子标签，适合写文件这类多行内容
-        if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            body = CodeMate.extract(raw, "tool")
-            try:
-                payload = json.loads(body)
-            except Exception:
-                return "retry", CodeMate.retry_notice("model returned malformed tool JSON")
-            if not isinstance(payload, dict):
-                return "retry", CodeMate.retry_notice("tool payload must be a JSON object")
-            if not str(payload.get("name", "")).strip():
-                return "retry", CodeMate.retry_notice("tool payload is missing a tool name")
-            args = payload.get("args", {})
-            if args is None:
-                payload["args"] = {}
-            elif not isinstance(args, dict):
-                return "retry", CodeMate.retry_notice()
-            return "tool", payload
-        if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
-            payload = CodeMate.parse_xml_tool(raw)
-            if payload is not None:
-                return "tool", payload
-            return "retry", CodeMate.retry_notice()
-        if "<final>" in raw:
-            final = CodeMate.extract(raw, "final").strip()
-            if final:
-                return "final", final
-            return "retry", CodeMate.retry_notice("model returned an empty <final> answer")
-        raw = raw.strip()
-        if raw:
-            return "final", raw
-        return "retry", CodeMate.retry_notice("model returned an empty response")
-
-    @staticmethod
-    def retry_notice(problem=None):
-        prefix = "Runtime notice"
-        if problem:
-            prefix += f": {problem}"
-        else:
-            prefix += ": model returned malformed tool output"
-        return (
-            f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
-            'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
-        )
-
-    @staticmethod
-    def parse_xml_tool(raw):
-        match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
-        if not match:
-            return None
-        attrs = CodeMate.parse_attrs(match.group("attrs"))
-        name = str(attrs.pop("name", "")).strip()
-        if not name:
-            return None
-
-        body = match.group("body")
-        args = dict(attrs)
-        for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
-            if f"<{key}>" in body:
-                args[key] = CodeMate.extract_raw(body, key)
-
-        body_text = body.strip("\n")
-        if name == "write_file" and "content" not in args and body_text:
-            args["content"] = body_text
-        if name == "delegate" and "task" not in args and body_text:
-            args["task"] = body_text.strip()
-        return {"name": name, "args": args}
-
-    @staticmethod
-    def parse_attrs(text):
-        attrs = {}
-        for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
-            attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
-        return attrs
-
-    @staticmethod
-    def extract(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:].strip()
-        return text[start:end].strip()
-
-    @staticmethod
-    def extract_raw(text, tag):
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:]
-        return text[start:end]
 
     def reset(self):
         self.session["history"] = []

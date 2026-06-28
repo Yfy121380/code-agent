@@ -3,7 +3,7 @@
 可以把这个文件看成 agent 的能力白名单：模型能申请哪些动作、这些动作
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
-# 现在的工具系统不行，不能只在prompt里面添加工具说明和工具示例，需要将tool schema接到模型的tools当中才行，这样的话要对整个项目进行大改，包括提示词，要构建各个工具的schema，针对模型返回值的解析也需要改变，需要好好地设计一下
+
 import shutil
 import subprocess
 import textwrap
@@ -17,65 +17,120 @@ MAX_GREP_CONTEXT_LINES = 20
 
 BASE_TOOL_SPECS = {
     "list_files": {
-        "schema": {"path": "str='.'"},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative directory path to list.",
+                    "default": ".",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
         "risky": False,
-        "description": "List files in the workspace.",
+        "description": "List files in a workspace directory.",
     },
     "read_file": {
-        "schema": {"path": "str", "start": "int=1", "end": "int=200"},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path to read."},
+                "start": {"type": "integer", "description": "1-based starting line number.", "default": 1},
+                "end": {"type": "integer", "description": "1-based ending line number, inclusive.", "default": 200},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
         "risky": False,
-        "description": "Read a UTF-8 file by line range.",
+        "description": "Read a UTF-8 text file by line range before reasoning about or editing it.",
     },
     "grep": {
-        "schema": {
-            "pattern": "str",
-            "path": "str='.'",
-            "mode": "str='content'",
-            "after": "int=0",
-            "before": "int=0",
-            "context": "int=0",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
+                "path": {"type": "string", "description": "Workspace-relative file or directory path to search.", "default": "."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["files_with_matches", "count", "content"],
+                    "description": (
+                        "Output mode. files_with_matches returns only matching file paths; "
+                        "count returns per-file match counts plus total_matches; "
+                        "content returns matching lines with paths and line numbers."
+                    ),
+                    "default": "content",
+                },
+                "after": {"type": "integer", "description": "Context lines after each match in content mode.", "default": 0},
+                "before": {"type": "integer", "description": "Context lines before each match in content mode.", "default": 0},
+                "context": {"type": "integer", "description": "Symmetric context lines like rg -C; overridden by before/after when set.", "default": 0},
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
         },
         "risky": False,
         "description": (
-            "Search files with rg-style output. mode controls output shape: "
-            "files_with_matches returns only matching file paths and is best for locating relevant files; "
-            "count returns per-file match counts plus total_matches and is best for estimating match/change scale; "
-            "content returns matching lines with file paths and line numbers and is best for reading concrete matches. "
+            "Search files with rg-style output. Use files_with_matches to locate relevant files, "
+            "count to estimate match/change scale, and content to inspect concrete matching lines. "
             "In content mode, before/after/context control surrounding lines like rg -B/-A/-C; "
             "explicit before/after override context for that side."
         ),
     },
     "run_shell": {
-        "schema": {"command": "str", "timeout": "int=20"},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run in the repository root."},
+                "timeout": {"type": "integer", "description": "Timeout in seconds, from 1 to 120.", "default": 20},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
         "risky": True,
         "description": "Run a shell command in the repo root.",
     },
     "write_file": {
-        "schema": {"path": "str", "content": "str"},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path to write."},
+                "content": {"type": "string", "description": "Complete UTF-8 text content to write."},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
         "risky": True,
-        "description": "Write a text file.",
+        "description": "Create a new text file or replace an existing text file.",
     },
     "patch_file": {
-        "schema": {"path": "str", "old_text": "str", "new_text": "str"},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path to patch."},
+                "old_text": {"type": "string", "description": "Exact text block to replace. Must occur exactly once."},
+                "new_text": {"type": "string", "description": "Replacement text."},
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
         "risky": True,
-        "description": "Replace one exact text block in a file.",
+        "description": "Replace one exact text block in an existing file.",
     },
 }
 
 DELEGATE_TOOL_SPEC = {
-    "schema": {"task": "str", "max_steps": "int=3"},
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "Bounded read-only investigation task for the child agent."},
+            "max_steps": {"type": "integer", "description": "Maximum child-agent tool steps.", "default": 3},
+        },
+        "required": ["task"],
+        "additionalProperties": False,
+    },
     "risky": False,
     "description": "Ask a bounded read-only child agent to investigate.",
-}
-
-TOOL_EXAMPLES = {
-    "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-    "grep": '<tool>{"name":"grep","args":{"pattern":"binary_search","path":".","mode":"content","context":2}}</tool>',
-    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-    "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-    "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
 }
 
 
@@ -91,10 +146,6 @@ def build_tool_registry(agent):
     if agent.depth < agent.max_depth:
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
     return tools
-
-
-def tool_example(name):
-    return TOOL_EXAMPLES.get(name, "")
 
 
 def validate_tool(agent, name, args):

@@ -1,5 +1,5 @@
 from .cli import build_agent, build_arg_parser, build_welcome, main
-from .models import AnthropicCompatibleModelClient, FakeModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from .models import AnthropicCompatibleModelClient, FakeModelClient, ModelResponse, ModelToolCall, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import MiniAgent, CodeMate, SessionStore
 from .workspace import WorkspaceContext
 
@@ -12,6 +12,8 @@ __all__ = [
     "build_welcome",
     "main",
     "MiniAgent",
+    "ModelResponse",
+    "ModelToolCall",
     "OllamaModelClient",
     "OpenAICompatibleModelClient",
     "SessionStore",

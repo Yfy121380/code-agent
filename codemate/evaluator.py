@@ -9,7 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import memory as memorylib
-from .models import FakeModelClient
+from .models import FakeModelClient, ModelResponse
 from .runtime import CodeMate, SessionStore
 from .run_store import RunStore
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
@@ -43,61 +43,69 @@ TASK_FIXTURE_ARTIFACTS = {
     "bench_repo_patch": "sample.txt",
 }
 
+def _tool(name, args):
+    return ModelResponse.tool_call(name, args)
+
+
+def _final(text):
+    return ModelResponse.final(text)
+
+
 SCRIPTED_MODEL_OUTPUTS = {
     "readme_intro_locked": [
-        '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture is a locked benchmark workspace.</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "README.md", "start": 1, "end": 40}),
+        _tool("patch_file", {"path": "README.md", "old_text": "This is a placeholder benchmark fixture.", "new_text": "This fixture is a locked benchmark workspace."}),
+        _final("Done."),
     ],
     "readme_schema_note": [
-        '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the repo.</old_text><new_text>- The benchmark schema and baseline are fixed.</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "README.md", "start": 1, "end": 40}),
+        _tool("patch_file", {"path": "README.md", "old_text": "- Placeholder note about the repo.", "new_text": "- The benchmark schema and baseline are fixed."}),
+        _final("Done."),
     ],
     "readme_ordering_note": [
-        '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>- Placeholder note about the file layout.</old_text><new_text>- Deterministic file ordering keeps benchmark diffs stable.</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "README.md", "start": 1, "end": 40}),
+        _tool("patch_file", {"path": "README.md", "old_text": "- Placeholder note about the file layout.", "new_text": "- Deterministic file ordering keeps benchmark diffs stable."}),
+        _final("Done."),
     ],
     "sample_beta_locked": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":20}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>beta</old_text><new_text>beta-locked</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
+        _tool("patch_file", {"path": "sample.txt", "old_text": "beta", "new_text": "beta-locked"}),
+        _final("Done."),
     ],
     "sample_gamma_locked": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":20}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>gamma</old_text><new_text>gamma-locked</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
+        _tool("patch_file", {"path": "sample.txt", "old_text": "gamma", "new_text": "gamma-locked"}),
+        _final("Done."),
     ],
     "sample_placeholder_delta": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":20}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>delta</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
+        _tool("patch_file", {"path": "sample.txt", "old_text": "placeholder", "new_text": "delta"}),
+        _final("Done."),
     ],
     "invalid_patch_recovery": [
-        '<tool>{"name":"patch_file","args":{"path":"README.md","old_text":"This is a placeholder benchmark fixture."}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>',
-        '<tool name="patch_file" path="README.md"><old_text>This is a placeholder benchmark fixture.</old_text><new_text>This fixture recovered after invalid patch args.</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("patch_file", {"path": "README.md", "old_text": "This is a placeholder benchmark fixture."}),
+        _tool("read_file", {"path": "README.md", "start": 1, "end": 40}),
+        _tool("patch_file", {"path": "README.md", "old_text": "This is a placeholder benchmark fixture.", "new_text": "This fixture recovered after invalid patch args."}),
+        _final("Done."),
     ],
     "path_escape_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"../outside.txt","start":1,"end":1}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":20}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>alpha</old_text><new_text>alpha-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "../outside.txt", "start": 1, "end": 1}),
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
+        _tool("patch_file", {"path": "sample.txt", "old_text": "alpha", "new_text": "alpha-guarded"}),
+        _final("Done."),
     ],
     "repeated_read_recovery": [
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool>{"name":"read_file","args":{"path":"sample.txt","start":1,"end":4}}</tool>',
-        '<tool name="patch_file" path="sample.txt"><old_text>placeholder</old_text><new_text>repeat-guarded</new_text></tool>',
-        "<final>Done.</final>",
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 4}),
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 4}),
+        _tool("read_file", {"path": "sample.txt", "start": 1, "end": 4}),
+        _tool("patch_file", {"path": "sample.txt", "old_text": "placeholder", "new_text": "repeat-guarded"}),
+        _final("Done."),
     ],
     "durable_promotion_accept": [
-        "<final>Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible.</final>",
+        _final("Project convention: Preserve benchmark regression artifacts under artifacts/.\nDecision: Keep harness regression deterministic and reproducible."),
     ],
     "durable_promotion_reject": [
-        "<final>Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness.</final>",
+        _final("Project convention: Keep verifier outcomes stable across reruns.\nDependency: API key is sk-benchmark-secret.\nDecision: Current goal is debug the harness."),
     ],
 }
 

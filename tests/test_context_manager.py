@@ -136,19 +136,29 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
-def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(tmp_path):
+def test_context_manager_collapses_older_duplicate_reads_to_latest_structured_group(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\nbeta\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
     agent.memory.set_file_summary("sample.txt", "alpha | beta")
     agent.memory.remember_file("sample.txt")
 
-    for created_at in ("2026-04-07T09:00:00+00:00", "2026-04-07T09:01:00+00:00"):
+    for index, created_at in enumerate(("2026-04-07T09:00:00+00:00", "2026-04-07T09:01:00+00:00")):
+        call_id = f"call_read_{index}"
+        args = {"path": "sample.txt", "start": 1, "end": 2}
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "read_file", "args": args}],
+                "created_at": created_at,
+            }
+        )
         agent.record(
             {
                 "role": "tool",
+                "tool_call_id": call_id,
                 "name": "read_file",
-                "args": {"path": "sample.txt", "start": 1, "end": 2},
                 "content": "# sample.txt\nalpha\nbeta\n",
                 "created_at": created_at,
             }
@@ -167,42 +177,43 @@ def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(t
     prompt, metadata = ContextManager(agent).build("check the file")
     transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
 
-    assert transcript.count("[tool:read_file]") == 0
-    assert "sample.txt -> alpha | beta" in transcript
-    assert metadata["history"]["older_entries_count"] == 1
+    assert transcript.count("[tool:read_file]") == 1
+    assert "# sample.txt" in transcript
     assert metadata["history"]["collapsed_duplicate_reads"] == 1
-    assert metadata["history"]["reused_file_summary_count"] == 1
 
 
-def test_context_manager_summarizes_older_tool_output_into_one_line(tmp_path):
+def test_context_manager_clips_tool_output_without_breaking_tool_structure(tmp_path):
     agent = build_agent(tmp_path, [])
+    call_id = "call_shell"
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": call_id, "name": "run_shell", "args": {"command": "pytest -q"}}],
+            "created_at": "2026-04-07T09:00:00+00:00",
+        }
+    )
     agent.record(
         {
             "role": "tool",
+            "tool_call_id": call_id,
             "name": "run_shell",
-            "args": {"command": "pytest -q"},
-            "content": "FAIL test_one\nFAIL test_two\nFAIL test_three\nFAIL test_four\n",
+            "content": "FAIL test_one\n" + ("very long output\n" * 80),
             "created_at": "2026-04-07T09:00:00+00:00",
         }
     )
 
-    for minute in range(1, 7):
-        role = "user" if minute % 2 == 1 else "assistant"
-        agent.record(
-            {
-                "role": role,
-                "content": f"recent-{minute}",
-                "created_at": f"2026-04-07T09:0{minute}:00+00:00",
-            }
-        )
-
-    prompt, metadata = ContextManager(agent).build("check failures")
+    prompt, metadata = ContextManager(
+        agent,
+        total_budget=900,
+        section_budgets={"prefix": 120, "memory": 120, "relevant_memory": 120, "history": 360},
+    ).build("check failures")
     transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
 
-    assert 'pytest -q -> FAIL test_one | FAIL test_two | FAIL test_three' in transcript
-    assert "FAIL test_four" not in transcript
-    assert metadata["history"]["summarized_tool_count"] == 1
-    assert metadata["history"]["reused_file_summary_count"] == 0
+    assert "[assistant:tool_calls]" in transcript
+    assert "[tool:run_shell]" in transcript
+    assert "very long output" in transcript
+    assert transcript.count("very long output") < 80
 
 
 def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
