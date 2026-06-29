@@ -12,8 +12,8 @@ from pathlib import Path
 
 from .workspace import clip, now
 
-WORKING_FILE_LIMIT = 8
-EPISODIC_NOTE_LIMIT = 12
+WORKING_FILE_LIMIT = 12
+EPISODIC_NOTE_LIMIT = 6
 FILE_SUMMARY_LIMIT = 6
 
 DURABLE_TOPIC_DEFAULTS = {
