@@ -13,37 +13,10 @@ def test_working_memory_tracks_summary_and_recent_files():
 
     assert snapshot["working"]["task_summary"] == "Investigate flaky tests"
     assert snapshot["working"]["recent_files"] == ["src/app.py", "README.md"]
-    assert snapshot["task"] == "Investigate flaky tests"
-    assert snapshot["files"] == ["src/app.py", "README.md"]
-
-
-def test_episodic_notes_append_and_retrieve_deterministically():
-    memory = LayeredMemory()
-
-    memory.append_note("Exact tag note", tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
-    memory.append_note("Keyword overlap note about memory", created_at="2026-04-07T10:01:00+00:00")
-    memory.append_note("Newest unrelated note", created_at="2026-04-07T10:02:00+00:00")
-    memory.append_note("Older unrelated note", created_at="2026-04-07T09:59:00+00:00")
-
-    snapshot = memory.to_dict()
-    assert [note["text"] for note in snapshot["episodic_notes"]] == [
-        "Exact tag note",
-        "Keyword overlap note about memory",
-        "Newest unrelated note",
-        "Older unrelated note",
-    ]
-    assert snapshot["notes"] == [
-        "Exact tag note",
-        "Keyword overlap note about memory",
-        "Newest unrelated note",
-        "Older unrelated note",
-    ]
-
-    lines = [line for line in memory.retrieval_view("recall memory", limit=4).splitlines() if line.startswith("- ")]
-    assert lines == [
-        "- Exact tag note",
-        "- Keyword overlap note about memory",
-    ]
+    assert "task" not in snapshot
+    assert "files" not in snapshot
+    assert "notes" not in snapshot
+    assert "episodic_notes" not in snapshot
 
 
 def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
@@ -66,6 +39,7 @@ def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
 
     assert "sample.txt" not in memory.to_dict()["file_summaries"]
 
+
 def test_has_fresh_file_summary_requires_recent_file_and_matching_freshness(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\n", encoding="utf-8")
@@ -84,27 +58,110 @@ def test_has_fresh_file_summary_requires_recent_file_and_matching_freshness(tmp_
     assert not memory.has_fresh_file_summary("sample.txt")
 
 
-def test_process_notes_keep_kind_and_latest_duplicate_wins():
+def test_process_notes_merge_duplicate_abnormal_tool_calls():
     memory = LayeredMemory()
+    metadata = {
+        "tool_status": "rejected",
+        "tool_error_code": "invalid_arguments",
+        "affected_paths": [],
+    }
 
-    memory.append_note(
-        "Shell partial success on README.md; inspect diff before retry",
-        tags=("process", "partial_success"),
-        created_at="2026-04-07T10:00:00+00:00",
-        kind="process",
-    )
-    memory.append_note(
-        "Shell partial success on README.md; inspect diff before retry",
-        tags=("process", "partial_success"),
-        created_at="2026-04-07T10:01:00+00:00",
-        kind="process",
-    )
+    memory.record_process_note("patch_file", {"path": "README.md"}, metadata, "error: invalid arguments", current_turn=1)
+    memory.record_process_note("patch_file", {"path": "README.md"}, metadata, "error: invalid arguments again", current_turn=2)
 
-    notes = memory.to_dict()["episodic_notes"]
+    notes = memory.to_dict()["process_notes"]
 
     assert len(notes) == 1
-    assert notes[0]["kind"] == "process"
-    assert notes[0]["created_at"] == "2026-04-07T10:01:00+00:00"
+    assert notes[0]["kind"] == "invalid_arguments"
+    assert notes[0]["tool"] == "patch_file"
+    assert notes[0]["affected_paths"] == ["README.md"]
+    assert notes[0]["count"] == 2
+    assert notes[0]["updated_turn"] == 2
+    assert notes[0]["message"] == "error: invalid arguments again"
+
+
+def test_process_notes_expire_by_turn_ttl():
+    memory = LayeredMemory()
+    metadata = {
+        "tool_status": "rejected",
+        "tool_error_code": "repeated_identical_call",
+        "affected_paths": [],
+    }
+
+    memory.record_process_note("read_file", {"path": "README.md"}, metadata, "error: repeated", current_turn=1)
+    memory.expire_process_notes(current_turn=3)
+
+    assert len(memory.to_dict()["process_notes"]) == 1
+
+    memory.expire_process_notes(current_turn=4)
+
+    assert memory.to_dict()["process_notes"] == []
+
+
+def test_process_notes_clear_after_success_rules():
+    memory = LayeredMemory()
+
+    memory.record_process_note(
+        "patch_file",
+        {"path": "README.md"},
+        {"tool_status": "rejected", "tool_error_code": "invalid_arguments", "affected_paths": []},
+        "error: invalid arguments",
+        current_turn=1,
+    )
+    memory.record_process_note(
+        "read_file",
+        {"path": "README.md"},
+        {"tool_status": "rejected", "tool_error_code": "repeated_identical_call", "affected_paths": []},
+        "error: repeated",
+        current_turn=1,
+    )
+
+    memory.resolve_process_notes_after_success("list_files", {}, current_turn=1)
+    notes = memory.to_dict()["process_notes"]
+
+    assert [note["kind"] for note in notes] == ["invalid_arguments"]
+
+    memory.resolve_process_notes_after_success("patch_file", {"path": "README.md"}, current_turn=1)
+
+    assert memory.to_dict()["process_notes"] == []
+
+
+def test_partial_success_clears_after_all_affected_files_are_read():
+    memory = LayeredMemory()
+    metadata = {
+        "tool_status": "partial_success",
+        "tool_error_code": "tool_partial_success",
+        "affected_paths": ["a.txt", "b.txt"],
+    }
+
+    memory.record_process_note("run_shell", {"command": "make edit"}, metadata, "error: command failed", current_turn=1)
+    memory.resolve_process_notes_after_success("read_file", {"path": "a.txt"}, current_turn=1)
+
+    notes = memory.to_dict()["process_notes"]
+    assert len(notes) == 1
+    assert notes[0]["inspected_paths"] == ["a.txt"]
+
+    memory.resolve_process_notes_after_success("read_file", {"path": "b.txt"}, current_turn=1)
+
+    assert memory.to_dict()["process_notes"] == []
+
+
+def test_render_memory_text_includes_process_notes_near_file_summaries():
+    memory = LayeredMemory()
+    metadata = {
+        "tool_status": "error",
+        "tool_error_code": "tool_failed",
+        "affected_paths": [],
+    }
+
+    memory.record_process_note("run_shell", {"command": "pytest"}, metadata, "exit_code: 1", current_turn=1)
+
+    text = memory.render_memory_text()
+
+    assert "- file_summaries:" in text
+    assert "- process_notes:" in text
+    assert "run_shell error on workspace, count=1" in text
+    assert "exit_code: 1" in text
 
 
 def test_durable_memory_index_and_topic_notes_are_loaded_and_retrieved(tmp_path):
@@ -132,8 +189,6 @@ def test_durable_memory_index_and_topic_notes_are_loaded_and_retrieved(tmp_path)
 
     memory = LayeredMemory(workspace_root=tmp_path)
 
-    snapshot = memory.to_dict()
-    assert snapshot["durable_topics"] == ["project-conventions"]
-
+    assert "project-conventions" in memory.render_memory_text()
     lines = [line for line in memory.retrieval_view("constrained tools", limit=4).splitlines() if line.startswith("- ")]
     assert any("Use constrained tools instead of guessing." in line for line in lines)

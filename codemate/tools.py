@@ -10,7 +10,7 @@ import textwrap
 import re
 from functools import partial
 
-from .workspace import IGNORED_PATH_NAMES, clip
+from .workspace import IGNORED_PATH_NAMES
 
 GREP_MODES = {"files_with_matches", "count", "content"}
 MAX_GREP_CONTEXT_LINES = 20
@@ -476,8 +476,8 @@ def tool_delegate(agent, args):
     )
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
-    child.session["memory"]["task"] = task
-    child.session["memory"]["notes"] = [clip(agent.history_text(), 300)]
+    child.memory.set_task_summary(task)
+    child.session["memory"] = child.memory.to_dict()
     return "delegate_result:\n" + child.ask(task)
 
 

@@ -177,6 +177,9 @@ class CodeMate:
         self.session["memory"] = self.memory.to_dict()
         return invalidated
 
+    def current_memory_turn(self):
+        return sum(1 for item in self.session.get("history", []) if item.get("role") == "user")
+
     @staticmethod
     def remember(bucket, item, limit):
         if not item:
@@ -551,7 +554,6 @@ class CodeMate:
             # 读文件之后保存摘要，前三个非空行最多 180 字符的结果
             summary = memorylib.summarize_read_result(result)
             self.memory.set_file_summary(canonical_path, summary)
-            self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
             # 改动过的文件去除摘要
         elif name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
@@ -559,23 +561,22 @@ class CodeMate:
     def note_tool(self, name, args, result):
         self.update_memory_after_tool(name, args, result)
 
-    def record_process_note_for_tool(self, name, metadata):
-        status = str(metadata.get("tool_status", "")).strip()
-        if status not in {"partial_success", "error", "rejected"}:
+    def expire_process_notes(self):
+        if not self.feature_enabled("memory"):
             return
-        affected_paths = [str(path).strip() for path in metadata.get("affected_paths", []) if str(path).strip()]
-        path_text = ", ".join(affected_paths) or "workspace"
-        if status == "partial_success":
-            # 不要直接重试，先检查 diff / 文件状态
-            text = f"{name} partial_success on {path_text}; inspect diff before retry"
-        elif status == "error":
-            # 先看失败原因，再决定下一步
-            text = f"{name} error on {path_text}; check the failure before retry"
-        else:
-            # reject 表示被拦截，使用其他行动
-            text = f"{name} rejected; choose a different action before retry"
-        tags = ["process", status, *affected_paths]
-        self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
+        self.memory.expire_process_notes(self.current_memory_turn())
+        self.session["memory"] = self.memory.to_dict()
+
+    def record_process_note_for_tool(self, name, args, metadata, message):
+        if not self.feature_enabled("memory"):
+            return
+        self.memory.record_process_note(name, args, metadata, message, self.current_memory_turn())
+        self.session["memory"] = self.memory.to_dict()
+
+    def resolve_process_notes_after_success(self, name, args):
+        if not self.feature_enabled("memory"):
+            return
+        self.memory.resolve_process_notes_after_success(name, args, self.current_memory_turn())
         self.session["memory"] = self.memory.to_dict()
 
     def reject_durable_reason(self, note_text):
@@ -663,6 +664,7 @@ class CodeMate:
         run_started_at = time.monotonic()
         self.memory.set_task_summary(user_message)
         self.record({"role": "user", "content": user_message, "created_at": now()})
+        self.expire_process_notes()
         # 记录当前ask的执行状态，工具和模型调用次数、任务完成情况等
         task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
         self.current_task_state = task_state
@@ -884,6 +886,7 @@ class CodeMate:
         # -> 真正执行 -> 更新记忆。
         tool = self.tools.get(name)
         if tool is None:
+            message = f"error: unknown tool '{name}'"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "unknown_tool",
@@ -894,7 +897,8 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
             }
-            return f"error: unknown tool '{name}'"
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
         try:
             # 路径限制在workspace内 + 参数有效性校验
             self.validate_tool(name, args)
@@ -911,9 +915,11 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
             }
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         # 拦截重复调用过两次的工具，若最近两次工具调用请求均和当前一样(包括args)，则拒绝当次请求
         if self.repeated_tool_call(name, args, exclude_call_id=current_tool_call_id):
+            message = f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "repeated_identical_call",
@@ -924,9 +930,11 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
             }
-            return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
         # 根据安全规则和工具的危险程度进行审批
         if tool["risky"] and not self.approve(name, args):
+            message = f"error: approval denied for {name}"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "approval_denied",
@@ -937,7 +945,8 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
             }
-            return f"error: approval denied for {name}"
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
         # 危险工具执行前记录仓库文件快照计算 sha256，用于比较哪些文件有改变
         before_snapshot = self.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
@@ -975,14 +984,17 @@ class CodeMate:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
             }
-            # 工具调用出问题的话，记录调用情况作为 notes 
-            self.record_process_note_for_tool(name, self._last_tool_result_metadata)
+            if tool_status == "ok":
+                self.resolve_process_notes_after_success(name, args)
+            else:
+                self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, result)
             return result
         except Exception as exc:
             after_snapshot = self.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             affected_paths, diff_summary = self.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
             security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
+            message = f"error: tool {name} failed: {exc}"
             self._last_tool_result_metadata = {
                 "tool_status": "partial_success" if workspace_changed else "error",
                 "tool_error_code": "tool_partial_success" if workspace_changed else "tool_failed",
@@ -994,8 +1006,8 @@ class CodeMate:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
             }
-            self.record_process_note_for_tool(name, self._last_tool_result_metadata)
-            return f"error: tool {name} failed: {exc}"
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
 
     def recent_tool_calls(self, exclude_call_id=None):
         calls = []

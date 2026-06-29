@@ -20,9 +20,15 @@ def build_agent(tmp_path, outputs, **kwargs):
     )
 
 
+def add_durable_notes(agent, notes):
+    promotions = [("project-conventions", note) for note in notes]
+    agent.memory.promote_durable(promotions)
+    agent.session["memory"] = agent.memory.to_dict()
+
+
 def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.memory.append_note("deploy key is red", tags=("deploy",), created_at="2026-04-07T10:00:00+00:00")
+    add_durable_notes(agent, ["deploy key is red"])
     agent.record({"role": "user", "content": "old request", "created_at": "2026-04-07T09:59:00+00:00"})
     agent.record({"role": "assistant", "content": "old answer", "created_at": "2026-04-07T10:00:30+00:00"})
 
@@ -40,9 +46,14 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
     agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
-    agent.memory.append_note("keep episodic note one " + ("C" * 220), tags=("keep",), created_at="2026-04-07T10:00:00+00:00")
-    agent.memory.append_note("keep episodic note two " + ("D" * 220), tags=("keep",), created_at="2026-04-07T10:01:00+00:00")
-    agent.memory.append_note("keep episodic note three " + ("E" * 220), tags=("keep",), created_at="2026-04-07T10:02:00+00:00")
+    add_durable_notes(
+        agent,
+        [
+            "keep durable note one " + ("C" * 220),
+            "keep durable note two " + ("D" * 220),
+            "keep durable note three " + ("E" * 220),
+        ],
+    )
     agent.record({"role": "user", "content": "OLD-CONTEXT " + ("D" * 260), "created_at": "2026-04-07T09:59:00+00:00"})
     for minute in range(1, 8):
         role = "assistant" if minute % 2 == 1 else "user"
@@ -73,13 +84,18 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
     assert "keep this request verbatim" in prompt
 
 
-def test_context_manager_renders_top_three_episodic_notes_per_note_under_budget(tmp_path):
+def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
-    agent.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
-    agent.memory.append_note("gamma episodic note " + ("C" * 120), tags=("recall",), created_at="2026-04-07T10:02:00+00:00")
-    agent.memory.append_note("older unmatched note", created_at="2026-04-07T09:59:00+00:00")
-    agent.memory.append_note("Unrelated note", created_at="2026-04-07T11:00:00+00:00")
+    add_durable_notes(
+        agent,
+        [
+            "alpha durable recall note " + ("A" * 120),
+            "beta durable recall note " + ("B" * 120),
+            "gamma durable recall note " + ("C" * 120),
+            "older unmatched note",
+            "Unrelated note",
+        ],
+    )
 
     prompt, metadata = ContextManager(
         agent,
@@ -94,21 +110,14 @@ def test_context_manager_renders_top_three_episodic_notes_per_note_under_budget(
 
     assert metadata["relevant_memory"]["selected_count"] == 3
     assert metadata["relevant_memory"]["limit"] == 3
-    assert metadata["relevant_memory"]["selected_notes"] == [
-        "gamma episodic note " + ("C" * 120),
-        "alpha episodic note " + ("A" * 120),
-        "beta episodic recall note " + ("B" * 120),
-    ]
+    assert all("durable recall note" in note for note in metadata["relevant_memory"]["selected_notes"])
     assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
     assert metadata["relevant_memory"]["rendered_count"] == 3
-    assert metadata["relevant_memory"]["rendered_notes"][0].startswith("gamma episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][1].startswith("alpha episodi")
-    assert metadata["relevant_memory"]["rendered_notes"][2].startswith("beta episodi")
     relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
     assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
-    assert "alpha episodi" in relevant_section
-    assert "beta episodic" in relevant_section
-    assert "gamma episodi" in relevant_section
+    assert "alpha durab" in relevant_section
+    assert "beta durable" in relevant_section
+    assert "gamma durab" in relevant_section
     assert "older unmatched note" not in relevant_section
 
 

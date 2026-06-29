@@ -1,11 +1,12 @@
-"""多步 agent 运行时使用的轻量工作记忆。
+"""Lightweight working memory for multi-step agent runs.
 
-session history 负责保存完整事件流；这个模块只保存更小的一层工作集：
-当前任务摘要、最近接触的文件、文件短摘要，以及少量跨轮笔记。
-这样下一轮 prompt 还能接上上一轮，但不会被整段历史塞满。
+Session history stores the full event stream. This module keeps only a compact
+working set: the current task summary, recently touched files, fresh file
+summaries, and short-lived notes about abnormal tool calls.
 """
 
 import hashlib
+import json
 from datetime import datetime
 import re
 from pathlib import Path
@@ -13,8 +14,9 @@ from pathlib import Path
 from .workspace import clip, now
 
 WORKING_FILE_LIMIT = 12
-EPISODIC_NOTE_LIMIT = 6
 FILE_SUMMARY_LIMIT = 6
+PROCESS_NOTE_LIMIT = 6
+PROCESS_NOTE_TTL_TURNS = 3
 
 DURABLE_TOPIC_DEFAULTS = {
     "project-conventions": {
@@ -39,20 +41,24 @@ DURABLE_TOPIC_DEFAULTS = {
     },
 }
 
+PROCESS_NOTE_KIND_BY_ERROR_CODE = {
+    "invalid_arguments": "invalid_arguments",
+    "repeated_identical_call": "repeated_call",
+    "approval_denied": "approval_denied",
+    "unknown_tool": "rejected",
+    "tool_failed": "error",
+    "tool_partial_success": "partial_success",
+}
+
 
 def default_memory_state():
-    # 用一个小而结构化的状态，而不是一大段自由文本摘要。
     return {
         "working": {
             "task_summary": "",
             "recent_files": [],
         },
-        "episodic_notes": [],
         "file_summaries": {},
-        "task": "",
-        "files": [],
-        "notes": [],
-        "next_note_index": 0,
+        "process_notes": [],
     }
 
 
@@ -141,7 +147,6 @@ class DurableMemoryStore:
                 return subject or None
         return None
 
-    # 关键词匹配提取所有长期记忆中最匹配的三个notes，优先级 tag是否命中 -> 关键词重叠数量 -> 时间新旧
     def retrieval_candidates(self, query, limit=3):
         query_tokens = _tokenize(query)
         ranked = []
@@ -159,7 +164,6 @@ class DurableMemoryStore:
         ranked.sort(key=lambda item: item[0], reverse=True)
         return [note for _, note in ranked[:limit]]
 
-    # 重写整个MEMORY.md
     def _write_index(self, topics):
         self.root.mkdir(parents=True, exist_ok=True)
         self.topics_dir.mkdir(parents=True, exist_ok=True)
@@ -170,7 +174,6 @@ class DurableMemoryStore:
             lines.append(f"  - tags: {', '.join(topic['tags'])}")
         self.index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    # 重写单个 topic 文件
     def _write_topic(self, topic, notes):
         self.topics_dir.mkdir(parents=True, exist_ok=True)
         meta = DURABLE_TOPIC_DEFAULTS[topic]
@@ -188,7 +191,6 @@ class DurableMemoryStore:
             lines.append(f"- {note}")
         (self.topics_dir / f"{topic}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    # 将会话结果晋升为长期记忆
     def promote(self, promotions):
         if not promotions:
             return [], []
@@ -296,133 +298,134 @@ def _parse_timestamp(value):
         return 0.0
 
 
-def _normalize_note(note, index):
-    if isinstance(note, str):
-        text = clip(note.strip(), 500)
-        return {
-            "text": text,
-            "tags": [],
-            "source": "",
-            "created_at": now(),
-            "note_index": index,
-            "kind": "episodic",
-        }
+def _stable_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
-    if not isinstance(note, dict):
-        text = clip(str(note).strip(), 500)
-        return {
-            "text": text,
-            "tags": [],
-            "source": "",
-            "created_at": now(),
-            "note_index": index,
-            "kind": "episodic",
-        }
 
-    text = clip(str(note.get("text", "")).strip(), 500)
-    tags = [str(tag).strip() for tag in _ensure_list(note.get("tags", [])) if str(tag).strip()]
-    source = str(note.get("source", "")).strip()
-    created_at = str(note.get("created_at", "")).strip() or now()
-    note_index = int(note.get("note_index", index))
-    kind = str(note.get("kind", "episodic")).strip() or "episodic"
-    return {
-        "text": text,
-        "tags": _dedupe_preserve_order(tags),
-        "source": source,
-        "created_at": created_at,
-        "note_index": note_index,
+def _args_digest(args):
+    return hashlib.sha256(_stable_json(args or {}).encode("utf-8")).hexdigest()[:16]
+
+
+def _preview_value(value, limit=160):
+    if isinstance(value, dict):
+        return {str(key): _preview_value(item, limit=limit) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_preview_value(item, limit=limit) for item in value[:8]]
+    if isinstance(value, tuple):
+        return [_preview_value(item, limit=limit) for item in value[:8]]
+    text = str(value)
+    return clip(text, limit)
+
+
+def _args_preview(args):
+    if not isinstance(args, dict):
+        return {}
+    preview = {}
+    for key in sorted(args):
+        limit = 80 if key in {"content", "new_text", "old_text"} else 160
+        preview[str(key)] = _preview_value(args[key], limit=limit)
+    return preview
+
+
+def _affected_paths(args, metadata, workspace_root=None):
+    paths = [
+        canonicalize_path(path, workspace_root)
+        for path in _ensure_list((metadata or {}).get("affected_paths", []))
+        if str(path).strip()
+    ]
+    if isinstance(args, dict) and args.get("path"):
+        paths.append(canonicalize_path(args["path"], workspace_root))
+    return _dedupe_preserve_order([path for path in paths if path])
+
+
+def _process_note_kind(metadata):
+    metadata = metadata or {}
+    error_code = str(metadata.get("tool_error_code", "")).strip()
+    if error_code in PROCESS_NOTE_KIND_BY_ERROR_CODE:
+        return PROCESS_NOTE_KIND_BY_ERROR_CODE[error_code]
+    status = str(metadata.get("tool_status", "")).strip()
+    if status == "partial_success":
+        return "partial_success"
+    if status == "error":
+        return "error"
+    if status == "rejected":
+        return "rejected"
+    return ""
+
+
+def _note_key(kind, tool, args_digest, affected_paths):
+    payload = {
         "kind": kind,
+        "tool": str(tool),
+        "args_digest": args_digest,
+        "affected_paths": list(affected_paths),
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_process_note(note, workspace_root=None):
+    if not isinstance(note, dict):
+        return None
+    kind = str(note.get("kind", "")).strip()
+    tool = str(note.get("tool", "")).strip()
+    message = clip(str(note.get("message", "")).strip(), 500)
+    if not kind or not tool or not message:
+        return None
+
+    affected_paths = _dedupe_preserve_order(
+        [
+            canonicalize_path(path, workspace_root)
+            for path in _ensure_list(note.get("affected_paths", []))
+            if str(path).strip()
+        ]
+    )
+    inspected_paths = _dedupe_preserve_order(
+        [
+            canonicalize_path(path, workspace_root)
+            for path in _ensure_list(note.get("inspected_paths", []))
+            if str(path).strip()
+        ]
+    )
+    args_digest = str(note.get("args_digest", "")).strip()
+    if not args_digest:
+        args_digest = _args_digest(note.get("args_preview", {}))
+    note_id = str(note.get("id", "")).strip() or _note_key(kind, tool, args_digest, affected_paths)
+    return {
+        "id": note_id,
+        "kind": kind,
+        "tool": tool,
+        "tool_error_code": str(note.get("tool_error_code", "")).strip(),
+        "args_digest": args_digest,
+        "args_preview": note.get("args_preview", {}) if isinstance(note.get("args_preview", {}), dict) else {},
+        "affected_paths": affected_paths,
+        "inspected_paths": inspected_paths,
+        "message": message,
+        "count": max(1, int(note.get("count", 1) or 1)),
+        "created_turn": max(0, int(note.get("created_turn", 0) or 0)),
+        "updated_turn": max(0, int(note.get("updated_turn", 0) or 0)),
+        "created_at": str(note.get("created_at", "")).strip() or now(),
+        "updated_at": str(note.get("updated_at", "")).strip() or now(),
     }
 
-# 规范化层的作用，是把“磁盘里可能长得不太一样的旧状态”
-# 统一整理成当前 runtime 可直接使用的紧凑结构。
-# 规范化后的state结构如下：
-#region
-# {
-#     "working": {
-#         "task_summary": "...",
-#         "recent_files": ["..."]
-#     },
-#     "episodic_notes": [
-#         {
-#             "text": "...",
-#             "tags": [...],
-#             "source": "...",
-#             "created_at": "...",
-#             "note_index": 0,
-#             "kind": "episodic"
-#         }
-#     ],
-#     "file_summaries": {
-#         "path": {
-#             "summary": "...",
-#             "created_at": "...",
-#             "freshness": "sha256 or None"
-#         }
-#     },
-#     "next_note_index": 1,
-
-#     "task": "...",
-#     "files": [...],
-#     "notes": [...],
-#     "durable_topics": [...]
-# }
-#endregion
 
 def normalize_memory_state(state, workspace_root=None):
-    # 1、处理空值
     if state is None:
         state = default_memory_state()
     elif not isinstance(state, dict):
         raise TypeError("memory state must be a mapping")
 
-    # 2、规范化working字段
     working = state.get("working")
     if not isinstance(working, dict):
         working = {}
-    working.setdefault("task_summary", "")
-    working.setdefault("recent_files", [])
-    working["task_summary"] = clip(str(working.get("task_summary", "")).strip(), 300)
-    working["recent_files"] = _dedupe_preserve_order(
+    task_summary = clip(str(working.get("task_summary", "")).strip(), 300)
+    recent_files = _dedupe_preserve_order(
         [
             canonicalize_path(path, workspace_root)
             for path in _ensure_list(working.get("recent_files", []))
             if str(path).strip()
         ]
     )[-WORKING_FILE_LIMIT:]
-    state["working"] = working
-    # 3、兼容旧字段 task、files、notes
-    if not str(working["task_summary"]).strip() and state.get("task"):
-        working["task_summary"] = clip(str(state.get("task", "")).strip(), 300)
-    if not working["recent_files"] and state.get("files"):
-        working["recent_files"] = _dedupe_preserve_order(
-            [
-                canonicalize_path(path, workspace_root)
-                for path in _ensure_list(state.get("files", []))
-                if str(path).strip()
-            ]
-        )[-WORKING_FILE_LIMIT:]
 
-    episodic_notes = state.get("episodic_notes")
-    if not isinstance(episodic_notes, list):
-        episodic_notes = []
-
-    if not episodic_notes and state.get("notes"):
-        episodic_notes = [
-            _normalize_note(note, index)
-            for index, note in enumerate(_ensure_list(state.get("notes", [])))
-            if str(note).strip()
-        ]
-    else:
-        normalized_notes = []
-        for index, note in enumerate(episodic_notes):
-            if isinstance(note, str) and not str(note).strip():
-                continue
-            normalized_notes.append(_normalize_note(note, index))
-        episodic_notes = normalized_notes
-    episodic_notes = episodic_notes[-EPISODIC_NOTE_LIMIT:]
-    state["episodic_notes"] = episodic_notes
-    # 4、规范化file_summaries
     file_summaries = state.get("file_summaries")
     if not isinstance(file_summaries, dict):
         file_summaries = {}
@@ -445,27 +448,26 @@ def normalize_memory_state(state, workspace_root=None):
             "created_at": created_at,
             "freshness": freshness,
         }
-    state["file_summaries"] = normalized_file_summaries
 
-    next_note_index = state.get("next_note_index")
-    if not isinstance(next_note_index, int) or next_note_index < 0:
-        next_note_index = 0
-    max_index = max([note["note_index"] for note in episodic_notes], default=-1)
-    state["next_note_index"] = max(next_note_index, max_index + 1)
+    process_notes = []
+    for note in _ensure_list(state.get("process_notes", [])):
+        normalized = _normalize_process_note(note, workspace_root)
+        if normalized is not None:
+            process_notes.append(normalized)
 
-    state["task"] = working["task_summary"]
-    state["files"] = list(working["recent_files"])
-    state["notes"] = [note["text"] for note in episodic_notes]
-    durable_root = Path(workspace_root) / ".codemate" / "memory" if workspace_root is not None else None
-    durable_store = DurableMemoryStore(durable_root) if durable_root is not None else None
-    state["durable_topics"] = durable_store.topic_slugs() if durable_store is not None else []
-    return state
+    return {
+        "working": {
+            "task_summary": task_summary,
+            "recent_files": recent_files,
+        },
+        "file_summaries": normalized_file_summaries,
+        "process_notes": process_notes[-PROCESS_NOTE_LIMIT:],
+    }
 
 
 def set_task_summary(state, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     state["working"]["task_summary"] = clip(str(summary).strip(), 300)
-    state["task"] = state["working"]["task_summary"]
     return state
 
 
@@ -477,36 +479,9 @@ def remember_file(state, path, workspace_root=None):
     files = [item for item in state["working"]["recent_files"] if item != path]
     files.append(path)
     state["working"]["recent_files"] = files[-WORKING_FILE_LIMIT:]
-    state["files"] = list(state["working"]["recent_files"])
     return state
 
-# 添加一条短笔记
-def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic"):
-    state = normalize_memory_state(state, workspace_root)
-    text = clip(str(text).strip(), 500)
-    if not text:
-        return state
 
-    normalized_tags = _dedupe_preserve_order(
-        [str(tag).strip() for tag in _ensure_list(tags) if str(tag).strip()]
-    )
-    note = {
-        "text": text,
-        "tags": normalized_tags,
-        "source": str(source).strip(),
-        "created_at": str(created_at).strip() if created_at else now(),
-        "note_index": int(state.get("next_note_index", 0)),
-        "kind": str(kind).strip() or "episodic",
-    }
-    state["next_note_index"] = note["note_index"] + 1
-
-    notes = [item for item in state["episodic_notes"] if item["text"] != note["text"]]
-    notes.append(note)
-    state["episodic_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
-    state["notes"] = [item["text"] for item in state["episodic_notes"]]
-    return state
-
-# 保存文件短摘要，读取文件后会自动保存
 def set_file_summary(state, path, summary, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
@@ -534,7 +509,6 @@ def has_fresh_file_summary(state, path, workspace_root=None):
     return summary.get("freshness") == file_freshness(path, workspace_root)
 
 
-# 删除文件摘要，在 write_file 或者 patch_file 之后调用。
 def invalidate_file_summary(state, path, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
@@ -543,7 +517,7 @@ def invalidate_file_summary(state, path, workspace_root=None):
     state["file_summaries"].pop(path, None)
     return state
 
-# 扫描文件摘要，并删除已经过期的摘要
+
 def invalidate_stale_file_summaries(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     invalidated = []
@@ -557,8 +531,6 @@ def invalidate_stale_file_summaries(state, workspace_root=None):
 
 
 def summarize_read_result(result, limit=180):
-    # 我们不会把完整文件内容塞进记忆层，
-    # 这里只保留足够提醒下一轮“刚刚读到了什么”的短摘要。
     lines = [line.strip() for line in str(result).splitlines() if line.strip()]
     if not lines:
         return "(empty)"
@@ -570,35 +542,105 @@ def summarize_read_result(result, limit=180):
     return clip(summary, limit)
 
 
-def retrieval_candidates(state, query, limit=3, workspace_root=None):
+def expire_process_notes(state, current_turn, ttl_turns=PROCESS_NOTE_TTL_TURNS, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
-    query_tokens = _tokenize(query)
-    ranked = []
-    for note in state["episodic_notes"]:
-        # 召回逻辑故意保持简单透明：先看 tag 精确命中，
-        # 再看关键词重叠，最后看新旧程度。这里不引入 embedding。
-        note_tags = {tag.lower() for tag in note.get("tags", [])}
-        note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
-        exact_tag_match = int(bool(query_tokens & note_tags))
-        keyword_overlap = len(query_tokens & note_tokens)
-        if exact_tag_match == 0 and keyword_overlap == 0:
+    current_turn = max(0, int(current_turn or 0))
+    ttl_turns = max(0, int(ttl_turns or 0))
+    state["process_notes"] = [
+        note
+        for note in state["process_notes"]
+        if current_turn - int(note.get("updated_turn", 0)) < ttl_turns
+    ]
+    return state
+
+
+def record_process_note(state, tool, args, metadata, message, current_turn, workspace_root=None):
+    state = expire_process_notes(state, current_turn, workspace_root=workspace_root)
+    kind = _process_note_kind(metadata)
+    if not kind:
+        return state
+
+    affected_paths = _affected_paths(args, metadata, workspace_root)
+    digest = _args_digest(args)
+    note_id = _note_key(kind, tool, digest, affected_paths)
+    timestamp = now()
+    incoming = {
+        "id": note_id,
+        "kind": kind,
+        "tool": str(tool),
+        "tool_error_code": str((metadata or {}).get("tool_error_code", "")).strip(),
+        "args_digest": digest,
+        "args_preview": _args_preview(args),
+        "affected_paths": affected_paths,
+        "inspected_paths": [],
+        "message": clip(str(message).strip(), 500),
+        "count": 1,
+        "created_turn": max(0, int(current_turn or 0)),
+        "updated_turn": max(0, int(current_turn or 0)),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    notes = []
+    merged = False
+    for note in state["process_notes"]:
+        if note["id"] == note_id:
+            updated = dict(note)
+            updated.update(
+                {
+                    "tool_error_code": incoming["tool_error_code"],
+                    "args_preview": incoming["args_preview"],
+                    "message": incoming["message"],
+                    "count": int(note.get("count", 1)) + 1,
+                    "updated_turn": incoming["updated_turn"],
+                    "updated_at": incoming["updated_at"],
+                }
+            )
+            notes.append(updated)
+            merged = True
+        else:
+            notes.append(note)
+    if not merged:
+        notes.append(incoming)
+    state["process_notes"] = notes[-PROCESS_NOTE_LIMIT:]
+    return state
+
+
+def resolve_process_notes_after_success(state, tool, args, current_turn, workspace_root=None):
+    state = expire_process_notes(state, current_turn, workspace_root=workspace_root)
+    tool = str(tool)
+    read_path = ""
+    if tool == "read_file" and isinstance(args, dict) and args.get("path"):
+        read_path = canonicalize_path(args["path"], workspace_root)
+
+    kept = []
+    for note in state["process_notes"]:
+        kind = note.get("kind")
+        if kind == "repeated_call":
             continue
-        recency = _parse_timestamp(note.get("created_at"))
-        note_index = int(note.get("note_index", 0))
-        ranked.append(((exact_tag_match, keyword_overlap, recency, note_index), note))
+        if kind in {"invalid_arguments", "approval_denied", "rejected", "error"} and note.get("tool") == tool:
+            continue
+        if kind == "partial_success" and read_path:
+            inspected = _dedupe_preserve_order([*note.get("inspected_paths", []), read_path])
+            affected = set(note.get("affected_paths", []))
+            if affected and affected.issubset(set(inspected)):
+                continue
+            updated = dict(note)
+            updated["inspected_paths"] = inspected
+            updated["updated_turn"] = max(0, int(current_turn or 0))
+            updated["updated_at"] = now()
+            kept.append(updated)
+            continue
+        kept.append(note)
+    state["process_notes"] = kept[-PROCESS_NOTE_LIMIT:]
+    return state
 
-    if workspace_root is not None:
-        durable_store = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory")
-        for note in durable_store.retrieval_candidates(query, limit=limit):
-            note_tags = {tag.lower() for tag in note.get("tags", [])}
-            note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
-            exact_tag_match = int(bool(query_tokens & note_tags))
-            keyword_overlap = len(query_tokens & note_tokens)
-            recency = _parse_timestamp(note.get("created_at"))
-            ranked.append(((exact_tag_match, keyword_overlap, recency, -1), note))
 
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return [note for _, note in ranked[:limit]]
+def retrieval_candidates(state, query, limit=3, workspace_root=None):
+    normalize_memory_state(state, workspace_root)
+    if workspace_root is None:
+        return []
+    durable_store = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory")
+    return durable_store.retrieval_candidates(query, limit=limit)
 
 
 def retrieval_view(state, query, limit=3, workspace_root=None):
@@ -614,8 +656,6 @@ def retrieval_view(state, query, limit=3, workspace_root=None):
 
 def render_memory_text(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
-    # 这里渲染的是给模型看的紧凑“仪表盘”，不是完整回放。
-    # 笔记正文默认不展开，只有在相关召回时才按需拿出来。
     lines = [
         "Memory:",
         f"- task: {state['working']['task_summary'] or '-'}",
@@ -634,8 +674,18 @@ def render_memory_text(state, workspace_root=None):
     else:
         lines.append("- file_summaries: -")
 
-    lines.append(f"- episodic_notes: {len(state['episodic_notes'])}")
-    durable_topics = state.get("durable_topics", [])
+    if state["process_notes"]:
+        lines.append("- process_notes:")
+        for note in state["process_notes"]:
+            paths = ", ".join(note.get("affected_paths", [])) or "workspace"
+            lines.append(f"  - {note['tool']} {note['kind']} on {paths}, count={note['count']}")
+            lines.append(f"    {note['message']}")
+    else:
+        lines.append("- process_notes: -")
+
+    durable_topics = []
+    if workspace_root is not None:
+        durable_topics = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory").topic_slugs()
     lines.append(f"- durable_topics: {', '.join(durable_topics) or '-'}")
     return "\n".join(lines)
 
@@ -645,7 +695,7 @@ def is_effectively_empty(state, workspace_root=None):
     return (
         not str(state["working"]["task_summary"]).strip()
         and not state["working"]["recent_files"]
-        and not state["episodic_notes"]
+        and not state["process_notes"]
         and not state["file_summaries"]
     )
 
@@ -671,48 +721,56 @@ class LayeredMemory:
         self.state = remember_file(self.state, path, self.workspace_root)
         return self
 
-    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic"):
-        self.state = append_note(
-            self.state,
-            text,
-            tags=tags,
-            source=source,
-            created_at=created_at,
-            workspace_root=self.workspace_root,
-            kind=kind,
-        )
-        return self
-
     def set_file_summary(self, path, summary):
         self.state = set_file_summary(self.state, path, summary, self.workspace_root)
         return self
 
     def has_fresh_file_summary(self, path):
         return has_fresh_file_summary(self.state, path, self.workspace_root)
-    
-    # 删除文件摘要，在 write_file 或者 patch_file 之后调用。
+
     def invalidate_file_summary(self, path):
         self.state = invalidate_file_summary(self.state, path, self.workspace_root)
         return self
-    
-    # 扫描文件摘要，并删除已经过期的摘要
+
     def invalidate_stale_file_summaries(self):
         self.state, invalidated = invalidate_stale_file_summaries(self.state, self.workspace_root)
         return invalidated
 
-    # 按照关键词从session notes 和 长期记忆 中检索记忆(用于上下文的记忆检索)，优先级 tag命中 -> 关键词重叠数 -> 创建时间
+    def expire_process_notes(self, current_turn):
+        self.state = expire_process_notes(self.state, current_turn, workspace_root=self.workspace_root)
+        return self
+
+    def record_process_note(self, tool, args, metadata, message, current_turn):
+        self.state = record_process_note(
+            self.state,
+            tool,
+            args,
+            metadata,
+            message,
+            current_turn,
+            workspace_root=self.workspace_root,
+        )
+        return self
+
+    def resolve_process_notes_after_success(self, tool, args, current_turn):
+        self.state = resolve_process_notes_after_success(
+            self.state,
+            tool,
+            args,
+            current_turn,
+            workspace_root=self.workspace_root,
+        )
+        return self
+
     def retrieval_candidates(self, query, limit=3):
         return retrieval_candidates(self.state, query, limit=limit, workspace_root=self.workspace_root)
 
-    # 将检索结果渲染成文本（仅作调试时展示用）
     def retrieval_view(self, query, limit=3):
         return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
 
-    # 展示 memory 状态，不会展开所有的 episodic_notes, 只显示数量
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)
 
-    # 晋升长期记忆
     def promote_durable(self, promotions):
         if self.durable_store is None:
             return [], []

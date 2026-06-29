@@ -121,6 +121,9 @@ def test_patch_file_requires_fresh_read_first(tmp_path):
     result = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
 
     assert "must be read with read_file before editing" in result
+    notes = agent.session["memory"]["process_notes"]
+    assert notes[0]["kind"] == "invalid_arguments"
+    assert notes[0]["tool"] == "patch_file"
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "alpha\n"
 
 
@@ -200,6 +203,74 @@ def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(
     third = agent.run_tool("read_file", args, current_tool_call_id="call_3")
 
     assert "repeated identical tool call" in third
+    notes = agent.session["memory"]["process_notes"]
+    assert notes[0]["kind"] == "repeated_call"
+
+
+def test_repeated_call_process_note_clears_after_any_successful_tool(tmp_path):
+    agent = build_agent(tmp_path, [])
+    args = {"path": "README.md", "start": 1, "end": 1}
+
+    for index in range(2):
+        result = agent.run_tool("read_file", args)
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"call_{index}", "name": "read_file", "args": args}],
+                "created_at": "2026-04-09T00:00:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": f"call_{index}",
+                "name": "read_file",
+                "content": result,
+                "created_at": "2026-04-09T00:00:00+00:00",
+            }
+        )
+
+    rejected = agent.run_tool("read_file", args, current_tool_call_id="call_2")
+    assert "repeated identical tool call" in rejected
+    assert agent.session["memory"]["process_notes"][0]["kind"] == "repeated_call"
+
+    result = agent.run_tool("list_files", {"path": "."})
+
+    assert "README.md" in result
+    assert agent.session["memory"]["process_notes"] == []
+
+
+def test_invalid_argument_process_note_clears_after_same_tool_success(tmp_path):
+    (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    rejected = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
+    assert "must be read with read_file before editing" in rejected
+
+    read_args = {"path": "target.txt", "start": 1, "end": 10}
+    agent.run_tool("read_file", read_args)
+    result = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
+
+    assert result == "patched target.txt"
+    assert agent.session["memory"]["process_notes"] == []
+
+
+def test_partial_success_process_note_clears_after_affected_file_read(tmp_path):
+    agent = build_agent(tmp_path, [])
+    script = "from pathlib import Path; Path('changed.txt').write_text('changed\\n', encoding='utf-8'); raise SystemExit(1)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 1" in result
+    notes = agent.session["memory"]["process_notes"]
+    assert notes[0]["kind"] == "partial_success"
+    assert notes[0]["affected_paths"] == ["changed.txt"]
+
+    agent.run_tool("read_file", {"path": "changed.txt", "start": 1, "end": 5})
+
+    assert agent.session["memory"]["process_notes"] == []
 
 # 危险工具审批拒绝
 def test_risky_tool_deny_behavior(tmp_path):

@@ -200,11 +200,7 @@ def build_stress_agent_metrics():
             approval_policy="auto",
         )
         for index in range(12):
-            agent.memory.append_note(
-                f"stress-note-{index}-" + ("A" * 180),
-                tags=("recall",),
-                created_at=f"2026-04-08T10:{index:02d}:00+00:00",
-            )
+            agent.memory.promote_durable([("project-conventions", f"stress-note-{index}-" + ("A" * 180))])
             agent.record(
                 {
                     "role": "user" if index % 2 == 0 else "assistant",
@@ -266,18 +262,9 @@ def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
 
 def _set_irrelevant_memory(agent):
     state = agent.memory.to_dict()
-    state["episodic_notes"] = [
-        {
-            "text": "team mascot is blue",
-            "tags": ["unrelated"],
-            "source": "other.txt",
-            "created_at": "2026-04-08T10:00:00+00:00",
-            "note_index": 0,
-        }
-    ]
-    state["notes"] = ["team mascot is blue"]
     state["file_summaries"] = {}
     agent.memory.state = state
+    agent.memory.promote_durable([("project-conventions", "team mascot is blue")])
     agent.session["memory"] = agent.memory.to_dict()
 
 
@@ -391,18 +378,9 @@ def _followup_prompt(task):
 
 def _set_irrelevant_memory_for_task(agent):
     state = agent.memory.to_dict()
-    state["episodic_notes"] = [
-        {
-            "text": "the team mascot is blue",
-            "tags": ["unrelated"],
-            "source": "other.txt",
-            "created_at": "2026-04-08T10:00:00+00:00",
-            "note_index": 0,
-        }
-    ]
-    state["notes"] = ["the team mascot is blue"]
     state["file_summaries"] = {}
     agent.memory.state = state
+    agent.memory.promote_durable([("project-conventions", "the team mascot is blue")])
     agent.session["memory"] = agent.memory.to_dict()
 
 
@@ -492,11 +470,7 @@ def run_context_stress_matrix(repetitions=5):
                             approval_policy="auto",
                         )
                         for index in range(note_count):
-                            agent.memory.append_note(
-                                f"matrix-note-{index}-" + ("A" * 180),
-                                tags=("recall",),
-                                created_at=f"2026-04-08T10:{index:02d}:00+00:00",
-                            )
+                            agent.memory.promote_durable([("project-conventions", f"matrix-note-{index}-" + ("A" * 180))])
                         for index in range(history_count):
                             agent.record(
                                 {
@@ -977,7 +951,7 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                             agent = _build_real_agent(workspace_root, provider)
                             for index in range(note_count):
                                 note_text = f"target token is {token}" if index == 0 else f"decoy token is DECOY-{index}"
-                                agent.memory.append_note(note_text, tags=("token",), created_at=f"2026-04-09T10:{index:02d}:00+00:00")
+                                agent.memory.promote_durable([("project-conventions", note_text)])
                             for index in range(history_count):
                                 agent.record(
                                     {

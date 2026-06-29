@@ -1,89 +1,107 @@
-可以，当前过程笔记可以总结为这套设计。
+# Process Notes Design
 
-**定位**
+Process notes are short-lived working-memory reminders for abnormal tool calls.
+They do not store ordinary facts, do not duplicate file summaries, and do not
+participate in relevant-memory retrieval.
 
-过程笔记只记录运行中出现的异常工具调用，不记录普通事实、不记录文件摘要、不参与普通 memory 召回。它的作用是给下一轮模型一个短期执行提醒：哪些调用刚出过问题、哪些文件需要复查、哪些调用不要原样重试。
+## Memory Shape
 
-**记录内容**
-
-最多保留 6 条错误笔记，每条笔记记录：
+Working memory keeps only:
 
 ```json
 {
-  "kind": "error | partial_success | rejected",
-  "tool": "工具名",
-  "affected_paths": ["相关文件"],
-  "note": "给模型的注意事项",
-  "created_turn": 轮次",
-  "updated_turn": 轮次,
-  "status": "open"
+  "working": {
+    "task_summary": "",
+    "recent_files": []
+  },
+  "file_summaries": {},
+  "process_notes": []
 }
 ```
 
-不同原因的note设计不同，其中：
+Long-term durable memory is stored separately under `.codemate/memory/` and is
+the only source for the `Relevant memory:` section.
 
-- `error`：记录报错信息，并提示“这样会出错，先检查失败原因再重试”
-- `partial_success`：记录哪些文件发生变化，并提示“先检查这些文件，再继续使用或重试”
-- `rejected`：记录这个工具调用被拒绝过，并提示“这个工具 + 参数被拒绝过，尽量不要原样调用”
+## Process Note Shape
 
-**使用方式**
+Each note records one abnormal tool-call pattern:
 
-过程笔记不放进 `episodic_notes`，也不走 `retrieval_candidates()`。
-
-它应该单独渲染进 prompt，例如：
-
-```text
-Process notes are short-term execution reminders. Use them to avoid repeated failed actions, but verify the current workspace state before making assumptions.
-Process notes:
-- error: run_shell failed with exit_code 1.
-  Note: This command failed before; inspect the error before retrying.
-- partial_success: patch_file changed sample.txt before failing.
-  Note: Read or inspect affected files before continuing.
-- rejected: read_file with the same arguments was rejected as repeated.
-  Note: Avoid calling the same tool with the same arguments again.
+```json
+{
+  "id": "stable short hash",
+  "kind": "invalid_arguments | repeated_call | approval_denied | rejected | error | partial_success",
+  "tool": "patch_file",
+  "tool_error_code": "invalid_arguments",
+  "args_digest": "stable short hash",
+  "args_preview": {"path": "README.md"},
+  "affected_paths": ["README.md"],
+  "inspected_paths": [],
+  "message": "error: invalid arguments for patch_file: ...",
+  "count": 1,
+  "created_turn": 1,
+  "updated_turn": 1,
+  "created_at": "timestamp",
+  "updated_at": "timestamp"
+}
 ```
 
-**写入规则**
+`message` is the original runtime error text returned to the model. The prompt
+does not invent a separate explanation layer for these notes.
 
-工具调用后，如果状态异常，就写入或更新过程笔记：
+## Rendering
+
+Process notes render inside `Memory:`, next to file summaries:
 
 ```text
-tool_status == error           -> 写 error 笔记
-tool_status == partial_success -> 写 partial_success 笔记
-tool_status == rejected        -> 写 rejected 笔记
+Memory:
+- task: ...
+- recent_files: ...
+- file_summaries:
+  - README.md: ...
+- process_notes:
+  - patch_file invalid_arguments on README.md, count=2
+    error: invalid arguments for patch_file: ...
+- durable_topics: ...
 ```
 
-同类笔记可以合并更新，而不是重复追加。例如同一个 `tool + reason + affected_paths` 再次出现，就更新 `updated_turn` 和计数。
+This keeps them in working memory without creating another prompt section.
 
-**清除规则**
+## Recording
 
-所有过程笔记都有三轮 `ask()` 的 TTL，超过三轮自动过期。
-
-额外清除策略：
+Only abnormal tool results create process notes:
 
 ```text
-error:
-- 同一个工具后续 ok 后清除
+invalid_arguments              -> invalid_arguments
+repeated_identical_call         -> repeated_call
+approval_denied                 -> approval_denied
+unknown_tool / other rejection  -> rejected
+tool_failed                     -> error
+tool_partial_success            -> partial_success
+```
+
+The merge key is `kind + tool + args_digest + affected_paths`. A repeated
+abnormal call updates `count`, `message`, and update timestamps instead of
+appending another note.
+
+## Clearing
+
+All process notes expire after three `ask()` turns.
+
+Additional clearing rules:
+
+```text
+invalid_arguments:
+- clear when the same tool later succeeds
+
+repeated_call:
+- clear after any successful tool call
+
+approval_denied / rejected / error:
+- clear when the same tool later succeeds
 
 partial_success:
-- affected_paths 被 read_file / diff 检查后清除
-- 或相关文件后续成功写入并验证后清除
-
-rejected:
-- 同一个工具后续 ok 后清除
-- repeated_call 类型：只要后续采取了不同动作就清除
+- clear after every affected path has been successfully read with read_file
 ```
 
-**保留优先级**
-
-最多 6 条，超过上限时优先删除：
-
-```text
-已 resolved/expired > 最旧 rejected > 最旧 error > 最旧 partial_success
-```
-
-因为 `partial_success` 可能意味着 workspace 已经发生副作用，风险最高，应该最后删除。
-
-**一句话版**
-
-过程笔记是一组短期、最多 6 条、三轮过期的异常执行提醒；它只记录 `error`、`partial_success`、`rejected`，单独进入 prompt，不参与普通记忆召回，并在后续成功执行、复查文件或采取不同动作后清除。
+`partial_success` tracks `inspected_paths` so multi-file side effects are only
+cleared after every affected file has been inspected.

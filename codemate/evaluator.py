@@ -290,11 +290,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                 }
             )
         for index in range(note_count):
-            agent.memory.append_note(
-                f"benchmark-note-{index}-" + ("B" * 180),
-                tags=("recall",),
-                created_at=f"2026-04-15T10:{index:02d}:00+00:00",
-            )
+            agent.memory.promote_durable([("project-conventions", f"benchmark-note-{index}-" + ("B" * 180))])
         agent.session["memory"] = agent.memory.to_dict()
         agent.context_manager.total_budget = int(setup.get("total_budget", 900))
         agent.context_manager.section_budgets = dict(
@@ -410,7 +406,7 @@ class BenchmarkEvaluator:
         initial_memory_state = agent.memory.to_dict()
         initial_memory_empty = memorylib.is_effectively_empty(initial_memory_state)
         initial_task_summary_empty = not str(initial_memory_state["working"]["task_summary"]).strip()
-        initial_episodic_notes_empty = not initial_memory_state["episodic_notes"]
+        initial_process_notes_empty = not initial_memory_state["process_notes"]
 
         final_answer = agent.ask(task["prompt"])
         task_state = agent.current_task_state
@@ -481,7 +477,7 @@ class BenchmarkEvaluator:
             "initial_history_empty": initial_history_empty,
             "initial_memory_empty": initial_memory_empty,
             "initial_task_summary_empty": initial_task_summary_empty,
-            "initial_episodic_notes_empty": initial_episodic_notes_empty,
+            "initial_process_notes_empty": initial_process_notes_empty,
             "task_state": task_state.to_dict(),
             "report": report,
         }
