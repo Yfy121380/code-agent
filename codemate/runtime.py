@@ -150,6 +150,7 @@ class CodeMate:
         self.last_durable_rejections = []
         self.last_durable_superseded = []
         self._last_tool_result_metadata = {}
+        self._last_shell_analysis = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -862,6 +863,57 @@ class CodeMate:
         self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
         return final
 
+    def shell_analysis_metadata(self):
+        analysis = getattr(self, "_last_shell_analysis", None)
+        if analysis is None or not hasattr(analysis, "to_metadata"):
+            return {}
+        return analysis.to_metadata()
+
+    def tool_risk_level(self, name, tool):
+        if name == "run_shell":
+            analysis = getattr(self, "_last_shell_analysis", None)
+            if analysis is not None and getattr(analysis, "kind", "") == "read":
+                return "low"
+        return "high" if tool["risky"] else "low"
+
+    def tool_metadata_read_only(self, name, tool):
+        if name == "run_shell":
+            analysis = getattr(self, "_last_shell_analysis", None)
+            return bool(analysis is not None and getattr(analysis, "kind", "") == "read")
+        return not tool["risky"]
+
+    def approval_decision(self, name, args, tool):
+        if name != "run_shell":
+            if not tool["risky"]:
+                return "allow"
+            if self.read_only:
+                return "reject"
+            if self.approval_policy == "auto":
+                return "allow"
+            if self.approval_policy == "never":
+                return "reject"
+            return "ask"
+
+        analysis = getattr(self, "_last_shell_analysis", None)
+        if analysis is None:
+            analysis = toolkit.analyze_shell_command(self, args.get("command", ""))
+            self._last_shell_analysis = analysis
+        if getattr(analysis, "blocked", False):
+            return "reject"
+        if analysis.kind == "read":
+            return "allow"
+        if self.read_only:
+            return "reject"
+        if analysis.kind == "risky":
+            if self.approval_policy == "auto":
+                return "allow"
+            if self.approval_policy == "never":
+                return "reject"
+            return "ask"
+        if self.approval_policy == "never":
+            return "reject"
+        return "ask"
+
     def run_tool(self, name, args, current_tool_call_id=None):
         """执行一次工具调用，并在执行前后套上完整护栏。
 
@@ -884,6 +936,7 @@ class CodeMate:
         # 工具执行不是“直接调函数”，而是一条带护栏的流水线：
         # 工具是否存在 -> 参数是否合法 -> 是否重复调用 -> 是否通过审批
         # -> 真正执行 -> 更新记忆。
+        self._last_shell_analysis = None
         tool = self.tools.get(name)
         if tool is None:
             message = f"error: unknown tool '{name}'"
@@ -909,11 +962,12 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": "invalid_arguments",
                 "security_event_type": security_event_type,
-                "risk_level": "high" if tool["risky"] else "low",
-                "read_only": not tool["risky"],
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
+                **self.shell_analysis_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
@@ -924,26 +978,44 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": "repeated_identical_call",
                 "security_event_type": "",
-                "risk_level": "high" if tool["risky"] else "low",
-                "read_only": not tool["risky"],
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
+                **self.shell_analysis_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
-        # 根据安全规则和工具的危险程度进行审批
-        if tool["risky"] and not self.approve(name, args):
+        # 根据工具和 shell 分析结果决定是否需要审批。
+        decision = self.approval_decision(name, args, tool)
+        if decision == "reject":
             message = f"error: approval denied for {name}"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "approval_denied",
                 "security_event_type": "read_only_block" if self.read_only else "approval_denied",
-                "risk_level": "high",
-                "read_only": False,
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
+                **self.shell_analysis_metadata(),
+            }
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
+        if decision == "ask" and not self.prompt_approval(name, args):
+            message = f"error: approval denied for {name}"
+            self._last_tool_result_metadata = {
+                "tool_status": "rejected",
+                "tool_error_code": "approval_denied",
+                "security_event_type": "read_only_block" if self.read_only else "approval_denied",
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
+                "affected_paths": [],
+                "workspace_changed": False,
+                "diff_summary": [],
+                **self.shell_analysis_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
@@ -977,12 +1049,13 @@ class CodeMate:
                 "tool_status": tool_status,
                 "tool_error_code": tool_error_code,
                 "security_event_type": "",
-                "risk_level": "high" if tool["risky"] else "low",
-                "read_only": not tool["risky"],
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
                 "affected_paths": affected_paths,
                 "workspace_changed": workspace_changed,
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
+                **self.shell_analysis_metadata(),
             }
             if tool_status == "ok":
                 self.resolve_process_notes_after_success(name, args)
@@ -999,12 +1072,13 @@ class CodeMate:
                 "tool_status": "partial_success" if workspace_changed else "error",
                 "tool_error_code": "tool_partial_success" if workspace_changed else "tool_failed",
                 "security_event_type": security_event_type,
-                "risk_level": "high" if tool["risky"] else "low",
-                "read_only": not tool["risky"],
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
                 "affected_paths": affected_paths,
                 "workspace_changed": workspace_changed,
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
+                **self.shell_analysis_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
@@ -1097,6 +1171,15 @@ class CodeMate:
     def tool_delegate(self, args):
         return toolkit.tool_delegate(self, args)
 
+    def prompt_approval(self, name, args):
+        if self.read_only:
+            return False
+        try:
+            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
+        except EOFError:
+            return False
+        return answer.strip().lower() in {"y", "yes"}
+
     def approve(self, name, args):
         if self.read_only:
             return False
@@ -1104,11 +1187,7 @@ class CodeMate:
             return True
         if self.approval_policy == "never":
             return False
-        try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
+        return self.prompt_approval(name, args)
 
     def reset(self):
         self.session["history"] = []

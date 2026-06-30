@@ -33,10 +33,11 @@ DEFAULT_SECRET_ENV_NAMES = (
 )
 
 WELCOME_ART = (
-    "        /\\___/\\\\",
-    "       (  o o  )",
-    "       /   ^   \\\\",
-    "      /|       |\\\\",
+    "        /\\_/\\",
+    "       ( >w< )",
+    "       /|  V  |\\",
+    "       /_|_____|_\\",
+    "         Ciallo~",
 )
 WELCOME_NAME = "codemate"
 WELCOME_SUBTITLE = "local coding agent"
@@ -189,9 +190,9 @@ def build_welcome(agent, model, host):
     rows = [center(text) for text in WELCOME_ART]
     rows.extend(
         [
-            center(WELCOME_NAME),
-            center(WELCOME_SUBTITLE),
-            center(WELCOME_STATUS),
+            # center(WELCOME_NAME),
+            # center(WELCOME_SUBTITLE),
+            # center(WELCOME_STATUS),
             divider("-"),
             row(""),
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
@@ -280,7 +281,7 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=20, help="Maximum tool/model iterations per request.")
+    parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Maximum model output tokens per step.")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")

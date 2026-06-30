@@ -272,6 +272,105 @@ def test_partial_success_process_note_clears_after_affected_file_read(tmp_path):
 
     assert agent.session["memory"]["process_notes"] == []
 
+
+def test_read_shell_command_allows_valid_workspace_paths_even_with_never_policy(tmp_path):
+    (tmp_path / "notes.txt").write_text("safe read\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("run_shell", {"command": "cat notes.txt", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "safe read" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+    assert agent._last_tool_result_metadata["risk_level"] == "low"
+
+
+def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("run_shell", {"command": "cat *.txt", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "alpha" in result
+    assert "beta" in result
+    assert agent._last_tool_result_metadata["shell_has_glob"] is True
+
+
+def test_shell_read_path_escape_is_rejected(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-shell.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": f"cat ../{outside.name}", "timeout": 20})
+
+    assert "path escapes workspace" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+
+
+def test_risky_shell_command_auto_policy_allows_workspace_write(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "mkdir logs", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert (tmp_path / "logs").is_dir()
+    assert agent._last_tool_result_metadata["shell_kind"] == "risky"
+
+
+def test_shell_redirection_is_risky_and_auto_policy_allows_workspace_write(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "echo hi > out.txt", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8").strip() == "hi"
+    assert agent._last_tool_result_metadata["shell_kind"] == "risky"
+    assert agent._last_tool_result_metadata["shell_has_redirection"] is True
+
+
+def test_risky_shell_command_rejects_glob_write(tmp_path):
+    (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+    (tmp_path / "backup").mkdir()
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "mv *.py backup/", "timeout": 20})
+
+    assert "wildcards are not allowed for risky shell commands" in result
+    assert (tmp_path / "a.py").exists()
+
+
+def test_dangerous_shell_command_auto_policy_still_requires_approval(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    with patch("builtins.input", return_value="n"):
+        result = agent.run_tool("run_shell", {"command": "rm README.md", "timeout": 20})
+
+    assert result == "error: approval denied for run_shell"
+    assert (tmp_path / "README.md").exists()
+    assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+
+
+def test_dangerous_shell_command_rejects_glob_without_approval(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "rm *.md", "timeout": 20})
+
+    assert "wildcards are not allowed for dangerous shell commands" in result
+    assert (tmp_path / "README.md").exists()
+
+
+def test_dangerous_shell_command_rejects_root_targets_without_approval(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "rm -rf /", "timeout": 20})
+
+    assert "dangerous shell target is blocked: /" in result
+
+
 # 危险工具审批拒绝
 def test_risky_tool_deny_behavior(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
