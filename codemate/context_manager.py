@@ -404,10 +404,8 @@ class ContextManager:
         )
 
     def _history_for_request(self, user_message):
-        history = [copy.deepcopy(item) for item in getattr(self.agent, "session", {}).get("history", [])]
-        if history and history[-1].get("role") == "user" and str(history[-1].get("content", "")) == str(user_message):
-            history = history[:-1]
-        return history
+        del user_message
+        return [copy.deepcopy(item) for item in getattr(self.agent, "session", {}).get("history", [])]
 
     def _history_groups(self, history):
         groups = []
@@ -528,9 +526,9 @@ class ContextManager:
                 rendered["relevant_memory"].rendered,
             ]
         ).strip()
+        del user_message
         messages = [{"role": "user", "content": context_content}]
         messages.extend(copy.deepcopy(rendered["history"].details.get("messages", [])))
-        messages.append({"role": "user", "content": str(user_message)})
         return rendered["prefix"].rendered, messages
 
     def _messages_prompt_view(self, system, messages):

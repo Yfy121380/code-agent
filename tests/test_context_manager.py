@@ -145,6 +145,35 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
+def test_build_messages_does_not_append_current_user_after_tool_result(tmp_path):
+    agent = build_agent(tmp_path, [])
+    request = "append hello to README"
+    agent.record({"role": "user", "content": request, "created_at": "2026-04-07T09:00:00+00:00"})
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_write", "name": "write_file", "args": {"path": "README.md", "content": "hello"}}],
+            "created_at": "2026-04-07T09:00:01+00:00",
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": "call_write",
+            "name": "write_file",
+            "content": "wrote README.md (5 chars)",
+            "created_at": "2026-04-07T09:00:02+00:00",
+        }
+    )
+
+    message_build = ContextManager(agent).build_messages(request)
+
+    assert message_build.messages[-1]["role"] == "tool"
+    assert message_build.messages[-1]["content"] == "wrote README.md (5 chars)"
+    assert [item.get("content") for item in message_build.messages if item.get("role") == "user"].count(request) == 1
+
+
 def test_context_manager_collapses_older_duplicate_reads_to_latest_structured_group(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\nbeta\n", encoding="utf-8")

@@ -126,7 +126,13 @@ BASE_TOOL_SPECS = {
             "additionalProperties": False,
         },
         "risky": False,
-        "description": "Read a UTF-8 text file by line range before reasoning about or editing it.",
+        "description": (
+            "Read a UTF-8 text file by line range before reasoning about or editing it. "
+            "Output format: the first line is a tool header like '# path/to/file' and is not file content; "
+            "file content lines follow as '<line_number>: <content>'. "
+            "For example, a one-line file returns '# README.md\n   1: hello'. "
+            "An empty file returns only the '# path' header, meaning there is no file content to patch."
+        ),
     },
     "grep": {
         "input_schema": {
