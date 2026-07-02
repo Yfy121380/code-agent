@@ -34,8 +34,8 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
 
     prompt, metadata = ContextManager(agent).build("Where is the deploy key?")
 
-    assert prompt.index("You are codemate") < prompt.index("Memory:")
-    assert prompt.index("Memory:") < prompt.index("Relevant memory:")
+    assert prompt.index("You are codemate") < prompt.index("Working memory:")
+    assert prompt.index("Working memory:") < prompt.index("Relevant memory:")
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
@@ -188,7 +188,125 @@ def test_context_manager_collapses_older_duplicate_reads_to_latest_structured_gr
 
     assert transcript.count("[tool:read_file]") == 1
     assert "# sample.txt" in transcript
-    assert metadata["history"]["collapsed_duplicate_reads"] == 1
+    assert metadata["history"]["collapsed_duplicate_tool_results"] == 1
+
+
+def test_context_manager_keeps_read_file_calls_with_different_ranges(tmp_path):
+    (tmp_path / "sample.txt").write_text("\n".join(str(i) for i in range(20)), encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    for index, args in enumerate(({"path": "sample.txt", "start": 1, "end": 5}, {"path": "sample.txt", "start": 6, "end": 10})):
+        call_id = f"call_read_range_{index}"
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "read_file", "args": args}],
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": f"# sample.txt\nRANGE-{index}",
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+
+    prompt, metadata = ContextManager(agent).build("check ranges")
+    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
+
+    assert transcript.count("[tool:read_file]") == 2
+    assert "RANGE-0" in transcript
+    assert "RANGE-1" in transcript
+    assert metadata["history"]["collapsed_duplicate_tool_results"] == 0
+
+
+def test_context_manager_collapses_duplicate_grep_calls(tmp_path):
+    agent = build_agent(tmp_path, [])
+    args = {"pattern": "run_shell", "path": "codemate", "mode": "content", "before": 1, "after": 1, "context": 0}
+
+    for index in range(2):
+        call_id = f"call_grep_{index}"
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "grep", "args": args}],
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "grep",
+                "content": f"grep-result-{index}",
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+
+    prompt, metadata = ContextManager(agent).build("find shell")
+    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
+
+    assert transcript.count("[tool:grep]") == 1
+    assert "grep-result-1" in transcript
+    assert "grep-result-0" not in transcript
+    assert metadata["history"]["collapsed_duplicate_tool_results"] == 1
+
+
+def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
+    agent = build_agent(tmp_path, [])
+    shell_call_id = "call_shell_old"
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": shell_call_id, "name": "run_shell", "args": {"command": "ls codemate"}}],
+            "created_at": "2026-04-07T08:59:00+00:00",
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": shell_call_id,
+            "name": "run_shell",
+            "content": "exit_code: 0\nstdout:\nOLD-SHELL-OBSERVATION\nstderr:\n(empty)",
+            "created_at": "2026-04-07T08:59:00+00:00",
+        }
+    )
+
+    for index in range(21):
+        call_id = f"call_read_micro_{index}"
+        args = {"path": "sample.txt", "start": index + 1, "end": index + 1}
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "read_file", "args": args}],
+                "created_at": f"2026-04-07T09:{index:02d}:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": f"# sample.txt\nOBSERVATION-{index}",
+                "created_at": f"2026-04-07T09:{index:02d}:00+00:00",
+            }
+        )
+
+    prompt, metadata = ContextManager(agent).build("summarize observations")
+    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
+
+    assert "OBSERVATION-20" in transcript
+    assert "OBSERVATION-0" not in transcript
+    assert "OLD-SHELL-OBSERVATION" not in transcript
+    assert transcript.count("Old tool result content cleared.") == 2
+    assert metadata["history"]["cleared_old_tool_results"] == 2
 
 
 def test_context_manager_clips_tool_output_without_breaking_tool_structure(tmp_path):

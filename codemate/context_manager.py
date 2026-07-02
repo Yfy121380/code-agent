@@ -11,6 +11,8 @@ import copy
 import json
 from dataclasses import dataclass
 
+from . import tools as toolkit
+
 
 DEFAULT_TOTAL_BUDGET = 128000
 DEFAULT_SECTION_BUDGETS = {
@@ -30,6 +32,8 @@ SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_requ
 CURRENT_REQUEST_SECTION = "current_request"
 RELEVANT_MEMORY_LIMIT = 3
 OMITTED_TOOL_RESULT = "[tool result omitted due to context budget]"
+OLD_TOOL_RESULT_CLEARED = "Old tool result content cleared."
+MAX_RECENT_OBSERVATION_TOOL_RESULTS = 20
 
 
 def _tail_clip(text, limit):
@@ -173,7 +177,7 @@ class ContextManager:
     def _section_texts(self, user_message, memory_enabled=True):
         return {
             "prefix": str(getattr(self.agent, "prefix", "")),
-            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "memory": "Working memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
@@ -300,52 +304,93 @@ class ContextManager:
                     "messages": [],
                     "rendered_entries": [],
                     "older_entries_count": 0,
-                    "collapsed_duplicate_reads": 0,
-                    "reused_file_summary_count": 0,
-                    "summarized_tool_count": 0,
+                    "collapsed_duplicate_tool_results": 0,
+                    "cleared_old_tool_results": 0,
                 },
             )
 
         groups = self._history_groups(history)
-        selected = []
-        selected_messages = []
-        seen_read_paths = set()
+        selected_groups = []
+        selected_body_len = 0
+        seen_dedupe_keys = set()
+        kept_observation_results = 0
         details = {
             "older_entries_count": 0,
-            "collapsed_duplicate_reads": 0,
-            "reused_file_summary_count": 0,
-            "summarized_tool_count": 0,
+            "collapsed_duplicate_tool_results": 0,
+            "cleared_old_tool_results": 0,
         }
+        transcript_header = "Transcript:\n"
 
         for group in reversed(groups):
-            read_paths = self._read_paths_for_group(group)
-            if read_paths and all(path in seen_read_paths for path in read_paths):
-                details["collapsed_duplicate_reads"] += 1
+            dedupe_keys, group_can_be_collapsed = self._dedupe_keys_for_group(group)
+            if group_can_be_collapsed and all(key in seen_dedupe_keys for key in dedupe_keys):
+                details["collapsed_duplicate_tool_results"] += 1
                 continue
-            candidate_messages = self._group_messages(group) + selected_messages
-            candidate_rendered = self._render_history_messages(candidate_messages)
-            if len(candidate_rendered) <= budget:
-                selected.insert(0, group)
-                selected_messages = candidate_messages
-                seen_read_paths.update(read_paths)
+
+            group = copy.deepcopy(group)
+            cleared_in_group = 0
+            observation_results_in_group = 0
+            if group.get("type") == "tool_interaction":
+                assistant = group.get("messages", [{}])[0]
+                calls_by_id = {str(call.get("id", "")): call for call in assistant.get("tool_calls", []) or []}
+                for message in reversed(group.get("messages", [])[1:]):
+                    if message.get("role") != "tool":
+                        continue
+                    call = calls_by_id.get(str(message.get("tool_call_id", "")), {})
+                    name = str(message.get("name", "") or call.get("name", ""))
+                    content = str(message.get("content", ""))
+                    lowered = content.lstrip().lower()
+                    ok_result = not (lowered.startswith("error:") or lowered.startswith("rejected:"))
+                    compactable = ok_result and name in {"list_files", "read_file", "grep"}
+                    if ok_result and name == "run_shell" and content.lstrip().startswith("exit_code: 0"):
+                        try:
+                            analysis = toolkit.analyze_shell_command(self.agent, (call.get("args") or {}).get("command", ""))
+                            compactable = not analysis.blocked and analysis.kind == "read"
+                        except Exception:
+                            compactable = False
+                    if not compactable:
+                        continue
+                    observation_results_in_group += 1
+                    if kept_observation_results + observation_results_in_group > MAX_RECENT_OBSERVATION_TOOL_RESULTS:
+                        message["content"] = OLD_TOOL_RESULT_CLEARED
+                        cleared_in_group += 1
+
+            group_messages = self._group_messages(group)
+            group_rendered = self._render_history_messages(group_messages)
+            group_body = group_rendered[len(transcript_header):] if group_rendered.startswith(transcript_header) else group_rendered
+            candidate_body_len = len(group_body) if selected_body_len == 0 else len(group_body) + 1 + selected_body_len
+            if len(transcript_header) + candidate_body_len <= budget:
+                selected_groups.append(group)
+                selected_body_len = candidate_body_len
+                seen_dedupe_keys.update(dedupe_keys)
+                kept_observation_results += observation_results_in_group
+                details["cleared_old_tool_results"] += cleared_in_group
                 continue
 
             if group.get("type") == "tool_interaction":
-                available = max(0, budget - len(self._render_history_messages(selected_messages)) - len("\n"))
-                clipped = self._clip_tool_group(group, available, prefer_summary=True, details=details)
-                clipped_messages = self._group_messages(clipped) + selected_messages
+                separator = 1 if selected_body_len else 0
+                available = max(0, budget - len(transcript_header) - selected_body_len - separator)
+                clipped = self._clip_tool_group(group, available)
+                clipped_messages = self._group_messages(clipped)
                 clipped_rendered = self._render_history_messages(clipped_messages)
-                if len(clipped_rendered) <= budget or not selected_messages:
-                    selected.insert(0, clipped)
-                    selected_messages = clipped_messages
-                    seen_read_paths.update(read_paths)
+                clipped_body = clipped_rendered[len(transcript_header):] if clipped_rendered.startswith(transcript_header) else clipped_rendered
+                candidate_body_len = len(clipped_body) if selected_body_len == 0 else len(clipped_body) + 1 + selected_body_len
+                if len(transcript_header) + candidate_body_len <= budget or not selected_groups:
+                    selected_groups.append(clipped)
+                    selected_body_len = candidate_body_len
+                    seen_dedupe_keys.update(dedupe_keys)
+                    kept_observation_results += observation_results_in_group
+                    details["cleared_old_tool_results"] += cleared_in_group
                 break
 
-            if not selected_messages:
+            if not selected_groups:
                 clipped = self._clip_text_group(group, max(20, budget - len("Transcript:\n")))
-                selected_messages = self._group_messages(clipped)
+                selected_groups.append(clipped)
             break
 
+        selected_messages = []
+        for group in reversed(selected_groups):
+            selected_messages.extend(self._group_messages(group))
         rendered = self._render_history_messages(selected_messages)
         return SectionRender(
             raw=raw,
@@ -393,17 +438,33 @@ class ContextManager:
     def _group_messages(self, group):
         return [copy.deepcopy(message) for message in group.get("messages", [])]
 
-    def _read_paths_for_group(self, group):
-        paths = []
+    def _dedupe_keys_for_group(self, group):
+        keys = []
         if group.get("type") != "tool_interaction":
-            return paths
+            return keys, False
         assistant = group.get("messages", [{}])[0]
-        for call in assistant.get("tool_calls", []) or []:
-            if call.get("name") == "read_file":
-                path = str((call.get("args") or {}).get("path", "")).strip()
-                if path:
-                    paths.append(path)
-        return paths
+        calls = assistant.get("tool_calls", []) or []
+        for call in calls:
+            name = call.get("name")
+            args = call.get("args") or {}
+            if name == "read_file":
+                path = str(args.get("path", "")).strip()
+                keys.append(("read_file", path, int(args.get("start", 1)), int(args.get("end", 200))))
+            elif name == "grep":
+                keys.append(
+                    (
+                        "grep",
+                        str(args.get("pattern", "")),
+                        str(args.get("path", ".")).strip() or ".",
+                        str(args.get("mode", "content")),
+                        int(args.get("before", 0)),
+                        int(args.get("after", 0)),
+                        int(args.get("context", 0)),
+                    )
+                )
+            else:
+                return keys, False
+        return keys, bool(keys) and len(keys) == len(calls)
 
     def _clip_text_group(self, group, budget):
         clipped = copy.deepcopy(group)
@@ -412,7 +473,7 @@ class ContextManager:
                 message["content"] = _tail_clip(message.get("content", ""), budget)
         return clipped
 
-    def _clip_tool_group(self, group, budget, prefer_summary=False, details=None):
+    def _clip_tool_group(self, group, budget):
         clipped = copy.deepcopy(group)
         messages = clipped.get("messages", [])
         if len(messages) < 2:
@@ -421,36 +482,12 @@ class ContextManager:
         per_tool_budget = max(1, budget // max(1, len(tool_messages)))
         for tool_message in tool_messages:
             content = str(tool_message.get("content", ""))
-            if prefer_summary and tool_message.get("name") == "read_file":
-                path = self._path_for_tool_result(messages[0], tool_message)
-                summary = self._reusable_file_summary(path)
-                if summary:
-                    content = f"# {path}\n{summary}"
-                    if details is not None:
-                        details["reused_file_summary_count"] += 1
             if per_tool_budget <= len(OMITTED_TOOL_RESULT) + 8:
                 content = OMITTED_TOOL_RESULT
             else:
                 content = _tail_clip(content, per_tool_budget)
             tool_message["content"] = content
         return clipped
-
-    def _path_for_tool_result(self, assistant_message, tool_message):
-        tool_call_id = str(tool_message.get("tool_call_id", ""))
-        for call in assistant_message.get("tool_calls", []) or []:
-            if str(call.get("id", "")) == tool_call_id:
-                return str((call.get("args") or {}).get("path", "")).strip()
-        return ""
-
-    def _reusable_file_summary(self, path):
-        memory = getattr(self.agent, "memory", None)
-        if memory is None or not hasattr(memory, "to_dict"):
-            return ""
-        snapshot = memory.to_dict()
-        summary = snapshot.get("file_summaries", {}).get(str(path), {})
-        if not summary:
-            return ""
-        return str(summary.get("summary", "")).strip()
 
     def _raw_history_text(self, history):
         if not history:
@@ -486,7 +523,7 @@ class ContextManager:
     def _assemble_messages(self, rendered, user_message):
         context_content = "\n\n".join(
             [
-                "Runtime context, not a new user request. Use it as background; the current user request has priority.",
+                "This message is runtime context, not a new user request. Use it as background.",
                 rendered["memory"].rendered,
                 rendered["relevant_memory"].rendered,
             ]
@@ -551,9 +588,8 @@ class ContextManager:
                 "raw_chars": rendered["history"].raw_chars,
                 "rendered_chars": rendered["history"].rendered_chars,
                 "older_entries_count": int(rendered["history"].details.get("older_entries_count", 0)),
-                "collapsed_duplicate_reads": int(rendered["history"].details.get("collapsed_duplicate_reads", 0)),
-                "reused_file_summary_count": int(rendered["history"].details.get("reused_file_summary_count", 0)),
-                "summarized_tool_count": int(rendered["history"].details.get("summarized_tool_count", 0)),
+                "collapsed_duplicate_tool_results": int(rendered["history"].details.get("collapsed_duplicate_tool_results", 0)),
+                "cleared_old_tool_results": int(rendered["history"].details.get("cleared_old_tool_results", 0)),
             },
             "current_request": {
                 "text": user_message,

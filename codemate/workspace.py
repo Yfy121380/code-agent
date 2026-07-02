@@ -114,10 +114,23 @@ class WorkspaceContext:
             {self.status}
             - recent_commits:
             {commits}
-            - project_docs:
-            {docs}
             """
         ).strip()
+        # return textwrap.dedent(
+        #     f"""\
+        #     Workspace:
+        #     - cwd: {self.cwd}
+        #     - repo_root: {self.repo_root}
+        #     - branch: {self.branch}
+        #     - default_branch: {self.default_branch}
+        #     - status:
+        #     {self.status}
+        #     - recent_commits:
+        #     {commits}
+        #     - project_docs:
+        #     {docs}
+        #     """
+        # ).strip()
 
     def fingerprint(self):
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，

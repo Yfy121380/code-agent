@@ -703,19 +703,21 @@ class CodeMate:
                 "prompt_built",
                 {
                     "prompt_metadata": prompt_metadata,
-                    "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
+                    "system": system,
+                    "messages": messages,
+                    # "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
             # 4. 调模型前记录请求事件；支持缓存的后端会收到稳定 prefix 的 cache key。
-            self.emit_trace(
-                task_state,
-                "model_requested",
-                {
-                    "attempts": task_state.attempts,
-                    "tool_steps": task_state.tool_steps,
-                    "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-                },
-            )
+            # self.emit_trace(
+            #     task_state,
+            #     "model_requested",
+            #     {
+            #         "attempts": task_state.attempts,
+            #         "tool_steps": task_state.tool_steps,
+            #         "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
+            #     },
+            # )
             prompt_cache_key = None
             prompt_cache_retention = None
             if getattr(self.model_client, "supports_prompt_cache", False):

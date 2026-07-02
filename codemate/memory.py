@@ -657,7 +657,7 @@ def retrieval_view(state, query, limit=3, workspace_root=None):
 def render_memory_text(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     lines = [
-        "Memory:",
+        "Working memory:",
         f"- task: {state['working']['task_summary'] or '-'}",
         f"- recent_files: {', '.join(state['working']['recent_files']) or '-'}",
     ]
@@ -686,7 +686,7 @@ def render_memory_text(state, workspace_root=None):
     durable_topics = []
     if workspace_root is not None:
         durable_topics = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory").topic_slugs()
-    lines.append(f"- durable_topics: {', '.join(durable_topics) or '-'}")
+    # lines.append(f"- durable_topics: {', '.join(durable_topics) or '-'}")
     return "\n".join(lines)
 
 
