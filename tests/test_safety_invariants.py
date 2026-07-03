@@ -187,6 +187,80 @@ def test_write_file_requires_fresh_read_for_existing_file(tmp_path):
     assert "must be read with read_file before editing" in result
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "alpha\n"
 
+
+def test_todo_write_updates_session_without_workspace_change(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool(
+        "todo_write",
+        {
+            "todos": [
+                {"content": "Inspect current implementation", "status": "completed"},
+                {"content": "Add todo_write tool", "status": "in_progress"},
+                {"content": "Add tests", "status": "pending"},
+            ]
+        },
+    )
+
+    assert "todos updated: 3 items, 1 in_progress, 1 pending, 1 completed" in result
+    assert agent.session["todos"] == [
+        {"content": "Inspect current implementation", "status": "completed"},
+        {"content": "Add todo_write tool", "status": "in_progress"},
+        {"content": "Add tests", "status": "pending"},
+    ]
+    assert agent._last_tool_result_metadata["read_only"] is True
+    assert agent._last_tool_result_metadata["workspace_changed"] is False
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
+
+
+def test_todo_write_rejects_invalid_status_and_multiple_in_progress(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    invalid_status = agent.run_tool("todo_write", {"todos": [{"content": "Do work", "status": "blocked"}]})
+    multiple_active = agent.run_tool(
+        "todo_write",
+        {
+            "todos": [
+                {"content": "Do first thing", "status": "in_progress"},
+                {"content": "Do second thing", "status": "in_progress"},
+            ]
+        },
+    )
+
+    assert "status must be one of" in invalid_status
+    assert "at most one todo may be in_progress" in multiple_active
+    assert agent.session["todos"] == []
+
+
+def test_todo_write_rejects_empty_content(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("todo_write", {"todos": [{"content": "  ", "status": "pending"}]})
+
+    assert "content must not be empty" in result
+    assert agent.session["todos"] == []
+
+
+def test_todo_write_empty_or_all_completed_clears_session(tmp_path):
+    agent = build_agent(tmp_path, [])
+    agent.session["todos"] = [{"content": "Old task", "status": "pending"}]
+
+    cleared = agent.run_tool("todo_write", {"todos": []})
+    agent.session["todos"] = [{"content": "Old task", "status": "pending"}]
+    completed = agent.run_tool(
+        "todo_write",
+        {
+            "todos": [
+                {"content": "Inspect implementation", "status": "completed"},
+                {"content": "Run tests", "status": "completed"},
+            ]
+        },
+    )
+
+    assert cleared == "todos updated: todo list cleared."
+    assert "all tasks completed; todo list cleared" in completed
+    assert agent.session["todos"] == []
+
 def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(tmp_path):
     agent = build_agent(tmp_path, [])
     args = {"path": "README.md", "start": 1, "end": 1}

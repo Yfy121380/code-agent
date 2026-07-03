@@ -15,7 +15,8 @@ from functools import partial
 from .workspace import IGNORED_PATH_NAMES
 
 GREP_MODES = {"files_with_matches", "count", "content"}
-MAX_GREP_CONTEXT_LINES = 20
+MAX_GREP_CONTEXT_LINES = 50
+TODO_STATUSES = {"pending", "in_progress", "completed"}
 SHELL_KIND_ORDER = {"read": 0, "risky": 1, "dangerous": 2}
 SHELL_GLOB_CHARS = ("*", "?", "[", "]")
 SHELL_READ_SUBJECTS = {
@@ -112,7 +113,11 @@ BASE_TOOL_SPECS = {
             "additionalProperties": False,
         },
         "risky": False,
-        "description": "List files in a workspace directory.",
+        "description": (
+            "List direct children of a workspace directory. Output format: one entry per line, "
+            "with [D] path for directories and [F] path for files. The output is not recursive. "
+            "Use this to inspect directory structure before reading specific files."
+        ),
     },
     "read_file": {
         "input_schema": {
@@ -159,10 +164,12 @@ BASE_TOOL_SPECS = {
         },
         "risky": False,
         "description": (
-            "Search files with rg-style output. Use files_with_matches to locate relevant files, "
-            "count to estimate match/change scale, and content to inspect concrete matching lines. "
-            "In content mode, before/after/context control surrounding lines like rg -B/-A/-C; "
-            "explicit before/after override context for that side."
+            "Search workspace files by regular expression. Output depends on mode: "
+            "files_with_matches returns one matching file path per line; "
+            "count returns one line per file with its match count plus a final total_matches line; "
+            "content returns matching lines with file path and line number, and includes surrounding context lines "
+            "when before/after/context are set. Use files_with_matches to locate files, count to estimate scope, "
+            "and content to inspect exact matches. before/after override context on their respective sides."
         ),
     },
     "run_shell": {
@@ -176,7 +183,13 @@ BASE_TOOL_SPECS = {
             "additionalProperties": False,
         },
         "risky": True,
-        "description": "Run a shell command in the repo root. Read-only commands with workspace-safe paths may run directly; write-like commands are risky; dangerous commands require approval.",
+        "description": (
+            "Run a shell command from the repository root. Prefer dedicated tools for common workspace operations: "
+            "use read_file for reading files, grep for searching, and write_file/patch_file for edits. "
+            "Use run_shell for tests, syntax checks, git status/log, package scripts, and other shell-only operations. "
+            "Read-only commands with workspace-safe paths may run directly; write-like commands are risky; "
+            "dangerous commands require approval. Keep commands focused and avoid unnecessary destructive operations."
+        ),
     },
     "write_file": {
         "input_schema": {
@@ -189,7 +202,12 @@ BASE_TOOL_SPECS = {
             "additionalProperties": False,
         },
         "risky": True,
-        "description": "Create a new text file or replace an existing text file.",
+        "description": (
+            "Create a new UTF-8 text file or replace the complete contents of an existing file. "
+            "For existing files, read the exact file first so you do not overwrite unknown content. "
+            "Use write_file when creating a new file or when replacing the whole file is intentional; "
+            "use patch_file for small edits to existing files."
+        ),
     },
     "patch_file": {
         "input_schema": {
@@ -203,7 +221,56 @@ BASE_TOOL_SPECS = {
             "additionalProperties": False,
         },
         "risky": True,
-        "description": "Replace one exact text block in an existing file.",
+        "description": (
+            "Replace one exact text block in an existing UTF-8 text file. Read the exact file first, "
+            "then provide old_text copied exactly from the current file. old_text must occur exactly once; "
+            "otherwise the patch is rejected. Use patch_file for targeted edits and keep the replacement as small as practical."
+        ),
+    },
+    "todo_write": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "description": "Complete replacement todo list for the current coding session.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "Specific actionable task description."},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "Current task status.",
+                            },
+                        },
+                        "required": ["content", "status"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["todos"],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": (
+            "Create or update the active todo list for the current coding session. "
+            "The todo list is the active work plan; when current_todos appears in Working memory, "
+            "continue following those items until they are completed or no longer relevant. "
+            "Use todo_write for complex multi-step tasks with 3 or more meaningful steps, non-trivial tasks "
+            "that require planning/investigation/multiple file edits/verification, explicit task tracking requests, "
+            "multi-part user requests, and new instructions that change the active work. "
+            "Do not use todo_write for a single straightforward task, trivial work where tracking adds no value, "
+            "tasks with fewer than 3 simple steps, or purely conversational/informational requests. "
+            "Positive example: for an e-commerce request covering user registration, product catalog, shopping cart, "
+            "and checkout flow, create todos for each feature and verification. "
+            "Negative examples: answering how to print Hello World in Python, explaining git status, adding one comment "
+            "to one function, or running npm install and reporting the result. "
+            "Task rules: todos must be specific and actionable; statuses are pending, in_progress, or completed; "
+            "at most one todo may be in_progress, but one is not required; mark work in_progress before starting it; "
+            "mark completed immediately after finishing; do not mark completed if tests fail, implementation is partial, "
+            "errors remain unresolved, or required files/dependencies are missing; remove todos that are no longer relevant."
+        ),
     },
 }
 
@@ -487,6 +554,28 @@ def analyze_shell_command(agent, command):
 
     return analysis
 
+
+def _normalize_todos(raw_todos):
+    if not isinstance(raw_todos, list):
+        raise ValueError("todos must be a list")
+    todos = []
+    in_progress_count = 0
+    for index, item in enumerate(raw_todos):
+        if not isinstance(item, dict):
+            raise ValueError(f"todo at index {index} must be an object")
+        content = str(item.get("content", "")).strip()
+        if not content:
+            raise ValueError(f"todo at index {index} content must not be empty")
+        status = str(item.get("status", "")).strip()
+        if status not in TODO_STATUSES:
+            raise ValueError(f"todo at index {index} status must be one of: pending, in_progress, completed")
+        if status == "in_progress":
+            in_progress_count += 1
+        todos.append({"content": content, "status": status})
+    if in_progress_count > 1:
+        raise ValueError("at most one todo may be in_progress")
+    return todos
+
 def validate_tool(agent, name, args):
     args = args or {}
 
@@ -565,6 +654,10 @@ def validate_tool(agent, name, args):
         count = text.count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
+        return
+
+    if name == "todo_write":
+        _normalize_todos(args.get("todos"))
         return
 
     if name == "delegate":
@@ -794,6 +887,23 @@ def tool_patch_file(agent, args):
     return f"patched {path.relative_to(agent.root)}"
 
 
+def tool_todo_write(agent, args):
+    todos = _normalize_todos(args.get("todos"))
+    if not todos:
+        agent.session["todos"] = []
+        return "todos updated: todo list cleared."
+    counts = {status: sum(1 for item in todos if item["status"] == status) for status in TODO_STATUSES}
+    if counts["completed"] == len(todos):
+        agent.session["todos"] = []
+        return f"todos updated: all tasks completed; todo list cleared ({len(todos)} completed)."
+    agent.session["todos"] = todos
+    return (
+        f"todos updated: {len(todos)} items, {counts['in_progress']} in_progress, "
+        f"{counts['pending']} pending, {counts['completed']} completed. "
+        "Continue working through current_todos."
+    )
+
+
 def tool_delegate(agent, args):
     if agent.depth >= agent.max_depth:
         raise ValueError("delegate depth exceeded")
@@ -831,4 +941,5 @@ _TOOL_RUNNERS = {
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,
+    "todo_write": tool_todo_write,
 }

@@ -123,6 +123,7 @@ class CodeMate:
             "workspace_root": workspace.repo_root,
             "history": [],
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
+            "todos": [],
         }
         # 补齐字段
         self._ensure_session_shape()
@@ -169,6 +170,7 @@ class CodeMate:
     def _ensure_session_shape(self):
         self.session.setdefault("history", [])
         self.session.setdefault("memory", memorylib.default_memory_state())
+        self.session.setdefault("todos", [])
         self.session.pop("checkpoints", None)
         self.session.pop("resume_state", None)
         self.session.pop("runtime_identity", None)
@@ -233,6 +235,8 @@ class CodeMate:
             - To search file contents, use grep.
             - To edit an existing file, use patch_file after read_file.
             - To create a new file, use write_file.
+            - Use todo_write for complex multi-step work, explicit task tracking requests, and multi-part user requests.
+            - When current_todos appears in Working memory, follow those items until completed or no longer relevant.
             - Do not say tools are unavailable when they are provided by the runtime.
             - If a tool result says a repeated identical call was rejected, do not retry the same investigation; either choose a materially different action or provide the final answer.
             """
@@ -307,7 +311,18 @@ class CodeMate:
         return dict(self._last_prefix_refresh)
 
     def memory_text(self):
-        return self.memory.render_memory_text()
+        lines = self.memory.render_memory_text().splitlines()
+        todos = self.session.get("todos") or []
+        if todos:
+            lines.append("- current_todos: follow these items until completed")
+            for item in todos:
+                content = str(item.get("content", "")).strip()
+                status = str(item.get("status", "")).strip()
+                if content and status:
+                    lines.append(f"  - [{status}] {content}")
+        else:
+            lines.append("- current_todos: -")
+        return "\n".join(lines)
 
     def history_text(self):
         history = self.session["history"]

@@ -145,6 +145,32 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
+def test_context_manager_renders_current_todos_in_working_memory(tmp_path):
+    agent = build_agent(tmp_path, [])
+    agent.session["todos"] = [
+        {"content": "Inspect current implementation", "status": "completed"},
+        {"content": "Add todo_write tool", "status": "in_progress"},
+        {"content": "Run tests", "status": "pending"},
+    ]
+
+    prompt, _metadata = ContextManager(agent).build("continue")
+    message_build = ContextManager(agent).build_messages("continue")
+
+    assert "- current_todos: follow these items until completed" in prompt
+    assert "  - [completed] Inspect current implementation" in prompt
+    assert "  - [in_progress] Add todo_write tool" in prompt
+    assert "  - [pending] Run tests" in prompt
+    assert "current_todos: follow these items until completed" in message_build.messages[0]["content"]
+
+
+def test_context_manager_renders_empty_current_todos(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    prompt, _metadata = ContextManager(agent).build("continue")
+
+    assert "- current_todos: -" in prompt
+
+
 def test_build_messages_does_not_append_current_user_after_tool_result(tmp_path):
     agent = build_agent(tmp_path, [])
     request = "append hello to README"
