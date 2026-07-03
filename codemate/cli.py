@@ -14,7 +14,8 @@ from pathlib import Path
 
 from .config import load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
-from .runtime import CodeMate, SessionStore
+from .runtime import CodeMate
+from .storage import SessionStore
 from .workspace import WorkspaceContext, middle
 
 DEFAULT_SECRET_ENV_NAMES = (

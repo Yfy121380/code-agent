@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli as mini_cli
-from codemate.task_state import TaskState
+from codemate.storage import TaskState
 
 
 def build_workspace(tmp_path):

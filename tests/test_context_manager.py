@@ -1,5 +1,5 @@
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
-from codemate.context_manager import ContextManager
+from codemate.context import ContextManager
 
 
 def build_workspace(tmp_path):
