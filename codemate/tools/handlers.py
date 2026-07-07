@@ -212,7 +212,12 @@ def tool_run_shell(agent, args):
 def tool_write_file(agent, args):
     path = agent.path(args["path"])
     content = str(args["content"])
+    mode = str(args.get("mode", "overwrite"))
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "append":
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(content)
+        return f"appended {path.relative_to(agent.root)} ({len(content)} chars)"
     path.write_text(content, encoding="utf-8")
     return f"wrote {path.relative_to(agent.root)} ({len(content)} chars)"
 

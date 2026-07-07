@@ -188,6 +188,33 @@ def test_write_file_requires_fresh_read_for_existing_file(tmp_path):
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "alpha\n"
 
 
+def test_write_file_append_adds_to_existing_file_without_prior_read(tmp_path):
+    (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("write_file", {"path": "target.txt", "content": "beta\n", "mode": "append"})
+
+    assert result == "appended target.txt (5 chars)"
+    assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_write_file_append_creates_missing_file(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("write_file", {"path": "logs/daily.md", "content": "- remembered\n", "mode": "append"})
+
+    assert result == "appended logs/daily.md (13 chars)"
+    assert (tmp_path / "logs" / "daily.md").read_text(encoding="utf-8") == "- remembered\n"
+
+
+def test_write_file_rejects_unknown_mode(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("write_file", {"path": "target.txt", "content": "beta\n", "mode": "merge"})
+
+    assert "mode must be one of: overwrite, append" in result
+
+
 def test_todo_write_updates_session_without_workspace_change(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
 

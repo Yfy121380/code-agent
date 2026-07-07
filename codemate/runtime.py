@@ -216,7 +216,7 @@ class CodeMate:
             - To inspect a file, use read_file.
             - To search file contents, use grep.
             - To edit an existing file, use patch_file after read_file.
-            - To create a new file, use write_file.
+            - To create, replace, or append to a file, use write_file.
             - Use todo_write for complex multi-step work, explicit task tracking requests, and multi-part user requests.
             - When current_todos appears in Working memory, follow those items until completed or no longer relevant.
             - Do not say tools are unavailable when they are provided by the runtime.
@@ -228,7 +228,7 @@ class CodeMate:
             Workflow rules:
             - After a successful tool result, treat it as an observation and continue with the next required action unless the user's request is already complete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
-            - Before editing an existing file with write_file or patch_file, read that exact file first; grep/list_files results are not enough.
+            - Before overwriting an existing file with write_file or editing with patch_file, read that exact file first; grep/list_files results are not enough.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
             - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
@@ -1150,6 +1150,8 @@ class CodeMate:
     def require_fresh_read_before_edit(self, name, args):
         path = self.path(args["path"])
         if name == "write_file" and not path.exists():
+            return
+        if name == "write_file" and str(args.get("mode", "overwrite")) == "append":
             return
         if not self.memory.has_fresh_file_summary(args["path"]):
             raise ValueError(

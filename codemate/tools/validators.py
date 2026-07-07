@@ -91,6 +91,9 @@ def validate_tool(agent, name, args):
             raise ValueError("path is a directory")
         if "content" not in args:
             raise ValueError("missing content")
+        mode = str(args.get("mode", "overwrite"))
+        if mode not in {"overwrite", "append"}:
+            raise ValueError("mode must be one of: overwrite, append")
         return
 
     if name == "patch_file":

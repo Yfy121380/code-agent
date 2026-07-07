@@ -59,7 +59,8 @@ def summarize_tool_call(name, args):
     if name == "write_file":
         content = str(args.get("content", ""))
         path = args.get("path", "")
-        lines = [f"write_file {path}", f"  size: {len(content)} chars", "  preview:", preview_text(content)]
+        mode = str(args.get("mode", "overwrite"))
+        lines = [f"write_file {path}", f"  mode: {mode}", f"  size: {len(content)} chars", "  preview:", preview_text(content)]
         return "\n".join(lines)
     if name == "patch_file":
         path = args.get("path", "")

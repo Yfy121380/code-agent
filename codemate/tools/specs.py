@@ -98,17 +98,26 @@ BASE_TOOL_SPECS = {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Workspace-relative file path to write."},
-                "content": {"type": "string", "description": "Complete UTF-8 text content to write."},
+                "content": {"type": "string", "description": "UTF-8 text content to write or append."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["overwrite", "append"],
+                    "description": (
+                        "Write mode. overwrite replaces the complete file content; "
+                        "append adds content to the end of the file, creating it if needed."
+                    ),
+                    "default": "overwrite",
+                },
             },
             "required": ["path", "content"],
             "additionalProperties": False,
         },
         "risky": True,
         "description": (
-            "Create a new UTF-8 text file or replace the complete contents of an existing file. "
-            "For existing files, read the exact file first so you do not overwrite unknown content. "
-            "Use write_file when creating a new file or when replacing the whole file is intentional; "
-            "use patch_file for small edits to existing files."
+            "Create or update a UTF-8 text file. mode='overwrite' creates a new file or replaces the complete "
+            "contents of an existing file; for existing files, read the exact file first so you do not overwrite "
+            "unknown content. mode='append' appends content to the end of the file, creating the file if needed; "
+            "use patch_file for small targeted edits to existing files."
         ),
     },
     "patch_file": {
