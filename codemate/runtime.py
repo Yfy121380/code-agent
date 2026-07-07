@@ -18,6 +18,7 @@ from pathlib import Path
 from . import memory as memorylib
 from .context import ContextManager
 from .storage import RunStore, SessionStore, TaskState
+from .ui import NullUI
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
@@ -73,6 +74,7 @@ class CodeMate:
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
+        ui=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -85,6 +87,8 @@ class CodeMate:
         self.depth = depth
         self.max_depth = max_depth
         self.read_only = read_only
+        # UI 是 runtime 的展示出口，默认空实现，避免测试和批处理产生额外输出。
+        self.ui = ui or NullUI()
         # 允许传给shell的环境变量
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
         # 需要脱敏的环境变量名称
@@ -717,6 +721,7 @@ class CodeMate:
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
                 prompt_cache_retention = "in_memory"
             model_started_at = time.monotonic()
+            self.ui.model_start()
             response = self.model_client.complete(
                 messages,
                 self.max_new_tokens,
@@ -743,6 +748,7 @@ class CodeMate:
                     "duration_ms": int((time.monotonic() - model_started_at) * 1000),
                 },
             )
+            self.ui.model_end(kind=kind, metadata=completion_metadata)
 
             if kind == "tool_calls":
                 calls = list(getattr(response, "tool_calls", []) or [])
@@ -773,6 +779,7 @@ class CodeMate:
                     task_state.record_tool(name)
                     tool_started_at = time.monotonic()
                     result = self.run_tool(name, args, current_tool_call_id=call.id)
+                    self.ui.tool_result(name, args, result, metadata=dict(self._last_tool_result_metadata or {}))
                     self.record(
                         {
                             "role": "tool",
@@ -824,6 +831,7 @@ class CodeMate:
                     },
                 )
                 self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
+                self.ui.final_answer(final)
                 return final
 
             self.record(
@@ -856,6 +864,7 @@ class CodeMate:
             },
         )
         self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
+        self.ui.final_answer(final)
         return final
 
     def shell_analysis_metadata(self):
@@ -999,7 +1008,8 @@ class CodeMate:
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
-        if decision == "ask" and not self.prompt_approval(name, args):
+        asked_for_approval = decision == "ask"
+        if asked_for_approval and not self.prompt_approval(name, args):
             message = f"error: approval denied for {name}"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -1014,6 +1024,8 @@ class CodeMate:
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
+        if not asked_for_approval:
+            self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
         # 危险工具执行前记录仓库文件快照计算 sha256，用于比较哪些文件有改变
         before_snapshot = self.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
@@ -1169,11 +1181,11 @@ class CodeMate:
     def prompt_approval(self, name, args):
         if self.read_only:
             return False
-        try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
+        metadata = {
+            "risk_level": self.tool_risk_level(name, self.tools.get(name, {"risky": True})),
+            **self.shell_analysis_metadata(),
+        }
+        return bool(self.ui.approval_request(name, args, metadata=metadata))
 
     def approve(self, name, args):
         if self.read_only:

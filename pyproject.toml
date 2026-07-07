@@ -7,7 +7,10 @@ name = "codemate"
 version = "0.1.0"
 description = "Small local coding agent for Ollama, OpenAI-compatible, Anthropic-compatible, and DeepSeek models"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "prompt_toolkit>=3.0.0",
+  "rich>=13.0.0",
+]
 
 [project.scripts]
 codemate = "codemate.cli:main"
@@ -18,5 +21,5 @@ dev = [
   "ruff>=0.4.4",
 ]
 
-[tool.setuptools]
-packages = ["codemate"]
+[tool.setuptools.packages.find]
+include = ["codemate*"]

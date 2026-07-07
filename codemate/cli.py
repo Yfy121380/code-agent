@@ -12,10 +12,14 @@ import sys
 import textwrap
 from pathlib import Path
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+
 from .config import load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import CodeMate
 from .storage import SessionStore
+from .ui import TerminalUI
 from .workspace import WorkspaceContext, middle
 
 DEFAULT_SECRET_ENV_NAMES = (
@@ -205,7 +209,7 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 
-def build_agent(args):
+def build_agent(args, ui=None):
     """根据 CLI 参数装配出一个可运行的 CodeMate 实例。
 
     为什么存在：
@@ -244,6 +248,7 @@ def build_agent(args):
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            ui=ui,
         )
     return CodeMate(
         model_client=model,
@@ -253,6 +258,7 @@ def build_agent(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        ui=ui,
     )
 
 
@@ -291,7 +297,8 @@ def build_arg_parser():
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
+    ui = TerminalUI()
+    agent = build_agent(args, ui=ui)
 
     model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
     host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
@@ -303,17 +310,21 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt))
+                agent.ask(prompt)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
         return 0
 
+    history_dir = Path(agent.workspace.repo_root) / ".codemate"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    prompt_session = PromptSession(history=FileHistory(str(history_dir / "input_history")))
+
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
         # 因此 session history 和 working memory 会跨轮延续。
         try:
-            user_input = input("\ncodemate> ").strip()
+            user_input = prompt_session.prompt("\ncodemate> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("")
             return 0
@@ -338,6 +349,6 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input))
+            agent.ask(user_input)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
