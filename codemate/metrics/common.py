@@ -85,8 +85,10 @@ def _infer_run_duration_ms(events):
 
 
 def aggregate_run_artifacts(runs_root):
-    runs_root = Path(runs_root)
-    run_dirs = sorted(path for path in runs_root.glob("*") if path.is_dir())
+    sessions_root = Path(runs_root)
+    if sessions_root.name != "sessions":
+        sessions_root = sessions_root / "sessions"
+    run_dirs = sorted(path for path in sessions_root.glob("*/runs/*") if path.is_dir())
     reports = []
     tool_status_counts = {}
     tool_name_counts = {}
@@ -203,7 +205,7 @@ def build_stress_agent_metrics():
             approval_policy="auto",
         )
         for index in range(12):
-            agent.memory.promote_durable([("project-conventions", f"stress-note-{index}-" + ("A" * 180))])
+            agent.relevant_long_term_memory.append({"source": "project_context", "text": f"stress-note-{index}-" + ("A" * 180), "kind": "long_term"})
             agent.record(
                 {
                     "role": "user" if index % 2 == 0 else "assistant",

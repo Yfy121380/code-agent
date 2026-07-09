@@ -3,6 +3,8 @@ import shlex
 import sys
 from unittest.mock import patch
 
+from prompt_toolkit.document import Document
+
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli as mini_cli
 from codemate.storage import TaskState
@@ -87,6 +89,26 @@ def test_grep_count_returns_per_file_counts_and_total(tmp_path):
     assert "total_matches: 4" in result
     assert "src/alpha.py: 3" in result
     assert "src/beta.py: 1" in result
+
+
+def test_memory_directory_is_explicitly_accessible_but_not_default_listed(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    root_listing = agent.run_tool("list_files", {"path": "."})
+    memory_listing = agent.run_tool("list_files", {"path": ".codemate/memory"})
+    ignored_listing = agent.run_tool("list_files", {"path": ".codemate"})
+
+    assert ".codemate" not in root_listing
+    assert "user_profile.md" in memory_listing
+    assert "path is ignored" in ignored_listing
+
+
+def test_grep_can_search_memory_directory_explicitly(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("grep", {"pattern": "User Profile", "path": ".codemate/memory", "mode": "content"})
+
+    assert ".codemate/memory/user_profile.md" in result
 
 
 def test_grep_content_context_supports_before_after_priority_over_context(tmp_path):
@@ -574,6 +596,18 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
         agent = mini_cli.build_agent(args)
         assert "MCA_CUSTOM_SECRET" in agent.secret_env_summary()["secret_env_names"]
+
+
+def test_slash_command_completer_shows_descriptions_and_inserts_template():
+    completer = mini_cli.SlashCommandCompleter()
+
+    root_items = list(completer.get_completions(Document("/"), None))
+    remember_items = list(completer.get_completions(Document("/rem"), None))
+
+    assert any(str(item.display_text) == "/help" and str(item.display_meta_text) for item in root_items)
+    remember = next(item for item in remember_items if str(item.display_text) == "/remember <text>")
+    assert remember.text == "/remember "
+    assert str(remember.display_meta_text) == "Append a memory entry to today's daily log."
 
 # run_shell只传allow_list，读不到MCA_ALLOWLIST_SECRET
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):

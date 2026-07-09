@@ -21,9 +21,11 @@ def build_agent(tmp_path, outputs, **kwargs):
 
 
 def add_durable_notes(agent, notes):
-    promotions = [("project-conventions", note) for note in notes]
-    agent.memory.promote_durable(promotions)
-    agent.session["memory"] = agent.memory.to_dict()
+    agent.relevant_long_term_memory = [
+        {"source": "project_context", "text": note, "kind": "long_term"}
+        for note in notes
+    ]
+    agent.long_term_memory_status = "ok"
 
 
 def test_context_manager_assembles_sections_in_expected_order(tmp_path):
@@ -99,12 +101,12 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
 
     prompt, metadata = ContextManager(
         agent,
-        total_budget=250,
+        total_budget=700,
         section_budgets={
-            "prefix": 60,
-            "memory": 60,
-            "relevant_memory": 80,
-            "history": 60,
+            "prefix": 80,
+            "memory": 160,
+            "relevant_memory": 360,
+            "history": 80,
         },
     ).build("recall")
 
@@ -114,7 +116,10 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
     assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
     assert metadata["relevant_memory"]["rendered_count"] == 3
     relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
-    assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
+    assert "user_profile:" in relevant_section
+    assert "feedback_workflow:" in relevant_section
+    assert "project_context:" in relevant_section
+    assert len([line for line in relevant_section.splitlines() if line.startswith("- ") and line != "- none"]) == 3
     assert "alpha durab" in relevant_section
     assert "beta durable" in relevant_section
     assert "gamma durab" in relevant_section
@@ -125,7 +130,11 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
     agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
-    agent.memory.retrieval_view = lambda query, limit=3: "Relevant memory:\n" + "\n".join(f"- {i} " + ("C" * 220) for i in range(5))
+    agent.relevant_long_term_memory = [
+        {"source": "project_context", "text": f"{i} " + ("C" * 220), "kind": "long_term"}
+        for i in range(5)
+    ]
+    agent.long_term_memory_status = "ok"
     agent.history_text = lambda: "Transcript:\n" + "\n".join(f"[user] {i} " + ("D" * 220) for i in range(5))
 
     request = "please preserve this request exactly"
@@ -398,35 +407,49 @@ def test_context_manager_clips_tool_output_without_breaking_tool_structure(tmp_p
     assert transcript.count("very long output") < 80
 
 
-def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
-    memory_root = tmp_path / ".codemate" / "memory"
-    topics_dir = memory_root / "topics"
-    topics_dir.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text(
-        "# Durable Memory Index\n\n"
-        "- [project-conventions](topics/project-conventions.md): Project Conventions\n"
-        "  - summary: Stable repository conventions.\n"
-        "  - tags: convention\n",
-        encoding="utf-8",
-    )
-    (topics_dir / "project-conventions.md").write_text(
-        "# Project Conventions\n\n"
-        "- topic: project-conventions\n"
-        "- summary: Stable repository conventions.\n"
-        "- tags: convention\n"
-        "- updated_at: 2026-04-12T08:14:49+00:00\n\n"
-        "## Notes\n"
-        "- Use constrained tools instead of guessing.\n",
-        encoding="utf-8",
-    )
-
+def test_context_manager_renders_selected_long_term_memory(tmp_path):
     agent = build_agent(tmp_path, [])
+    agent.relevant_long_term_memory = [
+        {
+            "source": "project_context",
+            "text": "Use constrained tools instead of guessing.",
+            "kind": "long_term",
+        }
+    ]
+    agent.long_term_memory_status = "ok"
 
     prompt, metadata = ContextManager(agent).build("What conventions should I follow?")
     relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
     assert "Use constrained tools instead of guessing." in relevant_section
     assert any("Use constrained tools instead of guessing." in item for item in metadata["relevant_memory"]["selected_notes"])
-    assert metadata["relevant_memory"]["selected_durable_count"] == 1
-    assert metadata["relevant_memory"]["selected_sources"] == ["project-conventions"]
-    assert metadata["relevant_memory"]["selected_kinds"] == ["durable"]
+    assert metadata["relevant_memory"]["selected_sources"] == ["project_context"]
+    assert metadata["relevant_memory"]["selected_kinds"] == ["long_term"]
+    assert metadata["relevant_memory"]["retrieval_status"] == "ok"
+
+def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            '{"selected": [{"source": "feedback_workflow", "text": "回答时使用中文。", "reason": "用户偏好"}]}',
+            "完成。",
+        ],
+    )
+    memory_path = tmp_path / ".codemate" / "memory" / "feedback_workflow.md"
+    memory_path.write_text("# Feedback Workflow\n\n- 回答时使用中文。\n", encoding="utf-8")
+
+    result = agent.ask("介绍一下项目")
+
+    assert result == "完成。"
+    assert agent.long_term_memory_status == "ok"
+    assert len(agent.model_client.prompts) == 2
+    assert "回答时使用中文。" in agent.model_client.prompts[1]
+    assert agent.model_client.prompts[1].count("Relevant memory:") == 1
+    assert "user_profile:" in agent.model_client.prompts[1]
+    assert "feedback_workflow:" in agent.model_client.prompts[1]
+    assert "project_context:" in agent.model_client.prompts[1]
+    assert "Runtime context:" in agent.model_client.prompts[1]
+    assert "current_local_datetime:" in agent.model_client.prompts[1]
+    assert "today_daily_log_path: .codemate/memory/daily_logs/" in agent.model_client.prompts[1]
+    assert agent.model_client.structured_outputs[0]["name"] == "long_term_memory_retrieval"
+    assert agent.model_client.structured_outputs[1] is None

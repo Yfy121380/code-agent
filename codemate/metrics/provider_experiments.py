@@ -293,7 +293,9 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                             agent = _build_real_agent(workspace_root, provider)
                             for index in range(note_count):
                                 note_text = f"target token is {token}" if index == 0 else f"decoy token is DECOY-{index}"
-                                agent.memory.promote_durable([("project-conventions", note_text)])
+                                memory_path = workspace_root / ".codemate" / "memory" / "project_context.md"
+                                with memory_path.open("a", encoding="utf-8") as handle:
+                                    handle.write(f"\n- {note_text}\n")
                             for index in range(history_count):
                                 agent.record(
                                     {

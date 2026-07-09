@@ -289,7 +289,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                 }
             )
         for index in range(note_count):
-            agent.memory.promote_durable([("project-conventions", f"benchmark-note-{index}-" + ("B" * 180))])
+            agent.relevant_long_term_memory.append({"source": "project_context", "text": f"benchmark-note-{index}-" + ("B" * 180), "kind": "long_term"})
         agent.session["memory"] = agent.memory.to_dict()
         agent.context_manager.total_budget = int(setup.get("total_budget", 900))
         agent.context_manager.section_budgets = dict(
@@ -385,7 +385,6 @@ class BenchmarkEvaluator:
             repo_root_override=fixture_copy_root,
         )
         session_store = SessionStore(fixture_copy_root / ".codemate" / "sessions")
-        run_store = RunStore(fixture_copy_root / ".codemate" / "runs")
         if self.model_client_factory is not None:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
@@ -394,7 +393,6 @@ class BenchmarkEvaluator:
             model_client=model_client,
             workspace=workspace,
             session_store=session_store,
-            run_store=run_store,
             approval_policy="auto",
             max_steps=int(task["step_budget"]),
             max_new_tokens=self.max_new_tokens,

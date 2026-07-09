@@ -17,12 +17,11 @@ def test_load_benchmark_validates_fixed_schema():
     benchmark = load_benchmark(Path("benchmarks/coding_tasks.json"))
 
     assert benchmark["schema_version"] == 1
-    assert len(benchmark["tasks"]) == 9
+    assert len(benchmark["tasks"]) == 7
     assert Counter(task["category"] for task in benchmark["tasks"]) == {
         "documentation": 2,
         "text-edit": 2,
         "tool-boundary": 3,
-        "durable-contract": 2,
     }
     for task in benchmark["tasks"]:
         assert {"id", "prompt", "fixture_repo", "allowed_tools", "step_budget", "expected_artifact", "verifier", "category"} <= set(task)
@@ -62,12 +61,13 @@ def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
 #         README.md
 #         .codemate/
 #           sessions/
-#             20260529-xxxxxx-abcdef.json
-#           runs/
-#             run_20260529-xxxxxx-abcdef/
-#               task_state.json
-#               trace.jsonl
-#               report.json
+#             20260529-xxxxxx-abcdef/
+#               session.json
+#               runs/
+#                 run_20260529-xxxxxx-abcdef/
+#                   task_state.json
+#                   trace.jsonl
+#                   report.json
 #endregion
 # 测试 run_fixed_benchmark / BenchmarkEvaluator.run() 是否会使用全新的 fixture 副本和全新的 run 目录。
 def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp_path):
@@ -90,6 +90,8 @@ def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp
     assert run_dir.exists()
     assert not row["fixture_copy_relpath"].startswith("/")
     assert not row["run_dir_relpath"].startswith("/")
+    assert "/.codemate/sessions/" in row["run_dir_relpath"]
+    assert "/runs/" in row["run_dir_relpath"]
     assert row["initial_history_empty"] is True
     assert row["initial_memory_empty"] is True
     assert row["initial_task_summary_empty"] is True
@@ -111,12 +113,12 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
 
     assert artifact["schema_version"] == 1
     assert artifact["summary"] == {
-        "total_tasks": 9,
-        "passed": 9,
+        "total_tasks": 7,
+        "passed": 7,
         "failed": 0,
         "pass_rate": 1.0,
-        "within_budget": 9,
-        "verifier_passes": 9,
+        "within_budget": 7,
+        "verifier_passes": 7,
         "within_budget_rate": 1.0,
         "verifier_pass_rate": 1.0,
         "failure_category_counts": {},
@@ -156,7 +158,7 @@ def test_run_harness_regression_v2_writes_named_artifact(tmp_path):
     )
 
     assert artifact_path.exists()
-    assert artifact["summary"]["total_tasks"] == 9
+    assert artifact["summary"]["total_tasks"] == 7
     assert artifact["summary"]["pass_rate"] == 1.0
     assert artifact["summary"]["within_budget_rate"] == 1.0
     assert artifact["summary"]["verifier_pass_rate"] == 1.0

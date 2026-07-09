@@ -32,7 +32,7 @@ def run_context_stress_matrix(repetitions=5):
                             approval_policy="auto",
                         )
                         for index in range(note_count):
-                            agent.memory.promote_durable([("project-conventions", f"matrix-note-{index}-" + ("A" * 180))])
+                            agent.relevant_long_term_memory.append({"source": "project_context", "text": f"matrix-note-{index}-" + ("A" * 180), "kind": "long_term"})
                         for index in range(history_count):
                             agent.record(
                                 {

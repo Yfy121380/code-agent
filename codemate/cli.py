@@ -13,7 +13,10 @@ import textwrap
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 
 from .config import load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
@@ -47,16 +50,72 @@ WELCOME_ART = (
 WELCOME_NAME = "codemate"
 WELCOME_SUBTITLE = "local coding agent"
 WELCOME_STATUS = "calm shell, ready for work"
+SLASH_COMMANDS = [
+    ("/help", "/help", "Show this help message."),
+    ("/memory", "/memory", "Show the agent's distilled working memory."),
+    ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
+    ("/dream", "/dream", "Run dream memory consolidation in foreground."),
+    ("/dream --background", "/dream --background", "Run dream memory consolidation in background."),
+    ("/session", "/session", "Show the path to the saved session file."),
+    ("/reset", "/reset", "Clear the current session history and memory."),
+    ("/exit", "/exit", "Exit the agent."),
+    ("/quit", "/quit", "Exit the agent."),
+]
 HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
-    /help    Show this help message.
-    /memory  Show the agent's distilled working memory.
-    /session Show the path to the saved session file.
-    /reset   Clear the current session history and memory.
-    /exit    Exit the agent.
+    /help                Show this help message.
+    /memory              Show the agent's distilled working memory.
+    /remember <text>     Append a memory entry to today's daily log.
+    /dream               Run dream memory consolidation in foreground.
+    /dream --background  Run dream memory consolidation in background.
+    /session             Show the path to the saved session file.
+    /reset               Clear the current session history and memory.
+    /exit                Exit the agent.
     """
 ).strip()
+PROMPT_STYLE = Style.from_dict(
+    {
+        "completion-menu.completion": "fg:#cbd5e1 bg:#111827",
+        "completion-menu.completion.current": "fg:#e5e7eb bg:#334155",
+        "completion-menu.meta.completion": "fg:#64748b bg:#111827",
+        "completion-menu.meta.completion.current": "fg:#cbd5e1 bg:#334155",
+    }
+)
+
+
+class SlashCommandCompleter(Completer):
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+        for inserted_text, display_text, description in SLASH_COMMANDS:
+            if display_text.startswith(text) or inserted_text.startswith(text):
+                yield Completion(
+                    inserted_text,
+                    start_position=-len(text),
+                    display=display_text,
+                    display_meta=description,
+                )
+
+
+def build_prompt_key_bindings():
+    bindings = KeyBindings()
+
+    @bindings.add("enter")
+    def _(event):
+        buffer = event.current_buffer
+        state = buffer.complete_state
+        if state is not None:
+            completion = state.current_completion
+            if completion is not None:
+                buffer.apply_completion(completion)
+            else:
+                buffer.cancel_completion()
+            return
+        buffer.validate_and_handle()
+
+    return bindings
 
 
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
@@ -318,7 +377,13 @@ def main(argv=None):
 
     history_dir = Path(agent.workspace.repo_root) / ".codemate"
     history_dir.mkdir(parents=True, exist_ok=True)
-    prompt_session = PromptSession(history=FileHistory(str(history_dir / "input_history")))
+    prompt_session = PromptSession(
+        history=FileHistory(str(history_dir / "input_history")),
+        completer=SlashCommandCompleter(),
+        complete_while_typing=True,
+        key_bindings=build_prompt_key_bindings(),
+        style=PROMPT_STYLE,
+    )
 
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
@@ -338,6 +403,25 @@ def main(argv=None):
             continue
         if user_input == "/memory":
             print(agent.memory_text())
+            continue
+        if user_input.startswith("/remember"):
+            memory_text = user_input[len("/remember"):].strip()
+            if not memory_text:
+                print("usage: /remember <text>")
+                continue
+            try:
+                result = agent.remember_long_term(memory_text)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                continue
+            print(f"remembered: {result['path']}")
+            continue
+        if user_input in {"/dream", "/dream --background"}:
+            if user_input == "/dream --background":
+                agent.start_dream_background(reason="manual")
+                continue
+            result = agent.run_dream_once(reason="manual", foreground=True)
+            print(result)
             continue
         if user_input == "/session":
             print(agent.session_path)

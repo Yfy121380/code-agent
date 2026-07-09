@@ -10,9 +10,12 @@ class FakeModelClient:
         self.supports_prompt_cache = False
         self.supports_tools = True
         self.last_completion_metadata = {}
+        self.structured_outputs = []
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
+        structured_output = kwargs.pop("structured_output", None)
         del max_new_tokens, tools, kwargs
+        self.structured_outputs.append(structured_output)
         self.prompts.append(_messages_to_text(_normalize_messages(messages), system=system))
         self.last_completion_metadata = {}
         if not self.outputs:

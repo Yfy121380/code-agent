@@ -8,14 +8,18 @@ import json
 import os
 import re
 import textwrap
+import threading
 import uuid
 import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import memory as memorylib
+from .memory import dream as dreamlib
+from .memory import long_term as longterm
 from .context import ContextManager
 from .storage import RunStore, SessionStore, TaskState
 from .ui import NullUI
@@ -25,27 +29,15 @@ from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
+DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
+    "long_term_memory": True,
+    "memory_dream": True,
     "context_reduction": True,
     "prompt_cache": True,
 }
-DURABLE_MEMORY_INTENT_PATTERN = re.compile(r"(?i)\b(capture|remember|save|store|persist|note)\b")
-DURABLE_MEMORY_INTENT_ZH_PATTERN = re.compile(r"(记住|保存|记录|沉淀|长期记忆|持久记忆)")
-DURABLE_MEMORY_LINE_PATTERNS = (
-    ("project-conventions", re.compile(r"(?i)^Project convention:\s*(.+)$")),
-    ("key-decisions", re.compile(r"(?i)^Decision:\s*(.+)$")),
-    ("dependency-facts", re.compile(r"(?i)^Dependency:\s*(.+)$")),
-    ("user-preferences", re.compile(r"(?i)^Preference:\s*(.+)$")),
-    ("project-conventions", re.compile(r"^项目约定：\s*(.+)$")),
-    ("key-decisions", re.compile(r"^决策：\s*(.+)$")),
-    ("dependency-facts", re.compile(r"^依赖：\s*(.+)$")),
-    ("user-preferences", re.compile(r"^偏好：\s*(.+)$")),
-)
-SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
-
-
 @dataclass
 class PromptPrefix:
     # prefix 除了文本本身，还带一小份元数据，
@@ -75,6 +67,10 @@ class CodeMate:
         secret_env_names=None,
         feature_flags=None,
         ui=None,
+        allowed_tools=None,
+        memory_scope_only=False,
+        runtime_mode="agent",
+        timezone_name=DEFAULT_LOCAL_TIMEZONE,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -87,6 +83,10 @@ class CodeMate:
         self.depth = depth
         self.max_depth = max_depth
         self.read_only = read_only
+        self.allowed_tools = None if allowed_tools is None else {str(name) for name in allowed_tools}
+        self.memory_scope_only = bool(memory_scope_only)
+        self.runtime_mode = str(runtime_mode or "agent")
+        self.timezone_name = str(timezone_name or DEFAULT_LOCAL_TIMEZONE)
         # UI 是 runtime 的展示出口，默认空实现，避免测试和批处理产生额外输出。
         self.ui = ui or NullUI()
         # 允许传给shell的环境变量
@@ -97,8 +97,6 @@ class CodeMate:
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
-        # 用于保存单次ask()的运行状态
-        self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".codemate" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
@@ -107,6 +105,9 @@ class CodeMate:
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
             "todos": [],
         }
+        # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
+        # 让 session.json 和该会话产生的 runs 保持在同一个文件夹中。
+        self.run_store = run_store or RunStore(self.session_store.runs_dir(self.session["id"]))
         # 补齐字段
         self._ensure_session_shape()
         # 负责管理当前会话的短期工作记忆、文件摘要、长期记忆并进行相关的笔记召回，为session的一部分
@@ -129,9 +130,10 @@ class CodeMate:
         self.current_run_dir = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
-        self.last_durable_promotions = []
-        self.last_durable_rejections = []
-        self.last_durable_superseded = []
+        self.relevant_long_term_memory = []
+        self.long_term_memory_status = "not_run"
+        self.long_term_memory_metadata = {}
+        self._long_term_memory_cache_key = None
         self._last_tool_result_metadata = {}
         self._last_shell_analysis = None
         self._last_prefix_refresh = {
@@ -175,7 +177,10 @@ class CodeMate:
         del bucket[:-limit]
 
     def build_tools(self):
-        return toolkit.build_tool_registry(self)
+        tools = toolkit.build_tool_registry(self)
+        if self.allowed_tools is not None:
+            tools = {name: tool for name, tool in tools.items() if name in self.allowed_tools}
+        return tools
 
     def tool_signature(self):
         payload = []
@@ -205,6 +210,35 @@ class CodeMate:
         return specs
 
     def build_prefix(self):
+        if self.runtime_mode == "dream":
+            tool_use_rules = textwrap.dedent(
+                """\
+                Tool use:
+                - Use tools only for memory consolidation under `.codemate/memory/`.
+                - Use todo_write if it helps plan the consolidation.
+                - Read existing memory files before patching or overwriting them.
+                - Do not rewrite daily logs; daily logs are append-only raw records.
+                - Use Runtime context for current_local_datetime, current_local_date, timezone, and today_daily_log_path.
+                - Return a final answer once memory files are consolidated and checked.
+                """
+            ).strip()
+            text = textwrap.dedent(
+                f"""\
+                You are codemate's background dream process for long-term memory consolidation.
+
+                {tool_use_rules}
+
+                Your scope is `.codemate/memory/` only. Do not inspect or edit project files outside that directory.
+                """
+            ).strip()
+            return PromptPrefix(
+                text=text,
+                hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                workspace_fingerprint=self.workspace.fingerprint(),
+                tool_signature=self.tool_signature(),
+                built_at=now(),
+            )
+
         tool_use_rules = textwrap.dedent(
             """\
             Tool use:
@@ -234,6 +268,21 @@ class CodeMate:
             - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
             """
         ).strip()
+        long_term_rules = textwrap.dedent(
+            """\
+            Long-term memory:
+            - If the current interaction contains information worth remembering across sessions, append it to today's daily log before returning the final answer.
+            - Use current_local_datetime and today_daily_log_path from Runtime context. Use write_file with mode="append".
+            - Daily log entry format: `- [current_local_datetime] memory`.
+            - Daily logs are append-only. Do not rewrite or reorganize daily log files.
+            - Treat explicit phrases like "remember", "from now on", "next time", "以后", "记住", and "下次" as strong signals to append a daily log entry.
+            - What to log: user profile signals, workflow feedback, and project context that is useful across future sessions.
+            - User profile signals include the user's role, goals, knowledge background, skill level, stable preferences, expression style, and collaboration preferences.
+            - Workflow feedback includes how the agent should work, verify, report, ask before acting, and avoid repeating past mistakes.
+            - Project context includes long-lived project background, goals, naming, architecture direction, constraints, and decisions not directly derivable from current code or git state.
+            - Do not save secrets, one-off task progress, current todos, raw tool output, temporary debugging noise, large code snippets, or facts only useful in the current turn.
+            """
+        ).strip()
         answer_rules = textwrap.dedent(
             """\
             Answering:
@@ -251,6 +300,8 @@ class CodeMate:
             {tool_use_rules}
 
             {workflow_rules}
+
+            {long_term_rules}
 
             {answer_rules}
 
@@ -305,6 +356,47 @@ class CodeMate:
         else:
             lines.append("- current_todos: -")
         return "\n".join(lines)
+
+    def local_now(self):
+        try:
+            timezone = ZoneInfo(self.timezone_name)
+        except Exception:
+            timezone = ZoneInfo(DEFAULT_LOCAL_TIMEZONE)
+        return datetime.now(timezone)
+
+    def runtime_context_text(self):
+        local_now = self.local_now()
+        current_date = local_now.date().isoformat()
+        daily_log = memorylib.daily_log_path(self.root, date=current_date).relative_to(self.root).as_posix()
+        return textwrap.dedent(
+            f"""\
+            Runtime context:
+            - current_local_datetime: {local_now.isoformat(timespec="seconds")}
+            - current_local_date: {current_date}
+            - timezone: {self.timezone_name}
+            - today_daily_log_path: {daily_log}
+            """
+        ).strip()
+
+    def prompt_memory_text(self):
+        return "\n\n".join([self.runtime_context_text(), self.memory_text()])
+
+    def remember_long_term(self, text):
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("memory text must not be empty")
+        memorylib.ensure_long_term_memory(self.root)
+        local_now = self.local_now()
+        timestamp = local_now.isoformat(timespec="seconds")
+        path = memorylib.daily_log_path(self.root, date=local_now.date().isoformat())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = f"- [{timestamp}] {text}"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(entry + "\n")
+        return {
+            "path": path.relative_to(self.root).as_posix(),
+            "entry": entry,
+        }
 
     def history_text(self):
         history = self.session["history"]
@@ -427,7 +519,8 @@ class CodeMate:
             {
                 "prefix_chars": len(self.prefix),
                 "workspace_chars": len(self.workspace.text()),
-                "memory_chars": len(self.memory_text()),
+                "memory_chars": len(self.prompt_memory_text()),
+                "runtime_context_chars": len(self.runtime_context_text()),
                 "history_chars": len(self.history_text()),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
@@ -454,7 +547,8 @@ class CodeMate:
             {
                 "prefix_chars": len(self.prefix),
                 "workspace_chars": len(self.workspace.text()),
-                "memory_chars": len(self.memory_text()),
+                "memory_chars": len(self.prompt_memory_text()),
+                "runtime_context_chars": len(self.runtime_context_text()),
                 "history_chars": len(self.history_text()),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
@@ -577,66 +671,120 @@ class CodeMate:
         self.memory.resolve_process_notes_after_success(name, args, self.current_memory_turn())
         self.session["memory"] = self.memory.to_dict()
 
-    def reject_durable_reason(self, note_text):
-        text = str(note_text or "").strip()
-        lowered = text.lower()
-        if not text:
-            return "empty"
-        if REDACTED_VALUE in text or SECRET_SHAPED_TEXT_PATTERN.search(text):
-            return "secret_shaped"
-        transient_state_prefixes = (
-            "current goal",
-            "current blocker",
-            "next step",
-            "current phase",
-            "key files",
-            "freshness",
-            "当前目标",
-            "当前卡点",
-            "下一步",
-            "当前阶段",
-            "关键文件",
-            "已完成",
-            "已排除",
+    def retrieve_long_term_memory_for_request(self, user_message, task_state):
+        """为当前 ask 执行一次长期记忆模型召回。
+
+        召回只发生在用户请求开始时，后续工具循环复用 `relevant_long_term_memory`，
+        避免每次重新组 prompt 都额外调用模型。失败不会中断主任务，只会降级为空召回。
+        """
+        self.relevant_long_term_memory = []
+        self.long_term_memory_status = "disabled"
+        self.long_term_memory_metadata = {}
+        if not (self.feature_enabled("memory") and self.feature_enabled("relevant_memory") and self.feature_enabled("long_term_memory")):
+            return
+        if self.runtime_mode != "agent":
+            self.long_term_memory_status = "skipped_runtime_mode"
+            return
+
+        memory_files = memorylib.read_long_term_memory(self.root)
+        cache_payload = json.dumps(
+            {"user_message": str(user_message), "memory_files": memory_files},
+            ensure_ascii=False,
+            sort_keys=True,
         )
-        if any(lowered.startswith(prefix) for prefix in transient_state_prefixes):
-            return "transient_task_state"
-        if re.search(r"(?i)\b(stdout|stderr|traceback|exit_code)\b", text) or len(text) > 220:
-            return "noisy_output"
-        return ""
+        cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+        if self._long_term_memory_cache_key == cache_key:
+            return
 
-    def extract_durable_promotions(self, user_message, final_answer):
-        user_text = str(user_message or "")
-        if not (DURABLE_MEMORY_INTENT_PATTERN.search(user_text) or DURABLE_MEMORY_INTENT_ZH_PATTERN.search(user_text)):
-            return [], []
-        promotions = []
-        rejections = []
-        for line in str(final_answer or "").splitlines():
-            text = line.strip()
-            if not text or REDACTED_VALUE in text:
-                continue
-            for topic, pattern in DURABLE_MEMORY_LINE_PATTERNS:
-                match = pattern.match(text)
-                if not match:
-                    continue
-                note_text = match.group(1).strip()
-                if note_text:
-                    reason = self.reject_durable_reason(note_text)
-                    if reason:
-                        rejections.append(f"{topic}:{reason}")
-                        break
-                    promotions.append((topic, note_text))
-                break
-        return promotions, rejections
+        self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key})
+        try:
+            result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message)
+        except Exception as exc:
+            self.long_term_memory_status = "failed"
+            self.long_term_memory_metadata = {"error": str(exc), "memory_hash": cache_key}
+            self.emit_trace(task_state, "memory_retrieval_failed", self.long_term_memory_metadata)
+            self._long_term_memory_cache_key = cache_key
+            return
 
-    def promote_durable_memory(self, user_message, final_answer):
-        promotions, rejections = self.extract_durable_promotions(user_message, final_answer)
-        promoted, superseded = self.memory.promote_durable(promotions)
-        self.session["memory"] = self.memory.to_dict()
-        self.last_durable_promotions = promoted
-        self.last_durable_rejections = rejections
-        self.last_durable_superseded = superseded
-        return promoted, rejections, superseded
+        selected = list(result.get("selected", []) or [])
+        self.relevant_long_term_memory = selected
+        self.long_term_memory_status = str(result.get("status", "ok"))
+        self.long_term_memory_metadata = {
+            "status": self.long_term_memory_status,
+            "selected_count": len(selected),
+            "selected_sources": [str(item.get("source", "")) for item in selected],
+            "duration_ms": int(result.get("duration_ms", 0) or 0),
+            "memory_hash": cache_key,
+        }
+        self.emit_trace(task_state, "memory_retrieval_finished", self.long_term_memory_metadata)
+        self._long_term_memory_cache_key = cache_key
+
+    def schedule_dream_if_needed(self, task_state):
+        if not self.feature_enabled("memory_dream") or self.runtime_mode != "agent":
+            return
+        session_count = self.session_store.count()
+        due, reason = dreamlib.should_run_dream(self.root, session_count)
+        if not due:
+            return
+        self.start_dream_background(reason=reason)
+        self.emit_trace(task_state, "dream_scheduled", {"reason": reason, "session_count": session_count})
+
+    def start_dream_background(self, reason="manual"):
+        thread = threading.Thread(target=self.run_dream_once, kwargs={"reason": reason, "foreground": False}, daemon=True)
+        thread.start()
+        return thread
+
+    def run_dream_once(self, reason="manual", foreground=True):
+        with longterm.dream_lock(self.root) as acquired:
+            if not acquired:
+                return "dream skipped: another dream process is already running"
+            try:
+                state = longterm.load_dream_state(self.root)
+                cursor_text = dreamlib.render_daily_log_cursor(state)
+                dream_session = {
+                    "id": "dream-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+                    "created_at": now(),
+                    "workspace_root": str(self.root),
+                    "history": [],
+                    "memory": memorylib.default_memory_state(),
+                    "todos": [],
+                    "runtime_mode": "dream",
+                    "reason": str(reason),
+                }
+                child = CodeMate(
+                    model_client=self.model_client,
+                    workspace=self.workspace,
+                    session_store=self.session_store,
+                    session=dream_session,
+                    approval_policy="auto",
+                    max_steps=12,
+                    max_new_tokens=self.max_new_tokens,
+                    depth=0,
+                    max_depth=0,
+                    read_only=False,
+                    shell_env_allowlist=self.shell_env_allowlist,
+                    secret_env_names=self.secret_env_names,
+                    feature_flags={
+                        **self.feature_flags,
+                        "long_term_memory": False,
+                        "relevant_memory": False,
+                        "memory_dream": False,
+                    },
+                    allowed_tools={"list_files", "read_file", "grep", "write_file", "patch_file", "todo_write"},
+                    memory_scope_only=True,
+                    runtime_mode="dream",
+                    timezone_name=self.timezone_name,
+                    ui=self.ui if foreground else NullUI(),
+                )
+                child.ask(dreamlib.dream_prompt(cursor_text))
+                updated = dreamlib.mark_dream_complete(self.root, self.session_store.count(), status="ok")
+                cursor = updated.get("last_processed_daily_log") or {}
+                file_name = cursor.get("file") or ""
+                line = cursor.get("line", 0) or 0
+                return f"dream completed: processed through {file_name or 'no daily logs'} line {line}"
+            except Exception as exc:
+                dreamlib.mark_dream_failed(self.root, status="error")
+                return f"dream failed: {exc}"
 
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
@@ -675,6 +823,7 @@ class CodeMate:
                 "user_request": clip(user_message, 300),
             },
         )
+        self.retrieve_long_term_memory_for_request(user_message, task_state)
 
         tool_steps = 0
         attempts = 0
@@ -818,7 +967,6 @@ class CodeMate:
                     continue
                 self.record({"role": "assistant", "content": final, "created_at": now()})
                 task_state.finish_success(final)
-                self.promote_durable_memory(user_message, final)
                 self.run_store.write_task_state(task_state)
                 self.emit_trace(
                     task_state,
@@ -830,6 +978,7 @@ class CodeMate:
                         "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
                     },
                 )
+                self.schedule_dream_if_needed(task_state)
                 self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
                 self.ui.final_answer(final)
                 return final
@@ -851,7 +1000,6 @@ class CodeMate:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
         self.record({"role": "assistant", "content": final, "created_at": now()})
-        self.promote_durable_memory(user_message, final)
         self.run_store.write_task_state(task_state)
         self.emit_trace(
             task_state,
@@ -863,6 +1011,7 @@ class CodeMate:
                 "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
             },
         )
+        self.schedule_dream_if_needed(task_state)
         self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
         self.ui.final_answer(final)
         return final
@@ -1132,9 +1281,7 @@ class CodeMate:
             "attempts": task_state.attempts,
             "task_state": task_state.to_dict(),
             "prompt_metadata": self.last_prompt_metadata,
-            "durable_promotions": list(self.last_durable_promotions),
-            "durable_rejections": list(self.last_durable_rejections),
-            "durable_superseded": list(self.last_durable_superseded),
+            "long_term_memory": dict(self.long_term_memory_metadata),
             "redacted_env": self.detected_secret_env_summary(),
         }
 
@@ -1213,6 +1360,8 @@ class CodeMate:
         # 这样既能防住 "../" 逃逸，也能防住符号链接解析后跳出仓库。
         if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
             raise ValueError(f"path escapes workspace: {raw_path}")
+        if self.memory_scope_only and not longterm.is_memory_path(self.root, resolved):
+            raise ValueError(f"path outside memory scope: {raw_path}")
         return resolved
 
 

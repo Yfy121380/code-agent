@@ -155,6 +155,34 @@ def _to_openai_input(messages, system=None):
     return items
 
 
+def _openai_structured_response_format(structured_output):
+    if not structured_output:
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": str(structured_output.get("name") or "structured_output"),
+            "schema": dict(structured_output.get("schema") or {}),
+            "strict": True,
+        },
+    }
+
+
+def _openai_responses_text_format(structured_output):
+    response_format = _openai_structured_response_format(structured_output)
+    if not response_format:
+        return None
+    json_schema = response_format["json_schema"]
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": json_schema["name"],
+            "schema": json_schema["schema"],
+            "strict": json_schema["strict"],
+        }
+    }
+
+
 def _to_openai_chat_messages(messages, system=None):
     converted = []
     if system:
@@ -204,7 +232,7 @@ class OpenAICompatibleModelClient:
         self.supports_tools = True
         self.last_completion_metadata = {}
 
-    def _complete_chat_completions(self, messages, max_new_tokens, tools=None, system=None):
+    def _complete_chat_completions(self, messages, max_new_tokens, tools=None, system=None, structured_output=None):
         payload = {
             "model": self.model,
             "messages": _to_openai_chat_messages(_normalize_messages(messages), system=system),
@@ -213,6 +241,9 @@ class OpenAICompatibleModelClient:
         }
         if tools:
             payload["tools"] = _tool_specs_to_openai_chat(tools)
+        response_format = _openai_structured_response_format(structured_output)
+        if response_format:
+            payload["response_format"] = response_format
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 
@@ -259,7 +290,7 @@ class OpenAICompatibleModelClient:
             return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
         return ModelResponse.final(text, metadata=metadata, raw=data)
 
-    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None):
+    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
@@ -269,6 +300,9 @@ class OpenAICompatibleModelClient:
         }
         if tools:
             payload["tools"] = _tool_specs_to_openai(tools)
+        text_format = _openai_responses_text_format(structured_output)
+        if text_format:
+            payload["text"] = text_format
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if self.supports_prompt_cache and prompt_cache_key:
@@ -309,6 +343,7 @@ class OpenAICompatibleModelClient:
                         max_new_tokens,
                         tools=tools,
                         system=system,
+                        structured_output=structured_output,
                     )
                 raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
             except (urllib.error.URLError, RemoteDisconnected) as exc:

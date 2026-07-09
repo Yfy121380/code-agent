@@ -6,17 +6,32 @@ import subprocess
 import textwrap
 
 from ..workspace import IGNORED_PATH_NAMES
+from ..memory.long_term import is_memory_path
 from .constants import TODO_STATUSES
 from .validators import _normalize_todos
+
+
+def _path_is_under_ignored_dir(agent, path):
+    try:
+        parts = path.relative_to(agent.root).parts
+    except ValueError:
+        return True
+    return any(part in IGNORED_PATH_NAMES for part in parts)
+
+
+def _allow_memory_tree(agent, path):
+    return is_memory_path(agent.root, path)
 
 
 def tool_list_files(agent, args):
     path = agent.path(args.get("path", "."))
     if not path.is_dir():
         raise ValueError("path is not a directory")
+    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory may be listed explicitly")
     entries = [
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
-        if item.name not in IGNORED_PATH_NAMES
+        if item.name not in IGNORED_PATH_NAMES or _allow_memory_tree(agent, item)
     ]
     lines = []
     for entry in entries[:200]:
@@ -46,11 +61,15 @@ def _grep_context_args(args):
 
 
 def _grep_files(agent, path):
+    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory may be searched explicitly")
     if path.is_file():
         return [path]
+    allow_memory = _allow_memory_tree(agent, path)
     return [
         item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts)
+        if item.is_file()
+        and (allow_memory or not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts))
     ]
 
 
@@ -78,7 +97,11 @@ def _format_grep_count_output(stdout):
 
 
 def _tool_grep_rg(agent, pattern, path, mode, args):
+    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory may be searched explicitly")
     command = ["rg", "--smart-case"]
+    if _allow_memory_tree(agent, path):
+        command.append("--hidden")
     if mode == "files_with_matches":
         command.append("--files-with-matches")
     elif mode == "count":
@@ -282,6 +305,13 @@ def tool_delegate(agent, args):
         read_only=True,
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
+        feature_flags={
+            **agent.feature_flags,
+            "memory_dream": False,
+            "long_term_memory": False,
+            "relevant_memory": False,
+        },
+        timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
     )
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。

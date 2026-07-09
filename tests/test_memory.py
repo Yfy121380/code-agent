@@ -1,4 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 from codemate.memory import LayeredMemory
+from codemate.memory import dream as dreamlib
+from codemate.memory import long_term as longterm
+from codemate.models import FakeModelClient
+from codemate.runtime import CodeMate
+from codemate.storage import SessionStore
+from codemate.workspace import WorkspaceContext
 
 
 def test_working_memory_tracks_summary_and_recent_files():
@@ -164,31 +172,112 @@ def test_render_memory_text_includes_process_notes_near_file_summaries():
     assert "exit_code: 1" in text
 
 
-def test_durable_memory_index_and_topic_notes_are_loaded_and_retrieved(tmp_path):
+def test_long_term_memory_files_are_initialized(tmp_path):
+    memory = LayeredMemory(workspace_root=tmp_path)
+
     memory_root = tmp_path / ".codemate" / "memory"
-    topics_dir = memory_root / "topics"
-    topics_dir.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text(
-        "# Durable Memory Index\n\n"
-        "- [project-conventions](topics/project-conventions.md): Project Conventions\n"
-        "  - summary: Stable repository conventions.\n"
-        "  - tags: convention\n",
-        encoding="utf-8",
-    )
-    (topics_dir / "project-conventions.md").write_text(
-        "# Project Conventions\n\n"
-        "- topic: project-conventions\n"
-        "- summary: Stable repository conventions.\n"
-        "- tags: convention\n"
-        "- updated_at: 2026-04-12T08:14:49+00:00\n\n"
-        "## Notes\n"
-        "- Use constrained tools instead of guessing.\n"
-        "- Preserve local agent state under .codemate/.\n",
-        encoding="utf-8",
-    )
+
+    assert (memory_root / "user_profile.md").is_file()
+    assert (memory_root / "feedback_workflow.md").is_file()
+    assert (memory_root / "project_context.md").is_file()
+    assert (memory_root / "daily_logs").is_dir()
+    assert set(memory.read_long_term_memory()) == {"user_profile", "feedback_workflow", "project_context"}
+
+
+def test_long_term_memory_migrates_legacy_user_preferences_file(tmp_path):
+    memory_root = tmp_path / ".codemate" / "memory"
+    memory_root.mkdir(parents=True)
+    (memory_root / "user_preferences.md").write_text("# User Preferences\n\n- old preference\n", encoding="utf-8")
 
     memory = LayeredMemory(workspace_root=tmp_path)
 
-    assert "project-conventions" in memory.render_memory_text()
-    lines = [line for line in memory.retrieval_view("constrained tools", limit=4).splitlines() if line.startswith("- ")]
-    assert any("Use constrained tools instead of guessing." in line for line in lines)
+    assert not (memory_root / "user_preferences.md").exists()
+    assert (memory_root / "user_profile.md").read_text(encoding="utf-8") == "# User Preferences\n\n- old preference\n"
+    assert "user_profile" in memory.read_long_term_memory()
+
+
+def test_remember_long_term_appends_today_daily_log(tmp_path):
+    workspace = WorkspaceContext.build(tmp_path)
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    agent = CodeMate(
+        model_client=FakeModelClient([]),
+        workspace=workspace,
+        session_store=store,
+        approval_policy="auto",
+    )
+
+    result = agent.remember_long_term("用户希望以后先说明修改范围")
+
+    log_path = tmp_path / result["path"]
+    text = log_path.read_text(encoding="utf-8")
+    assert result["path"].startswith(".codemate/memory/daily_logs/")
+    assert "- [" in result["entry"]
+    assert "用户希望以后先说明修改范围" in text
+
+
+def test_dream_trigger_requires_time_and_new_sessions(tmp_path):
+    old_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    longterm.save_dream_state(
+        tmp_path,
+        {
+            "last_dream_at": old_at,
+            "last_dream_session_count": 3,
+            "last_status": "ok",
+        },
+    )
+
+    assert dreamlib.should_run_dream(tmp_path, session_count=7) == (False, "not_enough_sessions")
+    assert dreamlib.should_run_dream(tmp_path, session_count=8) == (True, "time_and_session_interval")
+
+
+def test_dream_prompt_describes_daily_log_cursor():
+    state = {"last_processed_daily_log": {"file": "2026-07-09.md", "line": 12}}
+    cursor_text = dreamlib.render_daily_log_cursor(state)
+    prompt = dreamlib.dream_prompt(cursor_text)
+
+    assert "file: 2026-07-09.md" in prompt
+    assert "line: 12" in prompt
+    assert "start from line 13" in prompt
+    assert "Only consolidate daily log entries after this cursor" in prompt
+
+
+def test_run_dream_once_updates_cursor_without_counting_dream_session(tmp_path):
+    workspace = WorkspaceContext.build(tmp_path)
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    store.save({"id": "session_001", "history": [], "memory": {}, "todos": []})
+    agent = CodeMate(
+        model_client=FakeModelClient(["done"]),
+        workspace=workspace,
+        session_store=store,
+        approval_policy="auto",
+    )
+    log_dir = tmp_path / ".codemate" / "memory" / "daily_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "2026-07-09.md").write_text("- [t1] first\n- [t2] second\n", encoding="utf-8")
+
+    result = agent.run_dream_once(reason="manual", foreground=False)
+    state = longterm.load_dream_state(tmp_path)
+
+    assert result == "dream completed: processed through 2026-07-09.md line 2"
+    assert state["last_processed_daily_log"] == {"file": "2026-07-09.md", "line": 2}
+    assert state["last_dream_session_count"] == 2
+    assert store.count() == 2
+    assert any(path.name.startswith("dream-") for path in store.root.iterdir() if path.is_dir())
+
+
+def test_run_dream_once_returns_error_message_without_raising(tmp_path):
+    workspace = WorkspaceContext.build(tmp_path)
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    agent = CodeMate(
+        model_client=FakeModelClient([]),
+        workspace=workspace,
+        session_store=store,
+        approval_policy="auto",
+    )
+
+    result = agent.run_dream_once(reason="manual", foreground=True)
+    state = longterm.load_dream_state(tmp_path)
+
+    assert result.startswith("dream failed: ")
+    assert "fake model ran out of outputs" in result
+    assert state["last_status"] == "error"

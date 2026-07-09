@@ -82,7 +82,7 @@ class AnthropicCompatibleModelClient:
         self.supports_tools = True
         self.last_completion_metadata = {}
 
-    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None):
+    def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
         payload = {
@@ -95,6 +95,13 @@ class AnthropicCompatibleModelClient:
             payload["system"] = str(system)
         if tools:
             payload["tools"] = _tool_specs_to_anthropic(tools)
+        if structured_output:
+            payload["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": dict(structured_output.get("schema") or {}),
+                }
+            }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 

@@ -21,6 +21,8 @@ from .types import (
     _tail_clip,
 )
 
+LONG_TERM_MEMORY_SOURCES = ("user_profile", "feedback_workflow", "project_context")
+
 
 class ContextManager:
     def __init__(
@@ -95,8 +97,8 @@ class ContextManager:
             context_reduction_enabled = self.agent.feature_enabled("context_reduction")
         section_texts = self._section_texts(user_message, memory_enabled=memory_enabled)
         selected_notes = []
-        if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
-            selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
+        if memory_enabled and relevant_memory_enabled:
+            selected_notes = list(getattr(self.agent, "relevant_long_term_memory", []) or [])[:RELEVANT_MEMORY_LIMIT]
 
         if not context_reduction_enabled:
             rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes, user_message=user_message)
@@ -137,9 +139,15 @@ class ContextManager:
         return rendered, budgets, reduction_log, selected_notes
 
     def _section_texts(self, user_message, memory_enabled=True):
+        memory_text = "Working memory:\n- disabled"
+        if memory_enabled:
+            if hasattr(self.agent, "prompt_memory_text"):
+                memory_text = str(self.agent.prompt_memory_text())
+            else:
+                memory_text = str(self.agent.memory_text())
         return {
             "prefix": str(getattr(self.agent, "prefix", "")),
-            "memory": "Working memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "memory": memory_text,
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
@@ -155,12 +163,7 @@ class ContextManager:
         # 这个路径用于关闭 context_reduction 的实验场景，需要保留完整原始长度。
         # 即使不做预算裁剪，history 仍会通过统一渲染器输出结构化 transcript。
         selected_notes = selected_notes or []
-        relevant_lines = ["Relevant memory:"]
-        if selected_notes:
-            relevant_lines.extend(f"- {note['text']}" for note in selected_notes)
-        else:
-            relevant_lines.append("- none")
-        relevant_raw = "\n".join(relevant_lines)
+        relevant_raw, relevant_details = self._format_relevant_memory(selected_notes, note_budget=0)
         history = self.history_renderer.history_for_request(user_message)
         history_raw = self.history_renderer.raw_text(history)
         history_render = self.history_renderer.render(len(history_raw), user_message=user_message)
@@ -171,13 +174,7 @@ class ContextManager:
                 raw=relevant_raw,
                 budget=len(relevant_raw),
                 rendered=relevant_raw,
-                details={
-                    "selected_notes": [note["text"] for note in selected_notes],
-                    "rendered_notes": [note["text"] for note in selected_notes],
-                    "selected_count": len(selected_notes),
-                    "rendered_count": len(selected_notes),
-                    "note_budget": 0,
-                },
+                details=relevant_details,
             ),
             "history": history_render,
             CURRENT_REQUEST_SECTION: SectionRender(
@@ -215,52 +212,84 @@ class ContextManager:
 
     def _render_relevant_memory(self, selected_notes, budget):
         # 渲染长期记忆召回结果。
-        # 多条笔记共享同一个 section 预算，因此先给每条笔记均分可用空间。
-        # 如果均分后仍然超预算，再对整个 relevant memory 文本做兜底截断。
-        header = "Relevant memory:"
-        note_texts = [str(note.get("text", "")) for note in selected_notes if str(note.get("text", "")).strip()]
-        raw_lines = [header] + [f"- {text}" for text in note_texts]
-        raw = "\n".join(raw_lines) if note_texts else "\n".join([header, "- none"])
-        if not note_texts:
+        # 按三类长期记忆来源分组展示，让模型能区分用户偏好、工作流反馈和项目背景。
+        # 预算仍然在整个 section 内统一控制，过长时先按每条记忆裁剪，再兜底截断。
+        raw, raw_details = self._format_relevant_memory(selected_notes, note_budget=0)
+        note_items = raw_details["note_items"]
+        if not note_items:
             return SectionRender(
                 raw=raw,
                 budget=budget,
                 rendered=raw,
-                details={"selected_notes": [], "rendered_notes": [], "selected_count": 0, "rendered_count": 0, "note_budget": 0},
+                details=raw_details,
             )
 
-        per_note_budget = self._per_note_budget(budget, len(note_texts), header)
-        rendered_notes = []
+        grouped_sources = {item["source"] for item in note_items}
+        fixed_overhead = len("Relevant memory:\n")
+        for source in LONG_TERM_MEMORY_SOURCES:
+            fixed_overhead += len(f"{source}:\n")
+            fixed_overhead += 0 if source in grouped_sources else len("- none\n")
+        fixed_overhead += len("- ") * len(note_items)
+        per_note_budget = max(1, (max(0, budget - fixed_overhead) // len(note_items)))
         while True:
-            rendered_notes = [_tail_clip(text, per_note_budget) for text in note_texts]
-            rendered = "\n".join([header] + [f"- {text}" for text in rendered_notes])
+            rendered_items = [
+                {"source": item["source"], "text": _tail_clip(item["text"], per_note_budget)}
+                for item in note_items
+            ]
+            rendered, rendered_details = self._format_relevant_memory_items(rendered_items, per_note_budget)
             if len(rendered) <= budget or per_note_budget <= 1:
                 break
             per_note_budget -= 1
 
         if len(rendered) > budget and budget > 0:
             rendered = _tail_clip(raw, budget)
-            rendered_notes = [rendered]
+            rendered_details = dict(raw_details)
+            rendered_details["rendered_notes"] = [rendered]
+            rendered_details["rendered_count"] = 1
+            rendered_details["note_budget"] = per_note_budget
 
         return SectionRender(
             raw=raw,
             budget=budget,
             rendered=rendered,
-            details={
-                "selected_notes": note_texts,
-                "rendered_notes": rendered_notes,
-                "selected_count": len(note_texts),
-                "rendered_count": len(rendered_notes),
-                "note_budget": per_note_budget,
-            },
+            details=rendered_details,
         )
 
-    def _per_note_budget(self, budget, note_count, header):
-        if note_count <= 0:
-            return 0
-        overhead = len(header) + 3 * note_count
-        usable = max(0, budget - overhead)
-        return max(1, usable // note_count)
+    def _format_relevant_memory(self, selected_notes, note_budget):
+        note_items = []
+        for note in selected_notes or []:
+            source = str(note.get("source", "")).strip()
+            text = str(note.get("text", "")).strip()
+            if source not in LONG_TERM_MEMORY_SOURCES or not text:
+                continue
+            note_items.append({"source": source, "text": text})
+        return self._format_relevant_memory_items(note_items, note_budget)
+
+    def _format_relevant_memory_items(self, note_items, note_budget):
+        grouped = {source: [] for source in LONG_TERM_MEMORY_SOURCES}
+        for item in note_items:
+            grouped[item["source"]].append(item["text"])
+        lines = ["Relevant memory:"]
+        rendered_notes = []
+        for source in LONG_TERM_MEMORY_SOURCES:
+            lines.append(f"{source}:")
+            items = grouped[source]
+            if not items:
+                lines.append("- none")
+                continue
+            for item_text in items:
+                lines.append(f"- {item_text}")
+                rendered_notes.append(item_text)
+        selected_texts = [item["text"] for item in note_items]
+        return "\n".join(lines), {
+            "note_items": list(note_items),
+            "selected_notes": selected_texts,
+            "rendered_notes": rendered_notes,
+            "selected_count": len(selected_texts),
+            "rendered_count": len(rendered_notes),
+            "note_budget": note_budget,
+            "group_counts": {source: len(grouped[source]) for source in LONG_TERM_MEMORY_SOURCES},
+        }
 
     def _assemble_prompt(self, rendered):
         return "\n\n".join(
@@ -331,10 +360,8 @@ class ContextManager:
                 "selected_count": len(selected_notes),
                 "selected_notes": [note["text"] for note in selected_notes],
                 "selected_sources": [str(note.get("source", "")).strip() for note in selected_notes],
-                "selected_kinds": [str(note.get("kind", "episodic")).strip() or "episodic" for note in selected_notes],
-                "selected_durable_count": sum(
-                    1 for note in selected_notes if (str(note.get("kind", "episodic")).strip() or "episodic") == "durable"
-                ),
+                "selected_kinds": [str(note.get("kind", "long_term")).strip() or "long_term" for note in selected_notes],
+                "retrieval_status": str(getattr(self.agent, "long_term_memory_status", "not_run")),
                 "raw_chars": rendered["relevant_memory"].raw_chars,
                 "rendered_chars": rendered["relevant_memory"].rendered_chars,
                 "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),

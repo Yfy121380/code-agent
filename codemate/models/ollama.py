@@ -51,6 +51,7 @@ class OllamaModelClient:
         self.last_completion_metadata = {}
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
+        structured_output = kwargs.pop("structured_output", None)
         del kwargs
         self.last_completion_metadata = {}
         payload = {
@@ -66,6 +67,8 @@ class OllamaModelClient:
         }
         if tools:
             payload["tools"] = _tool_specs_to_ollama(tools)
+        if structured_output:
+            payload["format"] = dict(structured_output.get("schema") or {})
         request = urllib.request.Request(
             self.host + "/api/chat",
             data=json.dumps(payload).encode("utf-8"),

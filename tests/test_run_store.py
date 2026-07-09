@@ -1,11 +1,26 @@
 import json
 
-from codemate.storage import RunStore
+from codemate.storage import RunStore, SessionStore
 from codemate.storage import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState
 
 
+def test_session_store_groups_session_json_and_runs_dir(tmp_path):
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    session = {"id": "session_001", "history": [], "memory": {}, "todos": []}
+    dream_session = {"id": "dream-001", "history": [], "memory": {}, "todos": []}
+
+    session_path = store.save(session)
+    store.save(dream_session)
+
+    assert session_path == tmp_path / ".codemate" / "sessions" / "session_001" / "session.json"
+    assert store.runs_dir("session_001") == tmp_path / ".codemate" / "sessions" / "session_001" / "runs"
+    assert store.load("session_001")["id"] == "session_001"
+    assert store.latest() == "session_001"
+    assert store.count() == 1
+
+
 def test_run_store_creates_run_directory_and_state_file(tmp_path):
-    store = RunStore(tmp_path / ".codemate" / "runs")
+    store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Inspect the repo.")
 
     run_dir = store.start_run(state)
@@ -19,7 +34,7 @@ def test_run_store_creates_run_directory_and_state_file(tmp_path):
 
 
 def test_run_store_appends_trace_jsonl(tmp_path):
-    store = RunStore(tmp_path / ".codemate" / "runs")
+    store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_002", task_id="task_002", user_request="Trace the run.")
     store.start_run(state)
 
@@ -42,7 +57,7 @@ def test_run_store_appends_trace_jsonl(tmp_path):
 
 
 def test_run_store_writes_report_json(tmp_path):
-    store = RunStore(tmp_path / ".codemate" / "runs")
+    store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_003", task_id="task_003", user_request="Report the run.")
     store.start_run(state)
     state.finish_success("Done.")
@@ -56,7 +71,7 @@ def test_run_store_writes_report_json(tmp_path):
 
 
 def test_run_store_preserves_unicode_text_on_disk(tmp_path):
-    store = RunStore(tmp_path / ".codemate" / "runs")
+    store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_unicode", task_id="task_unicode", user_request="检查中文")
     store.start_run(state)
     state.finish_success("完成。")
@@ -78,7 +93,7 @@ def test_run_store_preserves_unicode_text_on_disk(tmp_path):
 
 
 def test_run_store_tolerates_missing_final_report(tmp_path):
-    store = RunStore(tmp_path / ".codemate" / "runs")
+    store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_004", task_id="task_004", user_request="Crash before finalize.")
 
     store.start_run(state)

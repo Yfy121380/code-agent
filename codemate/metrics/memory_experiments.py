@@ -55,8 +55,8 @@ def _set_irrelevant_memory(agent):
     state = agent.memory.to_dict()
     state["file_summaries"] = {}
     agent.memory.state = state
-    agent.memory.promote_durable([("project-conventions", "team mascot is blue")])
-    agent.session["memory"] = agent.memory.to_dict()
+    agent.relevant_long_term_memory = [{"source": "project_context", "text": "team mascot is blue", "kind": "long_term"}]
+    agent.long_term_memory_status = "ok"
 
 
 def _run_memory_variant(mode):
@@ -171,8 +171,8 @@ def _set_irrelevant_memory_for_task(agent):
     state = agent.memory.to_dict()
     state["file_summaries"] = {}
     agent.memory.state = state
-    agent.memory.promote_durable([("project-conventions", "the team mascot is blue")])
-    agent.session["memory"] = agent.memory.to_dict()
+    agent.relevant_long_term_memory = [{"source": "project_context", "text": "the team mascot is blue", "kind": "long_term"}]
+    agent.long_term_memory_status = "ok"
 
 
 def _run_memory_task_variant(task, variant):

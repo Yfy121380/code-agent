@@ -1,11 +1,10 @@
-# 工作记忆状态：负责 memory state 规范化、渲染和长期记忆召回视图。
-
-from pathlib import Path
+# 工作记忆状态：负责 memory state 规范化和 prompt 渲染。
+# 这里只处理 session 内的短期工作记忆、文件摘要和过程笔记。
+# 长期记忆召回已经迁移到模型召回链路，不再由工作记忆按关键词检索。
 
 from ..workspace import clip, now
 from .common import _dedupe_preserve_order, _ensure_list, canonicalize_path, file_freshness
 from .constants import FILE_SUMMARY_LIMIT, PROCESS_NOTE_LIMIT, WORKING_FILE_LIMIT
-from .durable import DurableMemoryStore
 from .process_notes import _normalize_process_note
 
 
@@ -75,25 +74,6 @@ def normalize_memory_state(state, workspace_root=None):
         "process_notes": process_notes[-PROCESS_NOTE_LIMIT:],
     }
 
-def retrieval_candidates(state, query, limit=3, workspace_root=None):
-    normalize_memory_state(state, workspace_root)
-    if workspace_root is None:
-        return []
-    durable_store = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory")
-    return durable_store.retrieval_candidates(query, limit=limit)
-
-
-def retrieval_view(state, query, limit=3, workspace_root=None):
-    candidates = retrieval_candidates(state, query, limit=limit, workspace_root=workspace_root)
-    lines = ["Relevant memory:"]
-    if not candidates:
-        lines.append("- none")
-        return "\n".join(lines)
-    for note in candidates:
-        lines.append(f"- {note['text']}")
-    return "\n".join(lines)
-
-
 def render_memory_text(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     lines = [
@@ -123,10 +103,6 @@ def render_memory_text(state, workspace_root=None):
     else:
         lines.append("- process_notes: -")
 
-    durable_topics = []
-    if workspace_root is not None:
-        durable_topics = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory").topic_slugs()
-    # lines.append(f"- durable_topics: {', '.join(durable_topics) or '-'}")
     return "\n".join(lines)
 
 

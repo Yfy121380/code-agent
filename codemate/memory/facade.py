@@ -1,9 +1,10 @@
-# 记忆门面：LayeredMemory 向 runtime 暴露统一 API，内部委托给各记忆子模块。
+# 记忆门面：LayeredMemory 向 runtime 暴露统一 API。
+# 工作记忆、文件摘要和过程笔记仍然保存在 session 中。
+# 长期记忆改为 `.codemate/memory` 下的三类文件，由 dedicated 模块管理。
 
 from pathlib import Path
 
 from .common import canonicalize_path
-from .durable import DurableMemoryStore
 from .file_memory import (
     has_fresh_file_summary,
     invalidate_file_summary,
@@ -12,15 +13,17 @@ from .file_memory import (
     set_file_summary,
     set_task_summary,
 )
+from .long_term import ensure_long_term_memory, read_long_term_memory
 from .process_notes import expire_process_notes, record_process_note, resolve_process_notes_after_success
-from .state import normalize_memory_state, render_memory_text, retrieval_candidates, retrieval_view
+from .state import normalize_memory_state, render_memory_text
 
 
 class LayeredMemory:
     def __init__(self, state=None, workspace_root=None):
         self.workspace_root = workspace_root
         self.state = normalize_memory_state(state, workspace_root)
-        self.durable_store = DurableMemoryStore(Path(workspace_root) / ".codemate" / "memory") if workspace_root is not None else None
+        if workspace_root is not None:
+            ensure_long_term_memory(Path(workspace_root))
 
     def to_dict(self):
         self.state = normalize_memory_state(self.state, self.workspace_root)
@@ -78,19 +81,10 @@ class LayeredMemory:
         )
         return self
 
-    def retrieval_candidates(self, query, limit=3):
-        return retrieval_candidates(self.state, query, limit=limit, workspace_root=self.workspace_root)
-
-    def retrieval_view(self, query, limit=3):
-        return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
-
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)
 
-    def promote_durable(self, promotions):
-        if self.durable_store is None:
-            return [], []
-        self.state = normalize_memory_state(self.state, self.workspace_root)
-        promoted, superseded = self.durable_store.promote(promotions)
-        self.state = normalize_memory_state(self.state, self.workspace_root)
-        return promoted, superseded
+    def read_long_term_memory(self):
+        if self.workspace_root is None:
+            return {}
+        return read_long_term_memory(self.workspace_root)
