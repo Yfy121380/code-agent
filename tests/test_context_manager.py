@@ -28,6 +28,15 @@ def add_durable_notes(agent, notes):
     agent.long_term_memory_status = "ok"
 
 
+def write_skill(tmp_path, name, description, body="Follow this skill."):
+    skill_dir = tmp_path / ".codemate" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
 def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     agent = build_agent(tmp_path, [])
     add_durable_notes(agent, ["deploy key is red"])
@@ -37,11 +46,13 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     prompt, metadata = ContextManager(agent).build("Where is the deploy key?")
 
     assert prompt.index("You are codemate") < prompt.index("Working memory:")
+    assert prompt.index("You are codemate") < prompt.index("Available skills:")
+    assert prompt.index("Available skills:") < prompt.index("Working memory:")
     assert prompt.index("Working memory:") < prompt.index("Relevant memory:")
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["section_order"] == ["prefix", "memory", "relevant_memory", "history", "current_request"]
+    assert metadata["section_order"] == ["prefix", "skills", "memory", "relevant_memory", "history", "current_request"]
 
 
 def test_context_manager_reduces_relevant_memory_before_history_and_preserves_newer_context(tmp_path):
@@ -67,6 +78,7 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
         total_budget=700,
         section_budgets={
             "prefix": 120,
+            "skills": 80,
             "memory": 120,
             "relevant_memory": 120,
             "history": 400,
@@ -75,7 +87,7 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
 
     prompt, metadata = manager.build("keep this request verbatim")
 
-    for section in ("prefix", "memory", "relevant_memory", "history"):
+    for section in ("prefix", "skills", "memory", "relevant_memory", "history"):
         assert metadata["sections"][section]["rendered_chars"] <= metadata["sections"][section]["budget_chars"]
 
     reduction_sections = [entry["section"] for entry in metadata["budget_reductions"]]
@@ -104,6 +116,7 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
         total_budget=700,
         section_budgets={
             "prefix": 80,
+            "skills": 80,
             "memory": 160,
             "relevant_memory": 360,
             "history": 80,
@@ -124,6 +137,44 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
     assert "beta durable" in relevant_section
     assert "gamma durab" in relevant_section
     assert "older unmatched note" not in relevant_section
+
+
+def test_context_manager_renders_and_reduces_available_skills_by_entry(tmp_path):
+    write_skill(tmp_path, "backend", "Backend workflow " + ("A" * 300))
+    write_skill(tmp_path, "paper", "Paper summary workflow " + ("B" * 120))
+    agent = build_agent(tmp_path, [])
+
+    prompt, metadata = ContextManager(
+        agent,
+        total_budget=800,
+        section_budgets={
+            "prefix": 120,
+            "skills": 90,
+            "memory": 120,
+            "relevant_memory": 120,
+            "history": 120,
+        },
+    ).build("inspect skills")
+
+    skills_section = prompt.split("Available skills:\n", 1)[1].split("\n\nWorking memory:", 1)[0]
+    assert "- backend:" in skills_section or "- backend" in skills_section
+    assert "- paper:" in skills_section or "- paper" in skills_section
+    assert metadata["skills"]["selected_count"] == 2
+    assert metadata["skills"]["rendered_count"] == 2
+    assert len(agent.available_skills()[0]["description"]) <= 250
+
+
+def test_available_skills_require_frontmatter_name_matching_directory(tmp_path):
+    skill_dir = tmp_path / ".codemate" / "skills" / "bad-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: other-name\ndescription: Should not be listed.\n---\n",
+        encoding="utf-8",
+    )
+    agent = build_agent(tmp_path, [])
+
+    assert agent.available_skills() == []
+    assert agent.available_skills_text() == "Available skills:\n- none"
 
 
 def test_context_manager_preserves_current_request_when_over_budget(tmp_path):

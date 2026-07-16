@@ -145,6 +145,20 @@ def validate_tool(agent, name, args):
         _normalize_todos(args.get("todos"))
         return
 
+    if name == "skill_load":
+        skill_name = agent.normalize_skill_name(args.get("name"))
+        if skill_name in agent.active_skill_names():
+            raise ValueError(f"skill already active: {skill_name}")
+        if not agent.skill_file(skill_name).is_file():
+            raise ValueError(f"skill not found: {skill_name}")
+        return
+
+    if name == "skill_unload":
+        skill_name = agent.normalize_skill_name(args.get("name"))
+        if skill_name not in agent.active_skill_names():
+            raise ValueError(f"skill is not active: {skill_name}")
+        return
+
     if name == "delegate":
         task = str(args.get("task", "")).strip()
         if not task:

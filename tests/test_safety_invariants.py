@@ -27,6 +27,16 @@ def build_agent(tmp_path, outputs, **kwargs):
         **kwargs,
     )
 
+
+def write_skill(tmp_path, name="backend", description="Backend workflow", body="Follow backend rules."):
+    skill_dir = tmp_path / ".codemate" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
 # 路径逃逸拒绝
 def test_workspace_escape_is_rejected(tmp_path):
     (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
@@ -109,6 +119,70 @@ def test_grep_can_search_memory_directory_explicitly(tmp_path):
     result = agent.run_tool("grep", {"pattern": "User Profile", "path": ".codemate/memory", "mode": "content"})
 
     assert ".codemate/memory/user_profile.md" in result
+
+
+def test_list_and_grep_can_access_skills_directory_explicitly(tmp_path):
+    write_skill(tmp_path, body="Use scripts/run.py when validating.")
+    agent = build_agent(tmp_path, [])
+
+    listing = agent.run_tool("list_files", {"path": ".codemate/skills/backend"})
+    result = agent.run_tool("grep", {"pattern": "scripts/run.py", "path": ".codemate/skills", "mode": "content"})
+
+    assert "SKILL.md" in listing
+    assert ".codemate/skills/backend/SKILL.md" in result
+
+
+def test_skill_load_and_unload_update_active_skills(tmp_path):
+    write_skill(tmp_path, body="Use references/guide.md for details.")
+    agent = build_agent(tmp_path, [])
+
+    loaded = agent.run_tool("skill_load", {"name": "backend"})
+    duplicate = agent.run_tool("skill_load", {"name": "backend"})
+    memory_text = agent.memory_text()
+    unloaded = agent.run_tool("skill_unload", {"name": "backend", "reason": "task switched"})
+    missing = agent.run_tool("skill_unload", {"name": "backend"})
+
+    assert "skill loaded: backend" in loaded
+    assert "skill already active" in duplicate
+    assert "active_skills:" in memory_text
+    assert "Root: .codemate/skills/backend" in memory_text
+    assert "Use references/guide.md" in memory_text
+    assert "skill unloaded: backend" in unloaded
+    assert "skill is not active" in missing
+
+
+def test_skill_load_rejects_frontmatter_name_mismatch(tmp_path):
+    skill_dir = tmp_path / ".codemate" / "skills" / "backend"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: other-backend\ndescription: Bad fixture.\n---\n",
+        encoding="utf-8",
+    )
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("skill_load", {"name": "backend"})
+
+    assert "frontmatter name must match directory name" in result
+
+
+def test_skill_load_and_unload_emit_trace_events(tmp_path):
+    write_skill(tmp_path)
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call("skill_load", {"name": "backend"}),
+            ModelResponse.tool_call("skill_unload", {"name": "backend", "reason": "unrelated task"}),
+            ModelResponse.final("done"),
+        ],
+    )
+
+    assert agent.ask("Use backend skill briefly") == "done"
+
+    trace_text = (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"event": "skill_loaded"' in trace_text
+    assert '"skill": "backend"' in trace_text
+    assert '"event": "skill_unloaded"' in trace_text
+    assert '"reason": "unrelated task"' in trace_text
 
 
 def test_grep_content_context_supports_before_after_priority_over_context(tmp_path):

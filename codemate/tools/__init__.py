@@ -10,6 +10,8 @@ from .handlers import (
     tool_patch_file,
     tool_read_file,
     tool_run_shell,
+    tool_skill_load,
+    tool_skill_unload,
     tool_todo_write,
     tool_write_file,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "tool_patch_file",
     "tool_read_file",
     "tool_run_shell",
+    "tool_skill_load",
+    "tool_skill_unload",
     "tool_todo_write",
     "tool_write_file",
     "subprocess",

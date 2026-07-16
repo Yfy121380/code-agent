@@ -145,8 +145,12 @@ class ContextManager:
                 memory_text = str(self.agent.prompt_memory_text())
             else:
                 memory_text = str(self.agent.memory_text())
+        skills_text = "Available skills:\n- none"
+        if hasattr(self.agent, "available_skills_text"):
+            skills_text = str(self.agent.available_skills_text())
         return {
             "prefix": str(getattr(self.agent, "prefix", "")),
+            "skills": skills_text,
             "memory": memory_text,
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
@@ -169,6 +173,7 @@ class ContextManager:
         history_render = self.history_renderer.render(len(history_raw), user_message=user_message)
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
+            "skills": SectionRender(raw=section_texts["skills"], budget=len(section_texts["skills"]), rendered=section_texts["skills"], details={}),
             "memory": SectionRender(raw=section_texts["memory"], budget=len(section_texts["memory"]), rendered=section_texts["memory"], details={}),
             "relevant_memory": SectionRender(
                 raw=relevant_raw,
@@ -202,6 +207,8 @@ class ContextManager:
                 rendered[section] = SectionRender(raw=raw, budget=0, rendered=raw, details={})
             elif section == "relevant_memory":
                 rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0))
+            elif section == "skills":
+                rendered[section] = self._render_skills(section_texts[section], int(budget or 0))
             elif section == "history":
                 rendered[section] = self.history_renderer.render(int(budget or 0), user_message=user_message)
             else:
@@ -209,6 +216,52 @@ class ContextManager:
                 rendered_text = _tail_clip(raw, int(budget)) if budget is not None else raw
                 rendered[section] = SectionRender(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
         return rendered
+
+    def _render_skills(self, raw, budget):
+        # Skills section 是可用能力目录，不承载当前任务状态。
+        # 这里按条目均分 description 预算，尽量保留每个 skill name，避免 tail clip 把某些 skill 整条裁掉。
+        if budget <= 0:
+            return SectionRender(raw=raw, budget=budget, rendered="", details={"skill_items": [], "selected_count": 0, "rendered_count": 0, "description_budget": 0})
+        lines = str(raw).splitlines()
+        entries = []
+        for line in lines[1:]:
+            text = line.strip()
+            if not text.startswith("- "):
+                continue
+            body = text[2:].strip()
+            if not body or body == "none":
+                continue
+            name, separator, description = body.partition(":")
+            entries.append({"name": name.strip(), "description": description.strip() if separator else ""})
+        details = {
+            "skill_items": list(entries),
+            "selected_count": len(entries),
+            "rendered_count": 0,
+            "description_budget": 0,
+        }
+        if not entries:
+            text = "Available skills:\n- none"
+            return SectionRender(raw=raw, budget=budget, rendered=_tail_clip(text, budget), details=details)
+
+        fixed_overhead = len("Available skills:\n") + sum(len(f"- {entry['name']}") + 1 for entry in entries)
+        description_count = sum(1 for entry in entries if entry["description"])
+        per_description_budget = max(0, (budget - fixed_overhead - (2 * description_count)) // max(1, description_count))
+        while True:
+            rendered_lines = ["Available skills:"]
+            for entry in entries:
+                if entry["description"] and per_description_budget > 0:
+                    rendered_lines.append(f"- {entry['name']}: {_tail_clip(entry['description'], per_description_budget)}")
+                else:
+                    rendered_lines.append(f"- {entry['name']}")
+            rendered = "\n".join(rendered_lines)
+            if len(rendered) <= budget or per_description_budget <= 0:
+                break
+            per_description_budget -= 1
+        if len(rendered) > budget and budget > 0:
+            rendered = _tail_clip(rendered, budget)
+        details["rendered_count"] = len(entries)
+        details["description_budget"] = per_description_budget
+        return SectionRender(raw=raw, budget=budget, rendered=rendered, details=details)
 
     def _render_relevant_memory(self, selected_notes, budget):
         # 渲染长期记忆召回结果。
@@ -295,6 +348,7 @@ class ContextManager:
         return "\n\n".join(
             [
                 rendered["prefix"].rendered,
+                rendered["skills"].rendered,
                 rendered["memory"].rendered,
                 rendered["relevant_memory"].rendered,
                 rendered["history"].rendered,
@@ -306,6 +360,7 @@ class ContextManager:
         context_content = "\n\n".join(
             [
                 "This message is runtime context, not a new user request. Use it as background.",
+                rendered["skills"].rendered,
                 rendered["memory"].rendered,
                 rendered["relevant_memory"].rendered,
             ]
@@ -366,6 +421,13 @@ class ContextManager:
                 "rendered_chars": rendered["relevant_memory"].rendered_chars,
                 "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),
                 "rendered_count": int(rendered["relevant_memory"].details.get("rendered_count", 0)),
+            },
+            "skills": {
+                "raw_chars": rendered["skills"].raw_chars,
+                "rendered_chars": rendered["skills"].rendered_chars,
+                "selected_count": int(rendered["skills"].details.get("selected_count", 0)),
+                "rendered_count": int(rendered["skills"].details.get("rendered_count", 0)),
+                "description_budget": int(rendered["skills"].details.get("description_budget", 0)),
             },
             "history": {
                 "raw_chars": rendered["history"].raw_chars,

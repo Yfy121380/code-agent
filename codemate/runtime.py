@@ -30,6 +30,9 @@ SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
 DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
+MAX_SKILL_DESCRIPTION_CHARS = 250
+MAX_ACTIVE_SKILLS = 3
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
@@ -104,6 +107,7 @@ class CodeMate:
             "history": [],
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
             "todos": [],
+            "active_skills": [],
         }
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
         # 让 session.json 和该会话产生的 runs 保持在同一个文件夹中。
@@ -155,6 +159,7 @@ class CodeMate:
         self.session.setdefault("history", [])
         self.session.setdefault("memory", memorylib.default_memory_state())
         self.session.setdefault("todos", [])
+        self.session.setdefault("active_skills", [])
         self.session.pop("checkpoints", None)
         self.session.pop("resume_state", None)
         self.session.pop("runtime_identity", None)
@@ -253,6 +258,12 @@ class CodeMate:
             - To create, replace, or append to a file, use write_file.
             - Use todo_write for complex multi-step work, explicit task tracking requests, and multi-part user requests.
             - When current_todos appears in Working memory, follow those items until completed or no longer relevant.
+            - Use skill_load when an available skill clearly matches the current task.
+            - Do not load a skill that is already active.
+            - Loaded skills appear in Working memory and remain active until unloaded.
+            - Follow active skill instructions while they are relevant.
+            - When the user switches to an unrelated task, unload active skills that no longer apply before proceeding.
+            - Skill-relative resources such as scripts/, references/, examples/, and templates/ are located under the skill root shown in Working memory.
             - Do not say tools are unavailable when they are provided by the runtime.
             - If a tool result says a repeated identical call was rejected, do not retry the same investigation; either choose a materially different action or provide the final answer.
             """
@@ -343,8 +354,143 @@ class CodeMate:
         }
         return dict(self._last_prefix_refresh)
 
+    def skills_root(self):
+        return self.root / ".codemate" / "skills"
+
+    def normalize_skill_name(self, name):
+        name = str(name or "").strip().lstrip("/")
+        if not name:
+            raise ValueError("skill name must not be empty")
+        if not SKILL_NAME_RE.match(name):
+            raise ValueError("skill name must be a simple directory name")
+        return name
+
+    def skill_file(self, name):
+        name = self.normalize_skill_name(name)
+        return self.skills_root() / name / "SKILL.md"
+
+    def _skill_metadata_from_content(self, content):
+        text = str(content)
+        metadata = {}
+        if text.startswith("---"):
+            lines = text.splitlines()
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                key, separator, value = line.partition(":")
+                if separator:
+                    metadata[key.strip()] = value.strip().strip("\"'")
+        description = metadata.get("description", "")
+        if len(description) > MAX_SKILL_DESCRIPTION_CHARS:
+            description = description[: MAX_SKILL_DESCRIPTION_CHARS - 3].rstrip() + "..."
+        metadata["description"] = description
+        return metadata
+
+    def available_skills(self):
+        root = self.skills_root()
+        if not root.is_dir():
+            return []
+        skills = []
+        for item in sorted(root.iterdir(), key=lambda path: path.name.lower()):
+            if not item.is_dir():
+                continue
+            try:
+                name = self.normalize_skill_name(item.name)
+            except ValueError:
+                continue
+            skill_file = item / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            content = skill_file.read_text(encoding="utf-8", errors="replace")
+            metadata = self._skill_metadata_from_content(content)
+            frontmatter_name = metadata.get("name", "")
+            if frontmatter_name != name:
+                continue
+            description = metadata.get("description", "")
+            if not description:
+                continue
+            skills.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "root": item.relative_to(self.root).as_posix(),
+                    "source": skill_file.relative_to(self.root).as_posix(),
+                }
+            )
+        return skills
+
+    def available_skills_text(self):
+        lines = ["Available skills:"]
+        skills = self.available_skills()
+        if not skills:
+            lines.append("- none")
+            return "\n".join(lines)
+        for skill in skills:
+            lines.append(f"- {skill['name']}: {skill['description']}")
+        return "\n".join(lines)
+
+    def active_skill_names(self):
+        return {str(skill.get("name", "")).strip() for skill in self.session.get("active_skills", [])}
+
+    def load_skill(self, name):
+        name = self.normalize_skill_name(name)
+        if name in self.active_skill_names():
+            raise ValueError(f"skill already active: {name}")
+        active_skills = self.session.setdefault("active_skills", [])
+        if len(active_skills) >= MAX_ACTIVE_SKILLS:
+            raise ValueError(f"at most {MAX_ACTIVE_SKILLS} skills may be active")
+        skill_file = self.skill_file(name)
+        if not skill_file.is_file():
+            raise ValueError(f"skill not found: {name}")
+        content = skill_file.read_text(encoding="utf-8", errors="replace")
+        metadata = self._skill_metadata_from_content(content)
+        frontmatter_name = metadata.get("name", "")
+        if frontmatter_name != name:
+            raise ValueError(f"skill frontmatter name must match directory name: {name}")
+        root = skill_file.parent.relative_to(self.root).as_posix()
+        skill = {
+            "name": name,
+            "root": root,
+            "source": skill_file.relative_to(self.root).as_posix(),
+            "content": content,
+            "loaded_at": now(),
+        }
+        active_skills.append(skill)
+        self.session["active_skills"] = active_skills
+        return skill
+
+    def unload_skill(self, name, reason=""):
+        name = self.normalize_skill_name(name)
+        active_skills = self.session.setdefault("active_skills", [])
+        for index, skill in enumerate(active_skills):
+            if str(skill.get("name", "")).strip() == name:
+                removed = active_skills.pop(index)
+                self.session["active_skills"] = active_skills
+                removed["reason"] = str(reason or "").strip()
+                return removed
+        raise ValueError(f"skill is not active: {name}")
+
     def memory_text(self):
         lines = self.memory.render_memory_text().splitlines()
+        active_skills = self.session.get("active_skills") or []
+        if active_skills:
+            lines.append("- active_skills:")
+            for skill in active_skills:
+                name = str(skill.get("name", "")).strip()
+                root = str(skill.get("root", "")).strip()
+                content = str(skill.get("content", "")).strip()
+                if not name:
+                    continue
+                lines.append(f"  - {name}")
+                if root:
+                    lines.append(f"    Root: {root}")
+                    lines.append("    Skill-relative resources such as scripts/, references/, examples/, and templates/ are under this root.")
+                if content:
+                    lines.append("    Instructions:")
+                    for content_line in content.splitlines():
+                        lines.append(f"    {content_line}")
+        else:
+            lines.append("- active_skills: -")
         todos = self.session.get("todos") or []
         if todos:
             lines.append("- current_todos: follow these phases and tasks until completed")
@@ -524,6 +670,7 @@ class CodeMate:
             {
                 "prefix_chars": len(self.prefix),
                 "workspace_chars": len(self.workspace.text()),
+                "skills_chars": len(self.available_skills_text()),
                 "memory_chars": len(self.prompt_memory_text()),
                 "runtime_context_chars": len(self.runtime_context_text()),
                 "history_chars": len(self.history_text()),
@@ -552,6 +699,7 @@ class CodeMate:
             {
                 "prefix_chars": len(self.prefix),
                 "workspace_chars": len(self.workspace.text()),
+                "skills_chars": len(self.available_skills_text()),
                 "memory_chars": len(self.prompt_memory_text()),
                 "runtime_context_chars": len(self.runtime_context_text()),
                 "history_chars": len(self.history_text()),
@@ -855,7 +1003,7 @@ class CodeMate:
                 {
                     "prompt_metadata": prompt_metadata,
                     "system": system,
-                    "messages": messages,
+                    "messages": messages[0],
                     # "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
@@ -1325,6 +1473,12 @@ class CodeMate:
     def tool_patch_file(self, args):
         return toolkit.tool_patch_file(self, args)
 
+    def tool_skill_load(self, args):
+        return toolkit.tool_skill_load(self, args)
+
+    def tool_skill_unload(self, args):
+        return toolkit.tool_skill_unload(self, args)
+
     def tool_delegate(self, args):
         return toolkit.tool_delegate(self, args)
 
@@ -1352,6 +1506,7 @@ class CodeMate:
         self.session["history"] = []
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
+        self.session["active_skills"] = []
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
         self.session_store.save(self.session)
 

@@ -339,6 +339,49 @@ Negative examples:
 }
 """.strip(),
     },
+    "skill_load": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of an available skill under .codemate/skills/<name>/SKILL.md."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": """
+Load a skill into Working memory when it is clearly useful for the current task.
+
+Use this only for skills listed in Available skills. Do not load a skill that is already active.
+After loading, follow the skill instructions while they remain relevant.
+
+Skill files live at .codemate/skills/<name>/SKILL.md.
+Relative resources mentioned by the skill, such as scripts/, references/, examples/, and templates/, are located under .codemate/skills/<name>/.
+""".strip(),
+    },
+    "skill_unload": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the active skill to unload."},
+                "reason": {"type": "string", "description": "Brief reason why the skill no longer applies.", "default": ""},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": """
+Unload an active skill from Working memory when it no longer applies to the current user task.
+
+Use skill_unload when:
+- The user switches to an unrelated task and the active skill is no longer useful.
+- The active skill was loaded by mistake.
+- The current task direction changed and the skill instructions no longer apply.
+
+Do not unload a skill only because one request has been completed. Keep it active if the next user request may reasonably continue the same task, project, or workflow.
+Do not unload a skill if its instructions are still relevant.
+""".strip(),
+    },
 }
 
 DELEGATE_TOOL_SPEC = {

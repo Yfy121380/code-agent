@@ -23,15 +23,27 @@ def _allow_memory_tree(agent, path):
     return is_memory_path(agent.root, path)
 
 
+def _allow_skill_tree(agent, path):
+    try:
+        path.relative_to(agent.skills_root())
+        return True
+    except ValueError:
+        return False
+
+
+def _allow_internal_tree(agent, path):
+    return _allow_memory_tree(agent, path) or _allow_skill_tree(agent, path)
+
+
 def tool_list_files(agent, args):
     path = agent.path(args.get("path", "."))
     if not path.is_dir():
         raise ValueError("path is not a directory")
-    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory may be listed explicitly")
+    if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be listed explicitly")
     entries = [
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
-        if item.name not in IGNORED_PATH_NAMES or _allow_memory_tree(agent, item)
+        if item.name not in IGNORED_PATH_NAMES or _allow_internal_tree(agent, item)
     ]
     lines = []
     for entry in entries[:200]:
@@ -61,15 +73,15 @@ def _grep_context_args(args):
 
 
 def _grep_files(agent, path):
-    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory may be searched explicitly")
+    if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be searched explicitly")
     if path.is_file():
         return [path]
-    allow_memory = _allow_memory_tree(agent, path)
+    allow_internal = _allow_internal_tree(agent, path)
     return [
         item for item in path.rglob("*")
         if item.is_file()
-        and (allow_memory or not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts))
+        and (allow_internal or not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts))
     ]
 
 
@@ -97,10 +109,10 @@ def _format_grep_count_output(stdout):
 
 
 def _tool_grep_rg(agent, pattern, path, mode, args):
-    if _path_is_under_ignored_dir(agent, path) and not _allow_memory_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory may be searched explicitly")
+    if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
+        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be searched explicitly")
     command = ["rg", "--smart-case"]
-    if _allow_memory_tree(agent, path):
+    if _allow_internal_tree(agent, path):
         command.append("--hidden")
     if mode == "files_with_matches":
         command.append("--files-with-matches")
@@ -287,6 +299,40 @@ def tool_todo_write(agent, args):
     )
 
 
+def tool_skill_load(agent, args):
+    skill = agent.load_skill(args.get("name"))
+    if getattr(agent, "current_task_state", None) is not None:
+        agent.emit_trace(
+            agent.current_task_state,
+            "skill_loaded",
+            {
+                "skill": skill["name"],
+                "root": skill["root"],
+                "source": skill["source"],
+            },
+        )
+    agent.session_store.save(agent.session)
+    return f"skill loaded: {skill['name']} ({skill['source']})"
+
+
+def tool_skill_unload(agent, args):
+    removed = agent.unload_skill(args.get("name"), reason=args.get("reason", ""))
+    reason = str(removed.get("reason", "")).strip()
+    if getattr(agent, "current_task_state", None) is not None:
+        agent.emit_trace(
+            agent.current_task_state,
+            "skill_unloaded",
+            {
+                "skill": removed["name"],
+                "root": removed.get("root", ""),
+                "source": removed.get("source", ""),
+                "reason": reason,
+            },
+        )
+    agent.session_store.save(agent.session)
+    return f"skill unloaded: {removed['name']}" + (f" ({reason})" if reason else "")
+
+
 def tool_delegate(agent, args):
     # delegate 创建一个受限的只读子 agent，用于短程调查。
     # 子 agent 不继承写权限，避免把委派变成绕过主流程审批的执行通道。
@@ -334,4 +380,6 @@ _TOOL_RUNNERS = {
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,
     "todo_write": tool_todo_write,
+    "skill_load": tool_skill_load,
+    "skill_unload": tool_skill_unload,
 }
