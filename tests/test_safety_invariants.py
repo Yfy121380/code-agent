@@ -545,6 +545,17 @@ def test_dangerous_shell_command_auto_policy_still_requires_approval(tmp_path):
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
 
 
+def test_dangerous_shell_command_full_policy_allows_without_prompt(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="full")
+
+    result = agent.run_tool("run_shell", {"command": "rm README.md", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert not (tmp_path / "README.md").exists()
+    assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+
+
 def test_dangerous_shell_command_rejects_glob_without_approval(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = build_agent(tmp_path, [], approval_policy="auto")

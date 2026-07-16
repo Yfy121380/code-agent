@@ -50,8 +50,14 @@ WELCOME_ART = (
 WELCOME_NAME = "codemate"
 WELCOME_SUBTITLE = "local coding agent"
 WELCOME_STATUS = "calm shell, ready for work"
+APPROVAL_POLICIES = ("ask", "auto", "never", "full")
 SLASH_COMMANDS = [
     ("/help", "/help", "Show this help message."),
+    ("/approval", "/approval", "Show current approval policy."),
+    ("/approval ask", "/approval ask", "Ask before risky tool calls."),
+    ("/approval auto", "/approval auto", "Auto-approve ordinary risky tool calls."),
+    ("/approval never", "/approval never", "Deny calls that require approval."),
+    ("/approval full", "/approval full", "Auto-approve all approval prompts in this process."),
     ("/memory", "/memory", "Show the agent's distilled working memory."),
     ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
@@ -65,6 +71,8 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help                Show this help message.
+    /approval            Show current approval policy.
+    /approval <mode>     Set approval policy: ask, auto, never, or full.
     /memory              Show the agent's distilled working memory.
     /remember <text>     Append a memory entry to today's daily log.
     /dream               Run dream memory consolidation in foreground.
@@ -339,7 +347,7 @@ def build_arg_parser():
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
-    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
+    parser.add_argument("--approval", choices=APPROVAL_POLICIES, default="ask", help="Approval policy for risky tools.")
     parser.add_argument(
         "--secret-env-name",
         dest="secret_env_names",
@@ -400,6 +408,19 @@ def main(argv=None):
             return 0
         if user_input == "/help":
             print(HELP_DETAILS)
+            continue
+        if user_input == "/approval":
+            print(f"approval: {agent.approval_policy}")
+            print("modes: ask, auto, never, full")
+            continue
+        if user_input.startswith("/approval "):
+            mode = user_input[len("/approval "):].strip()
+            if mode not in APPROVAL_POLICIES:
+                print("usage: /approval [ask|auto|never|full]")
+                continue
+            old = agent.approval_policy
+            agent.approval_policy = mode
+            print(f"approval: {old} -> {mode}")
             continue
         if user_input == "/memory":
             print(agent.memory_text())

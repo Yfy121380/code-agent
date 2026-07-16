@@ -1036,6 +1036,8 @@ class CodeMate:
                 return "allow"
             if self.read_only:
                 return "reject"
+            if self.approval_policy == "full":
+                return "allow"
             if self.approval_policy == "auto":
                 return "allow"
             if self.approval_policy == "never":
@@ -1053,11 +1055,15 @@ class CodeMate:
         if self.read_only:
             return "reject"
         if analysis.kind == "risky":
+            if self.approval_policy == "full":
+                return "allow"
             if self.approval_policy == "auto":
                 return "allow"
             if self.approval_policy == "never":
                 return "reject"
             return "ask"
+        if self.approval_policy == "full":
+            return "allow"
         if self.approval_policy == "never":
             return "reject"
         return "ask"
@@ -1334,6 +1340,8 @@ class CodeMate:
     def approve(self, name, args):
         if self.read_only:
             return False
+        if self.approval_policy == "full":
+            return True
         if self.approval_policy == "auto":
             return True
         if self.approval_policy == "never":
