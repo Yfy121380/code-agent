@@ -157,19 +157,29 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
 def test_context_manager_renders_current_todos_in_working_memory(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.session["todos"] = [
-        {"content": "Inspect current implementation", "status": "completed"},
-        {"content": "Add todo_write tool", "status": "in_progress"},
-        {"content": "Run tests", "status": "pending"},
+        {
+            "phase": "Inspect current implementation",
+            "status": "completed",
+            "tasks": [{"description": "Read tool files", "status": "completed"}],
+        },
+        {
+            "phase": "Add todo_write tool",
+            "status": "in_progress",
+            "tasks": [{"description": "Update handler", "status": "in_progress"}],
+        },
+        {"phase": "Run tests", "status": "pending", "tasks": []},
     ]
 
     prompt, _metadata = ContextManager(agent).build("continue")
     message_build = ContextManager(agent).build_messages("continue")
 
-    assert "- current_todos: follow these items until completed" in prompt
-    assert "  - [completed] Inspect current implementation" in prompt
-    assert "  - [in_progress] Add todo_write tool" in prompt
-    assert "  - [pending] Run tests" in prompt
-    assert "current_todos: follow these items until completed" in message_build.messages[0]["content"]
+    assert "- current_todos: follow these phases and tasks until completed" in prompt
+    assert "  1. [completed] Inspect current implementation" in prompt
+    assert "     - [completed] Read tool files" in prompt
+    assert "  2. [in_progress] Add todo_write tool" in prompt
+    assert "     - [in_progress] Update handler" in prompt
+    assert "  3. [pending] Run tests" in prompt
+    assert "current_todos: follow these phases and tasks until completed" in message_build.messages[0]["content"]
 
 
 def test_context_manager_renders_empty_current_todos(tmp_path):

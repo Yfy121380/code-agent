@@ -264,19 +264,25 @@ def tool_patch_file(agent, args):
 
 def tool_todo_write(agent, args):
     # todo_write 只更新当前 session 的任务列表，不修改工作区文件。
-    # 当所有 todo 都完成时直接清空，避免已完成计划长期污染 working memory。
+    # 当所有 phase 都完成时直接清空，避免已完成计划长期污染 working memory。
     todos = _normalize_todos(args.get("todos"))
     if not todos:
         agent.session["todos"] = []
         return "todos updated: todo list cleared."
-    counts = {status: sum(1 for item in todos if item["status"] == status) for status in TODO_STATUSES}
-    if counts["completed"] == len(todos):
+    phase_counts = {status: sum(1 for phase in todos if phase["status"] == status) for status in TODO_STATUSES}
+    task_count = sum(len(phase["tasks"]) for phase in todos)
+    task_counts = {
+        status: sum(1 for phase in todos for task in phase["tasks"] if task["status"] == status)
+        for status in TODO_STATUSES
+    }
+    if phase_counts["completed"] == len(todos):
         agent.session["todos"] = []
-        return f"todos updated: all tasks completed; todo list cleared ({len(todos)} completed)."
+        return f"todos updated: all phases completed; todo list cleared ({len(todos)} phases, {task_count} tasks)."
     agent.session["todos"] = todos
     return (
-        f"todos updated: {len(todos)} items, {counts['in_progress']} in_progress, "
-        f"{counts['pending']} pending, {counts['completed']} completed. "
+        f"todos updated: {len(todos)} phases, {task_count} tasks, "
+        f"{phase_counts['in_progress']} phase in_progress, {task_counts['in_progress']} task in_progress, "
+        f"{phase_counts['pending']} phases pending, {phase_counts['completed']} phases completed. "
         "Continue working through current_todos."
     )
 

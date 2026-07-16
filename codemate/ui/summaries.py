@@ -53,8 +53,12 @@ def summarize_tool_call(name, args):
         lines = ["todo_write"]
         for index, item in enumerate(todos, 1):
             status = str(item.get("status", "")).strip() or "unknown"
-            content = str(item.get("content", "")).strip()
-            lines.append(f"  {index}. [{status}] {_clip_line(content, 100)}")
+            phase = str(item.get("phase", "")).strip()
+            lines.append(f"  {index}. [{status}] {_clip_line(phase, 100)}")
+            for task in item.get("tasks") or []:
+                task_status = str(task.get("status", "")).strip() or "unknown"
+                description = str(task.get("description", "")).strip()
+                lines.append(f"     - [{task_status}] {_clip_line(description, 100)}")
         return "\n".join(lines)
     if name == "write_file":
         content = str(args.get("content", ""))

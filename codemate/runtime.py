@@ -347,12 +347,17 @@ class CodeMate:
         lines = self.memory.render_memory_text().splitlines()
         todos = self.session.get("todos") or []
         if todos:
-            lines.append("- current_todos: follow these items until completed")
-            for item in todos:
-                content = str(item.get("content", "")).strip()
+            lines.append("- current_todos: follow these phases and tasks until completed")
+            for index, item in enumerate(todos, 1):
+                phase = str(item.get("phase", "")).strip()
                 status = str(item.get("status", "")).strip()
-                if content and status:
-                    lines.append(f"  - [{status}] {content}")
+                if phase and status:
+                    lines.append(f"  {index}. [{status}] {phase}")
+                for task in item.get("tasks") or []:
+                    description = str(task.get("description", "")).strip()
+                    task_status = str(task.get("status", "")).strip()
+                    if description and task_status:
+                        lines.append(f"     - [{task_status}] {description}")
         else:
             lines.append("- current_todos: -")
         return "\n".join(lines)
@@ -854,16 +859,6 @@ class CodeMate:
                     # "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
-            # 4. 调模型前记录请求事件；支持缓存的后端会收到稳定 prefix 的 cache key。
-            # self.emit_trace(
-            #     task_state,
-            #     "model_requested",
-            #     {
-            #         "attempts": task_state.attempts,
-            #         "tool_steps": task_state.tool_steps,
-            #         "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-            #     },
-            # )
             prompt_cache_key = None
             prompt_cache_retention = None
             if getattr(self.model_client, "supports_prompt_cache", False):
