@@ -5,6 +5,7 @@
 因此测试、批处理和未来其他界面都可以替换不同的 UI 实现。
 """
 
+from .banner import build_welcome
 from .terminal import NullUI, TerminalUI
 
-__all__ = ["NullUI", "TerminalUI"]
+__all__ = ["NullUI", "TerminalUI", "build_welcome"]

@@ -7,23 +7,21 @@
 
 import argparse
 import os
-import shutil
 import sys
-import textwrap
+from copy import copy
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.styles import Style
 
 from .config import load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import CodeMate
 from .storage import SessionStore
 from .ui import TerminalUI
-from .workspace import WorkspaceContext, middle
+from .ui.banner import build_welcome
+from .ui.prompt import HELP_DETAILS, PROMPT_STYLE, SlashCommandCompleter, build_prompt_key_bindings
+from .workspace import WorkspaceContext
 
 DEFAULT_SECRET_ENV_NAMES = (
     "CODEMATE_OPENAI_API_KEY",
@@ -40,92 +38,7 @@ DEFAULT_SECRET_ENV_NAMES = (
     "GH_PAT",
 )
 
-WELCOME_ART = (
-    "        /\\_/\\",
-    "       ( >w< )",
-    "       /|  V  |\\",
-    "       /_|_____|_\\",
-    "         Ciallo~",
-)
-WELCOME_NAME = "codemate"
-WELCOME_SUBTITLE = "local coding agent"
-WELCOME_STATUS = "calm shell, ready for work"
 APPROVAL_POLICIES = ("ask", "auto", "never", "full")
-SLASH_COMMANDS = [
-    ("/help", "/help", "Show this help message."),
-    ("/approval", "/approval", "Show current approval policy."),
-    ("/approval ask", "/approval ask", "Ask before risky tool calls."),
-    ("/approval auto", "/approval auto", "Auto-approve ordinary risky tool calls."),
-    ("/approval never", "/approval never", "Deny calls that require approval."),
-    ("/approval full", "/approval full", "Auto-approve all approval prompts in this process."),
-    ("/memory", "/memory", "Show the agent's distilled working memory."),
-    ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
-    ("/dream", "/dream", "Run dream memory consolidation in foreground."),
-    ("/dream --background", "/dream --background", "Run dream memory consolidation in background."),
-    ("/session", "/session", "Show the path to the saved session file."),
-    ("/reset", "/reset", "Clear the current session history and memory."),
-    ("/exit", "/exit", "Exit the agent."),
-    ("/quit", "/quit", "Exit the agent."),
-]
-HELP_DETAILS = textwrap.dedent(
-    """\
-    Commands:
-    /help                Show this help message.
-    /approval            Show current approval policy.
-    /approval <mode>     Set approval policy: ask, auto, never, or full.
-    /memory              Show the agent's distilled working memory.
-    /remember <text>     Append a memory entry to today's daily log.
-    /dream               Run dream memory consolidation in foreground.
-    /dream --background  Run dream memory consolidation in background.
-    /session             Show the path to the saved session file.
-    /reset               Clear the current session history and memory.
-    /exit                Exit the agent.
-    """
-).strip()
-PROMPT_STYLE = Style.from_dict(
-    {
-        "completion-menu.completion": "fg:#cbd5e1 bg:#111827",
-        "completion-menu.completion.current": "fg:#e5e7eb bg:#334155",
-        "completion-menu.meta.completion": "fg:#64748b bg:#111827",
-        "completion-menu.meta.completion.current": "fg:#cbd5e1 bg:#334155",
-    }
-)
-
-
-class SlashCommandCompleter(Completer):
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor
-        if not text.startswith("/"):
-            return
-        for inserted_text, display_text, description in SLASH_COMMANDS:
-            if display_text.startswith(text) or inserted_text.startswith(text):
-                yield Completion(
-                    inserted_text,
-                    start_position=-len(text),
-                    display=display_text,
-                    display_meta=description,
-                )
-
-
-def build_prompt_key_bindings():
-    bindings = KeyBindings()
-
-    @bindings.add("enter")
-    def _(event):
-        buffer = event.current_buffer
-        state = buffer.complete_state
-        if state is not None:
-            completion = state.current_completion
-            if completion is not None:
-                buffer.apply_completion(completion)
-            else:
-                buffer.cancel_completion()
-            return
-        buffer.validate_and_handle()
-
-    return bindings
-
-
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
@@ -134,6 +47,11 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+PROVIDER_MODELS = {
+    "openai": ["gpt-5.4", "gpt-5.5"],
+    "anthropic": ["claude-sonnet-4-6", "claude-opus-4-8"],
+    "deepseek": ["deepseek-v4-pro"],
+}
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "CODEMATE_SECRET_ENV_NAMES"
 
@@ -231,49 +149,12 @@ def _build_model_client(args):
     )
 
 
-def build_welcome(agent, model, host):
-    width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
-    inner = width - 4
-    gap = 3
-    left_width = (inner - gap) // 2
-    right_width = inner - gap - left_width
-
-    def row(text):
-        body = middle(text, width - 4)
-        return f"| {body.ljust(width - 4)} |"
-
-    def divider(char="-"):
-        return "+" + char * (width - 2) + "+"
-
-    def center(text):
-        body = middle(text, inner)
-        return f"| {body.center(inner)} |"
-
-    def cell(label, value, size):
-        body = middle(f"{label:<9} {value}", size)
-        return body.ljust(size)
-
-    def pair(left_label, left_value, right_label, right_value):
-        left = cell(left_label, left_value, left_width)
-        right = cell(right_label, right_value, right_width)
-        return f"| {left}{' ' * gap}{right} |"
-
-    line = divider("=")
-    rows = [center(text) for text in WELCOME_ART]
-    rows.extend(
-        [
-            # center(WELCOME_NAME),
-            # center(WELCOME_SUBTITLE),
-            # center(WELCOME_STATUS),
-            divider("-"),
-            row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
-            row(""),
-        ]
-    )
-    return "\n".join([line, *rows, line])
+def _build_switched_model_client(args, provider, model):
+    # 交互式切换只需要替换 provider/model，其余超时、温度、base-url 等启动配置沿用当前 CLI 参数。
+    client_args = copy(args)
+    client_args.provider = provider
+    client_args.model = model
+    return _build_model_client(client_args)
 
 
 def build_agent(args, ui=None):
@@ -367,9 +248,14 @@ def main(argv=None):
     ui = TerminalUI()
     agent = build_agent(args, ui=ui)
 
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
-    host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
-    print(build_welcome(agent, model=model, host=host))
+    current_provider = getattr(args, "provider", "openai")
+    current_model = getattr(agent.model_client, "model", _effective_model(args, current_provider))
+
+    def print_status():
+        host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
+        print(build_welcome(agent, model=f"{current_provider}:{current_model}", host=host))
+
+    print_status()
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
@@ -378,6 +264,9 @@ def main(argv=None):
             print()
             try:
                 agent.ask(prompt)
+            except KeyboardInterrupt:
+                print("\ninterrupted", file=sys.stderr)
+                return 130
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -404,7 +293,7 @@ def main(argv=None):
 
         if not user_input:
             continue
-        if user_input in {"/exit", "/quit"}:
+        if user_input == "/exit":
             return 0
         if user_input == "/help":
             print(HELP_DETAILS)
@@ -421,6 +310,53 @@ def main(argv=None):
             old = agent.approval_policy
             agent.approval_policy = mode
             print(f"approval: {old} -> {mode}")
+            print_status()
+            continue
+        if user_input == "/provider":
+            print(f"provider: {current_provider}")
+            print(f"model: {current_model}")
+            print("available providers: " + ", ".join(PROVIDER_MODELS))
+            continue
+        if user_input.startswith("/provider "):
+            provider = user_input[len("/provider "):].strip()
+            if provider not in PROVIDER_MODELS:
+                print("usage: /provider [openai|anthropic|deepseek]")
+                continue
+            old_provider = current_provider
+            old_model = current_model
+            current_provider = provider
+            current_model = PROVIDER_MODELS[provider][0]
+            agent.model_client = _build_switched_model_client(args, current_provider, current_model)
+            agent.refresh_prefix(force=True)
+            print(f"provider: {old_provider} -> {current_provider}")
+            print(f"model: {old_model} -> {current_model}")
+            print_status()
+            continue
+        if user_input == "/model":
+            allowed_models = PROVIDER_MODELS.get(current_provider)
+            if not allowed_models:
+                print(f"model switching is not supported for provider: {current_provider}")
+                continue
+            print(f"model: {current_model}")
+            print(f"available models for {current_provider}:")
+            for model_name in allowed_models:
+                print(f"- {model_name}")
+            continue
+        if user_input.startswith("/model "):
+            model = user_input[len("/model "):].strip()
+            allowed_models = PROVIDER_MODELS.get(current_provider)
+            if not allowed_models:
+                print(f"model switching is not supported for provider: {current_provider}")
+                continue
+            if model not in allowed_models:
+                print("usage: /model [" + "|".join(allowed_models) + "]")
+                continue
+            old_model = current_model
+            current_model = model
+            agent.model_client = _build_switched_model_client(args, current_provider, current_model)
+            agent.refresh_prefix(force=True)
+            print(f"model: {old_model} -> {current_model}")
+            print_status()
             continue
         if user_input == "/memory":
             print(agent.memory_text())
@@ -455,5 +391,8 @@ def main(argv=None):
         print()
         try:
             agent.ask(user_input)
+        except KeyboardInterrupt:
+            print("\ninterrupted")
+            continue
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

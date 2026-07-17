@@ -757,11 +757,34 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
 
     root_items = list(completer.get_completions(Document("/"), None))
     remember_items = list(completer.get_completions(Document("/rem"), None))
+    provider_items = list(completer.get_completions(Document("/provider "), None))
+    model_items = list(completer.get_completions(Document("/model "), None))
 
     assert any(str(item.display_text) == "/help" and str(item.display_meta_text) for item in root_items)
+    assert any(str(item.display_text) == "/provider openai" for item in provider_items)
+    assert any(str(item.display_text) == "/provider anthropic" for item in provider_items)
+    assert any(str(item.display_text) == "/model gpt-5.5" for item in model_items)
+    assert any(str(item.display_text) == "/model claude-opus-4-8" for item in model_items)
     remember = next(item for item in remember_items if str(item.display_text) == "/remember <text>")
     assert remember.text == "/remember "
     assert str(remember.display_meta_text) == "Append a memory entry to today's daily log."
+
+
+def test_cli_build_switched_model_client_overrides_provider_and_model(tmp_path):
+    class DummyOpenAIClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.model = kwargs["model"]
+            self.base_url = kwargs["base_url"]
+
+    args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek", "--model", "deepseek-v4-pro"])
+
+    with patch.dict(os.environ, {}, clear=True), patch("codemate.cli.OpenAICompatibleModelClient", DummyOpenAIClient):
+        client = mini_cli._build_switched_model_client(args, "openai", "gpt-5.5")
+
+    assert client.model == "gpt-5.5"
+    assert client.kwargs["temperature"] == args.temperature
+    assert client.base_url == mini_cli.DEFAULT_OPENAI_BASE_URL
 
 # run_shell只传allow_list，读不到MCA_ALLOWLIST_SECRET
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
