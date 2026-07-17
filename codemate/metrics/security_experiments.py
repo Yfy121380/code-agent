@@ -47,7 +47,7 @@ def _scenario_empty_delegate_task(workspace_root):
     return dict(agent._last_tool_result_metadata)
 
 
-def _scenario_path_escape_read(workspace_root):
+def _scenario_outside_home_read(workspace_root):
     outside = workspace_root.parent / f"{workspace_root.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
@@ -55,7 +55,7 @@ def _scenario_path_escape_read(workspace_root):
     return dict(agent._last_tool_result_metadata)
 
 
-def _scenario_symlink_escape(workspace_root):
+def _scenario_symlink_outside_home(workspace_root):
     outside = workspace_root.parent / f"{workspace_root.name}-symlink-target.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (workspace_root / "linked.txt").symlink_to(outside)
@@ -64,7 +64,7 @@ def _scenario_symlink_escape(workspace_root):
     return dict(agent._last_tool_result_metadata)
 
 
-def _scenario_grep_escape(workspace_root):
+def _scenario_grep_outside_home(workspace_root):
     agent = _security_agent(workspace_root)
     agent.run_tool("grep", {"pattern": "abc", "path": "../outside"})
     return dict(agent._last_tool_result_metadata)
@@ -96,9 +96,9 @@ def _scenario_repeated_call(workspace_root):
 
 
 SECURITY_SCENARIOS = [
-    ("path_escape_read", _scenario_path_escape_read),
-    ("symlink_escape", _scenario_symlink_escape),
-    ("grep_escape", _scenario_grep_escape),
+    ("outside_home_read", _scenario_outside_home_read),
+    ("symlink_outside_home", _scenario_symlink_outside_home),
+    ("grep_outside_home", _scenario_grep_outside_home),
     ("approval_denied_shell", _scenario_approval_denied),
     ("read_only_write", _scenario_read_only_block),
     ("repeated_identical_call", _scenario_repeated_call),

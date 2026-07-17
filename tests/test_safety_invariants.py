@@ -37,17 +37,17 @@ def write_skill(tmp_path, name="backend", description="Backend workflow", body="
     )
     return skill_dir
 
-# 路径逃逸拒绝
-def test_workspace_escape_is_rejected(tmp_path):
+# 工作区外且 home 外路径拒绝
+def test_outside_workspace_and_home_read_is_rejected(tmp_path):
     (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
     result = agent.run_tool("read_file", {"path": "../outside.txt"})
 
-    assert "path escapes workspace" in result
+    assert "outside the current workspace and outside home" in result
 
-# 符号链接逃逸拒绝
-def test_symlink_path_traversal_is_rejected(tmp_path):
+# 符号链接解析后指向 home 外路径时拒绝
+def test_symlink_to_outside_home_is_rejected(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (tmp_path / "linked.txt").symlink_to(outside)
@@ -55,14 +55,40 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
 
     result = agent.run_tool("read_file", {"path": "linked.txt"})
 
-    assert "path escapes workspace" in result
+    assert "outside the current workspace and outside home" in result
 
-def test_grep_path_escape_is_rejected(tmp_path):
+def test_grep_outside_workspace_and_home_is_rejected(tmp_path):
     agent = build_agent(tmp_path, [])
 
     result = agent.run_tool("grep", {"pattern": "abc", "path": "../outside"})
 
-    assert "path escapes workspace" in result
+    assert "outside the current workspace and outside home" in result
+
+
+def test_outside_workspace_home_read_auto_policy_allows(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-home.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    with patch("codemate.tools.path_policy.Path.home", return_value=tmp_path.parent):
+        result = agent.run_tool("read_file", {"path": f"../{outside.name}", "start": 1, "end": 1})
+
+    assert "outside" in result
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "allow"
+
+
+def test_outside_workspace_home_write_auto_policy_asks(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-write.txt"
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    with patch("codemate.tools.path_policy.Path.home", return_value=tmp_path.parent):
+        result = agent.run_tool("write_file", {"path": f"../{outside.name}", "content": "outside\n"})
+
+    assert result == "error: approval denied for write_file"
+    assert not outside.exists()
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "ask"
 
 
 def test_search_tool_name_is_not_registered(tmp_path):
@@ -564,14 +590,14 @@ def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
     assert agent._last_tool_result_metadata["shell_has_glob"] is True
 
 
-def test_shell_read_path_escape_is_rejected(tmp_path):
+def test_shell_read_outside_workspace_and_home_is_rejected(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside-shell.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
     result = agent.run_tool("run_shell", {"command": f"cat ../{outside.name}", "timeout": 20})
 
-    assert "path escapes workspace" in result
+    assert "outside the current workspace and outside home" in result
     assert agent._last_tool_result_metadata["shell_kind"] == "read"
 
 
@@ -654,7 +680,7 @@ def test_risky_tool_deny_behavior(tmp_path):
 
     result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
-    assert result == "error: approval denied for run_shell"
+    assert result == "error: write operation requires approval"
 
 """
 secret来源

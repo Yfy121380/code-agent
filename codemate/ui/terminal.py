@@ -76,6 +76,8 @@ class TerminalUI(NullUI):
         if risk:
             title += f" ({risk})"
         summary = summarize_tool_call(name, args)
+        if metadata.get("outside_workspace"):
+            summary += "\n\nWarning: target path is outside the current workspace."
         self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=title, border_style="yellow"))
         try:
             answer = prompt("Approve? [y/N] ")

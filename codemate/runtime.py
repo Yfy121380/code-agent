@@ -140,6 +140,7 @@ class CodeMate:
         self._long_term_memory_cache_key = None
         self._last_tool_result_metadata = {}
         self._last_shell_analysis = None
+        self._last_tool_gate = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -1179,42 +1180,9 @@ class CodeMate:
         return not tool["risky"]
 
     def approval_decision(self, name, args, tool):
-        if name != "run_shell":
-            if not tool["risky"]:
-                return "allow"
-            if self.read_only:
-                return "reject"
-            if self.approval_policy == "full":
-                return "allow"
-            if self.approval_policy == "auto":
-                return "allow"
-            if self.approval_policy == "never":
-                return "reject"
-            return "ask"
-
-        analysis = getattr(self, "_last_shell_analysis", None)
-        if analysis is None:
-            analysis = toolkit.analyze_shell_command(self, args.get("command", ""))
-            self._last_shell_analysis = analysis
-        if getattr(analysis, "blocked", False):
-            return "reject"
-        if analysis.kind == "read":
-            return "allow"
-        if self.read_only:
-            return "reject"
-        if analysis.kind == "risky":
-            if self.approval_policy == "full":
-                return "allow"
-            if self.approval_policy == "auto":
-                return "allow"
-            if self.approval_policy == "never":
-                return "reject"
-            return "ask"
-        if self.approval_policy == "full":
-            return "allow"
-        if self.approval_policy == "never":
-            return "reject"
-        return "ask"
+        # validate_tool 已经完成 allow/ask/deny 判定。
+        # 只有 gate 为 ask 的工具调用才会进入这里，因此这里不再重复做策略推导。
+        return self.prompt_approval(name, args)
 
     def run_tool(self, name, args, current_tool_call_id=None):
         """执行一次工具调用，并在执行前后套上完整护栏。
@@ -1239,6 +1207,7 @@ class CodeMate:
         # 工具是否存在 -> 参数是否合法 -> 是否重复调用 -> 是否通过审批
         # -> 真正执行 -> 更新记忆。
         self._last_shell_analysis = None
+        self._last_tool_gate = None
         tool = self.tools.get(name)
         if tool is None:
             message = f"error: unknown tool '{name}'"
@@ -1255,11 +1224,27 @@ class CodeMate:
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         try:
-            # 路径限制在workspace内 + 参数有效性校验
-            self.validate_tool(name, args)
+            # 参数合法性、路径硬边界和审批门禁统一在 validate_tool 中完成。
+            gate = self.validate_tool(name, args)
+            self._last_tool_gate = gate
+        except toolkit.ToolPolicyError as exc:
+            message = f"error: {exc}"
+            self._last_tool_result_metadata = {
+                "tool_status": "rejected",
+                "tool_error_code": exc.code,
+                "security_event_type": exc.security_event_type,
+                "risk_level": self.tool_risk_level(name, tool),
+                "read_only": self.tool_metadata_read_only(name, tool),
+                "affected_paths": [],
+                "workspace_changed": False,
+                "diff_summary": [],
+                **self.shell_analysis_metadata(),
+            }
+            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
+            return message
         except Exception as exc:
             message = f"error: invalid arguments for {name}: {exc}"
-            security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
+            security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "invalid_arguments",
@@ -1286,12 +1271,13 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
                 **self.shell_analysis_metadata(),
+                **gate.to_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
-        # 根据工具和 shell 分析结果决定是否需要审批。
-        decision = self.approval_decision(name, args, tool)
-        if decision == "reject":
+        # validate_tool 只会返回 allow/ask；deny 已在校验阶段拒绝。
+        asked_for_approval = gate.action == "ask"
+        if asked_for_approval and not self.approval_decision(name, args, tool):
             message = f"error: approval denied for {name}"
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
@@ -1303,22 +1289,7 @@ class CodeMate:
                 "workspace_changed": False,
                 "diff_summary": [],
                 **self.shell_analysis_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        asked_for_approval = decision == "ask"
-        if asked_for_approval and not self.prompt_approval(name, args):
-            message = f"error: approval denied for {name}"
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": "approval_denied",
-                "security_event_type": "read_only_block" if self.read_only else "approval_denied",
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
-                "affected_paths": [],
-                "workspace_changed": False,
-                "diff_summary": [],
-                **self.shell_analysis_metadata(),
+                **gate.to_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
@@ -1361,6 +1332,7 @@ class CodeMate:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
                 **self.shell_analysis_metadata(),
+                **gate.to_metadata(),
             }
             if tool_status == "ok":
                 self.resolve_process_notes_after_success(name, args)
@@ -1371,7 +1343,7 @@ class CodeMate:
             after_snapshot = self.capture_workspace_snapshot() if tool["risky"] else before_snapshot
             affected_paths, diff_summary = self.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)
-            security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
+            security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
             message = f"error: tool {name} failed: {exc}"
             self._last_tool_result_metadata = {
                 "tool_status": "partial_success" if workspace_changed else "error",
@@ -1384,6 +1356,7 @@ class CodeMate:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "diff_summary": diff_summary,
                 **self.shell_analysis_metadata(),
+                **gate.to_metadata(),
             }
             self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
@@ -1436,12 +1409,13 @@ class CodeMate:
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
-        toolkit.validate_tool(self, name, args)
+        gate = toolkit.validate_tool(self, name, args)
         if name in {"write_file", "patch_file"}:
             self.require_fresh_read_before_edit(name, args)
         if name == "delegate":
             if self.depth >= self.max_depth:
                 raise ValueError("delegate depth exceeded")
+        return gate
 
     def require_fresh_read_before_edit(self, name, args):
         path = self.path(args["path"])
@@ -1489,18 +1463,10 @@ class CodeMate:
             "risk_level": self.tool_risk_level(name, self.tools.get(name, {"risky": True})),
             **self.shell_analysis_metadata(),
         }
+        gate = getattr(self, "_last_tool_gate", None)
+        if gate is not None and hasattr(gate, "to_metadata"):
+            metadata.update(gate.to_metadata())
         return bool(self.ui.approval_request(name, args, metadata=metadata))
-
-    def approve(self, name, args):
-        if self.read_only:
-            return False
-        if self.approval_policy == "full":
-            return True
-        if self.approval_policy == "auto":
-            return True
-        if self.approval_policy == "never":
-            return False
-        return self.prompt_approval(name, args)
 
     def reset(self):
         self.session["history"] = []
@@ -1511,16 +1477,7 @@ class CodeMate:
         self.session_store.save(self.session)
 
     def path(self, raw_path):
-        path = Path(raw_path)
-        path = path if path.is_absolute() else self.root / path
-        resolved = path.resolve()
-        # 所有文件类工具都被锚定在 workspace root 之下。
-        # 这样既能防住 "../" 逃逸，也能防住符号链接解析后跳出仓库。
-        if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
-            raise ValueError(f"path escapes workspace: {raw_path}")
-        if self.memory_scope_only and not longterm.is_memory_path(self.root, resolved):
-            raise ValueError(f"path outside memory scope: {raw_path}")
-        return resolved
+        return toolkit.resolve_tool_path(self, raw_path, access="read").path
 
 
 MiniAgent = CodeMate

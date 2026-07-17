@@ -15,8 +15,18 @@ def _path_is_under_ignored_dir(agent, path):
     try:
         parts = path.relative_to(agent.root).parts
     except ValueError:
-        return True
+        return False
     return any(part in IGNORED_PATH_NAMES for part in parts)
+
+
+def _display_path(agent, path):
+    try:
+        return str(path.relative_to(agent.root))
+    except ValueError:
+        try:
+            return "~/" + str(path.relative_to(path.home()))
+        except ValueError:
+            return str(path)
 
 
 def _allow_memory_tree(agent, path):
@@ -48,7 +58,7 @@ def tool_list_files(agent, args):
     lines = []
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {entry.relative_to(agent.root)}")
+        lines.append(f"{kind} {_display_path(agent, entry)}")
     return "\n".join(lines) or "(empty)"
 
 
@@ -62,7 +72,7 @@ def tool_read_file(agent, args):
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(agent.root)}\n{body}"
+    return f"# {_display_path(agent, path)}\n{body}"
 
 
 def _grep_context_args(args):
@@ -81,7 +91,7 @@ def _grep_files(agent, path):
     return [
         item for item in path.rglob("*")
         if item.is_file()
-        and (allow_internal or not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts))
+        and (allow_internal or not _path_is_under_ignored_dir(agent, item))
     ]
 
 
@@ -158,7 +168,7 @@ def _tool_grep_fallback(agent, pattern, path, mode, args):
         for file_path in files:
             lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
             if any(regex.search(line) for line in lines):
-                matches.append(str(file_path.relative_to(agent.root)))
+                matches.append(_display_path(agent, file_path))
         return "\n".join(matches) or "(no matches)"
 
     if mode == "count":
@@ -169,7 +179,7 @@ def _tool_grep_fallback(agent, pattern, path, mode, args):
             for line in file_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 count += len(regex.findall(line))
             if count:
-                counts.append((str(file_path.relative_to(agent.root)), count))
+                counts.append((_display_path(agent, file_path), count))
                 total += count
         if not counts:
             return "total_matches: 0"
@@ -192,7 +202,7 @@ def _tool_grep_fallback(agent, pattern, path, mode, args):
                     continue
                 emitted.add(emit_index)
                 separator = ":" if emit_index == index else "-"
-                matches.append(f"{file_path.relative_to(agent.root)}{separator}{emit_index + 1}{separator}{lines[emit_index]}")
+                matches.append(f"{_display_path(agent, file_path)}{separator}{emit_index + 1}{separator}{lines[emit_index]}")
                 if len(matches) >= 200:
                     return "\n".join(matches)
     return "\n".join(matches) or "(no matches)"
@@ -252,9 +262,9 @@ def tool_write_file(agent, args):
     if mode == "append":
         with path.open("a", encoding="utf-8") as handle:
             handle.write(content)
-        return f"appended {path.relative_to(agent.root)} ({len(content)} chars)"
+        return f"appended {_display_path(agent, path)} ({len(content)} chars)"
     path.write_text(content, encoding="utf-8")
-    return f"wrote {path.relative_to(agent.root)} ({len(content)} chars)"
+    return f"wrote {_display_path(agent, path)} ({len(content)} chars)"
 
 
 def tool_patch_file(agent, args):
@@ -271,7 +281,7 @@ def tool_patch_file(agent, args):
     if count != 1:
         raise ValueError(f"old_text must occur exactly once, found {count}")
     path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
-    return f"patched {path.relative_to(agent.root)}"
+    return f"patched {_display_path(agent, path)}"
 
 
 def tool_todo_write(agent, args):

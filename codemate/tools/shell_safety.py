@@ -1,4 +1,4 @@
-# Shell 安全分析：识别命令主体、路径、通配符和风险等级，供 run_shell 审批前校验使用。
+# Shell 安全分析：识别命令主体、路径、通配符和风险等级，供 run_shell 门禁使用。
 
 from dataclasses import dataclass, field
 import re
@@ -235,17 +235,11 @@ def _is_blocked_dangerous_target(path):
     return text in {"/", "~"} or text.startswith("~/") or text.startswith("/*")
 
 
-def _validate_shell_path(agent, raw_path):
-    text = str(raw_path).strip()
-    if not text or text == "-":
-        return
-    agent.path(text)
-
-
 def analyze_shell_command(agent, command):
     # run_shell 的审批前分析入口。
     # 它把原始命令拆成片段，识别命令主体、路径、重定向、动态展开和通配符，
-    # 最终产出风险等级 read/risky/dangerous，以及是否应当直接阻断。
+    # 最终产出风险等级 read/risky/dangerous，并处理 shell 专属的硬拒绝。
+    # 普通路径边界和审批策略由 validators.py 统一处理，避免安全规则散落多处。
     analysis = ShellCommandAnalysis()
     command = str(command or "").strip()
     if not command:
@@ -291,9 +285,5 @@ def analyze_shell_command(agent, command):
             return _raise_shell_error(analysis, f"dangerous shell target is blocked: {raw_path}", "blocked_dangerous_target")
         if analysis.kind in {"risky", "dangerous"} and _has_glob(raw_path):
             return _raise_shell_error(analysis, f"wildcards are not allowed for {analysis.kind} shell commands: {raw_path}", "wildcard_write")
-        try:
-            _validate_shell_path(agent, raw_path)
-        except ValueError as exc:
-            return _raise_shell_error(analysis, str(exc), "path_escape")
 
     return analysis

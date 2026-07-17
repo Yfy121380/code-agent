@@ -7,7 +7,7 @@ BASE_TOOL_SPECS = {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative directory path to list.",
+                    "description": "Directory path to list. Relative paths resolve from the workspace root; home paths may require approval.",
                     "default": ".",
                 },
             },
@@ -16,17 +16,18 @@ BASE_TOOL_SPECS = {
         },
         "risky": False,
         "description": """
-List direct children of a workspace directory.
+List direct children of a directory.
 
 Output format: one entry per line, with [D] path for directories and [F] path for files.
 The output is not recursive. Use this to inspect directory structure before reading specific files.
+Relative paths are resolved from the workspace root. Paths outside the workspace may require approval and sensitive paths are blocked.
 """.strip(),
     },
     "read_file": {
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path to read."},
+                "path": {"type": "string", "description": "File path to read. Relative paths resolve from the workspace root; home paths may require approval."},
                 "start": {"type": "integer", "description": "1-based starting line number.", "default": 1},
                 "end": {"type": "integer", "description": "1-based ending line number, inclusive.", "default": 200},
             },
@@ -36,6 +37,8 @@ The output is not recursive. Use this to inspect directory structure before read
         "risky": False,
         "description": """
 Read a UTF-8 text file by line range before reasoning about or editing it.
+
+Relative paths are resolved from the workspace root. Paths outside the workspace may require approval and sensitive paths are blocked.
 
 Output format:
 - The first line is a tool header like "# path/to/file" and is not file content.
@@ -49,7 +52,7 @@ Output format:
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
-                "path": {"type": "string", "description": "Workspace-relative file or directory path to search.", "default": "."},
+                "path": {"type": "string", "description": "File or directory path to search. Relative paths resolve from the workspace root; home paths may require approval.", "default": "."},
                 "mode": {
                     "type": "string",
                     "enum": ["files_with_matches", "count", "content"],
@@ -67,7 +70,7 @@ Output mode. files_with_matches returns only matching file paths; count returns 
         },
         "risky": False,
         "description": """
-Search workspace files by regular expression.
+Search files by regular expression.
 
 Output depends on mode:
 - files_with_matches: one matching file path per line.
@@ -76,6 +79,7 @@ Output depends on mode:
 
 Use files_with_matches to locate files, count to estimate scope, and content to inspect exact matches.
 before/after override context on their respective sides.
+Relative paths are resolved from the workspace root. Paths outside the workspace may require approval and sensitive paths are blocked.
 """.strip(),
     },
     "run_shell": {
@@ -95,7 +99,8 @@ Run a shell command from the repository root.
 Prefer dedicated tools for common workspace operations: use read_file for reading files, grep for searching, and write_file/patch_file for edits.
 Use run_shell for tests, syntax checks, git status/log, package scripts, and other shell-only operations.
 
-Read-only commands with workspace-safe paths may run directly. Write-like commands are risky. Dangerous commands require approval.
+Read-only commands with allowed paths may run directly. Write-like commands are risky. Dangerous commands require approval.
+Paths are resolved like file tools: workspace paths are preferred, home paths may require approval, and sensitive paths are blocked.
 Keep commands focused and avoid unnecessary destructive operations.
 """.strip(),
     },
@@ -103,7 +108,7 @@ Keep commands focused and avoid unnecessary destructive operations.
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path to write."},
+                "path": {"type": "string", "description": "File path to write. Relative paths resolve from the workspace root; home paths may require approval."},
                 "content": {"type": "string", "description": "UTF-8 text content to write or append."},
                 "mode": {
                     "type": "string",
@@ -126,13 +131,14 @@ For existing files, read the exact file first so you do not overwrite unknown co
 
 mode="append" appends content to the end of the file, creating the file if needed.
 Use patch_file for small targeted edits to existing files.
+Writes outside the workspace require approval unless full approval is enabled. Sensitive paths are blocked.
 """.strip(),
     },
     "patch_file": {
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path to patch."},
+                "path": {"type": "string", "description": "File path to patch. Relative paths resolve from the workspace root; home paths may require approval."},
                 "old_text": {"type": "string", "description": "Exact text block to replace. Must occur exactly once."},
                 "new_text": {"type": "string", "description": "Replacement text."},
             },
@@ -146,6 +152,7 @@ Replace one exact text block in an existing UTF-8 text file.
 Read the exact file first, then provide old_text copied exactly from the current file.
 old_text must occur exactly once; otherwise the patch is rejected.
 Use patch_file for targeted edits and keep the replacement as small as practical.
+Writes outside the workspace require approval unless full approval is enabled. Sensitive paths are blocked.
 """.strip(),
     },
     "todo_write": {

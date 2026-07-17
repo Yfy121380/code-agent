@@ -87,7 +87,7 @@ SCRIPTED_MODEL_OUTPUTS = {
         _tool("patch_file", {"path": "README.md", "old_text": "This is a placeholder benchmark fixture.", "new_text": "This fixture recovered after invalid patch args."}),
         _final("Done."),
     ],
-    "path_escape_recovery": [
+    "outside_home_recovery": [
         _tool("read_file", {"path": "../outside.txt", "start": 1, "end": 1}),
         _tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
         _tool("patch_file", {"path": "sample.txt", "old_text": "alpha", "new_text": "alpha-guarded"}),

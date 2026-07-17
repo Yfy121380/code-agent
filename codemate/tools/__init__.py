@@ -19,6 +19,7 @@ from .registry import build_tool_registry
 from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC
 from .validators import validate_tool
+from .path_policy import ToolGate, ToolPolicyError, gate_for_access, resolve_tool_path
 
 __all__ = [
     "BASE_TOOL_SPECS",
@@ -27,8 +28,12 @@ __all__ = [
     "MAX_GREP_CONTEXT_LINES",
     "TODO_STATUSES",
     "ShellCommandAnalysis",
+    "ToolGate",
+    "ToolPolicyError",
     "analyze_shell_command",
     "build_tool_registry",
+    "gate_for_access",
+    "resolve_tool_path",
     "validate_tool",
     "tool_delegate",
     "tool_grep",
