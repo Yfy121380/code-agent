@@ -5,6 +5,14 @@ import re
 GREP_MODES = {"files_with_matches", "count", "content"}
 MAX_GREP_CONTEXT_LINES = 50
 TODO_STATUSES = {"pending", "in_progress", "completed"}
+WEB_TOOL_NAMES = {"web_search", "web_extract", "web_research"}
+WEB_SEARCH_DEPTHS = {"basic", "advanced", "fast", "ultra-fast"}
+WEB_SEARCH_TOPICS = {"general", "news", "finance"}
+WEB_TIME_RANGES = {"day", "week", "month", "year"}
+WEB_EXTRACT_DEPTHS = {"basic", "advanced"}
+WEB_EXTRACT_FORMATS = {"markdown", "text"}
+WEB_RESEARCH_MODELS = {"mini", "pro", "auto"}
+WEB_RESEARCH_OUTPUT_LENGTHS = {"short", "standard", "long"}
 SHELL_KIND_ORDER = {"read": 0, "risky": 1, "dangerous": 2}
 SHELL_GLOB_CHARS = ("*", "?", "[", "]")
 SHELL_READ_SUBJECTS = {

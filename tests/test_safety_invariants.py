@@ -374,7 +374,6 @@ def test_todo_write_updates_session_without_workspace_change(tmp_path):
         {"phase": "Add tests", "status": "pending", "tasks": []},
     ]
     assert agent._last_tool_result_metadata["read_only"] is True
-    assert agent._last_tool_result_metadata["workspace_changed"] is False
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
 
 
@@ -545,23 +544,6 @@ def test_invalid_argument_process_note_clears_after_same_tool_success(tmp_path):
     result = agent.run_tool("patch_file", {"path": "target.txt", "old_text": "alpha", "new_text": "beta"})
 
     assert result == "patched target.txt"
-    assert agent.session["memory"]["process_notes"] == []
-
-
-def test_partial_success_process_note_clears_after_affected_file_read(tmp_path):
-    agent = build_agent(tmp_path, [])
-    script = "from pathlib import Path; Path('changed.txt').write_text('changed\\n', encoding='utf-8'); raise SystemExit(1)"
-    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
-
-    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
-
-    assert "exit_code: 1" in result
-    notes = agent.session["memory"]["process_notes"]
-    assert notes[0]["kind"] == "partial_success"
-    assert notes[0]["affected_paths"] == ["changed.txt"]
-
-    agent.run_tool("read_file", {"path": "changed.txt", "start": 1, "end": 5})
-
     assert agent.session["memory"]["process_notes"] == []
 
 

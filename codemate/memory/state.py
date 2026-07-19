@@ -97,8 +97,7 @@ def render_memory_text(state, workspace_root=None):
     if state["process_notes"]:
         lines.append("- process_notes:")
         for note in state["process_notes"]:
-            paths = ", ".join(note.get("affected_paths", [])) or "workspace"
-            lines.append(f"  - {note['tool']} {note['kind']} on {paths}, count={note['count']}")
+            lines.append(f"  - {note['tool']} {note['kind']}, count={note['count']}")
             lines.append(f"    {note['message']}")
     else:
         lines.append("- process_notes: -")

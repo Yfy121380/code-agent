@@ -239,3 +239,12 @@ def gate_for_mcp(agent):
             security_event_type="approval_denied",
         )
     return ToolGate("ask", "mcp_default_ask")
+
+
+def gate_for_web(agent):
+    """Web 工具按只读信息获取处理，默认自动放行。
+
+    这些工具不会修改本地文件，但会访问外部网络并把不可信网页内容引入上下文。
+    网页注入主要靠提示词和后续工具权限隔离处理，不靠每次搜索人工审批解决。
+    """
+    return ToolGate("allow", "web_read")

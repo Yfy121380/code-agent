@@ -11,6 +11,7 @@ import json
 MAX_PREVIEW_LINES = 18
 MAX_RESULT_LINES = 40
 MAX_LINE_CHARS = 160
+COMPACT_RESULT_TOOLS = {"list_files", "read_file", "grep", "web_search", "web_extract", "web_research"}
 
 
 def _clip_line(line, limit=MAX_LINE_CHARS):
@@ -93,6 +94,30 @@ def summarize_tool_call(name, args):
                 f"  mode: {args.get('mode', 'content')}",
             ]
         )
+    if name == "web_search":
+        return "\n".join(
+            [
+                f"web_search {_clip_line(args.get('query', ''), 140)!r}",
+                f"  max_results: {args.get('max_results', 5)}",
+                f"  depth: {args.get('search_depth', 'basic')}",
+            ]
+        )
+    if name == "web_extract":
+        urls = args.get("urls") or []
+        lines = ["web_extract"]
+        for url in urls[:5]:
+            lines.append(f"  - {_clip_line(url, 140)}")
+        if len(urls) > 5:
+            lines.append(f"  ... ({len(urls) - 5} more URLs)")
+        return "\n".join(lines)
+    if name == "web_research":
+        return "\n".join(
+            [
+                f"web_research {_clip_line(args.get('input', ''), 140)!r}",
+                f"  model: {args.get('model', 'auto')}",
+                f"  output_length: {args.get('output_length', 'standard')}",
+            ]
+        )
     if name == "list_files":
         return f"list_files {args.get('path', '.')}"
     if name == "delegate":
@@ -101,7 +126,7 @@ def summarize_tool_call(name, args):
 
 
 def summarize_read_tool_result(name, result, metadata=None):
-    """读工具在终端只展示规模信息，避免把读取内容刷满屏幕。"""
+    """读类工具在终端只展示规模信息，避免把读取内容刷满屏幕。"""
     metadata = dict(metadata or {})
     result = str(result or "")
     status = metadata.get("tool_status", "ok")
@@ -120,6 +145,20 @@ def summarize_read_tool_result(name, result, metadata=None):
         return f"{status}, {len(lines)} lines, {char_count} chars"
     if name == "read_file":
         return f"{status}, {len(lines)} lines, {char_count} chars"
+    if name == "web_search":
+        result_count = sum(1 for line in lines if line.lstrip().split(". ", 1)[0].isdigit() and "Title:" in line)
+        return f"{status}, {result_count} results, {len(lines)} lines, {char_count} chars"
+    if name == "web_extract":
+        source_count = sum(1 for line in lines if line.lstrip().split(". ", 1)[0].isdigit() and ("URL:" in line or "Content:" in line))
+        failed_count = sum(1 for line in lines if line.lstrip().startswith("- "))
+        bits = [f"{status}, {source_count} sources"]
+        if failed_count:
+            bits.append(f"{failed_count} failed")
+        bits.append(f"{len(lines)} lines")
+        bits.append(f"{char_count} chars")
+        return ", ".join(bits)
+    if name == "web_research":
+        return f"{status}, report, {len(lines)} lines, {char_count} chars"
     return f"{status}, {len(lines)} lines, {char_count} chars"
 
 
@@ -131,11 +170,6 @@ def summarize_tool_result(name, result, metadata=None):
     status = metadata.get("tool_status")
     if status:
         lines.append(f"status: {status}")
-    affected_paths = metadata.get("affected_paths") or []
-    if affected_paths:
-        lines.append("changed: " + ", ".join(str(path) for path in affected_paths[:8]))
-        if len(affected_paths) > 8:
-            lines.append(f"changed: ... ({len(affected_paths) - 8} more)")
     if name == "todo_write":
         lines.append(result)
         return "\n".join(lines)

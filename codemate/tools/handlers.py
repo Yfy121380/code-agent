@@ -9,6 +9,7 @@ from ..workspace import IGNORED_PATH_NAMES
 from ..memory.long_term import is_memory_path
 from .constants import TODO_STATUSES
 from .validators import _normalize_todos
+from .web import tool_web_extract, tool_web_research, tool_web_search
 
 
 def _path_is_under_ignored_dir(agent, path):
@@ -386,6 +387,9 @@ _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
     "grep": tool_grep,
+    "web_search": tool_web_search,
+    "web_extract": tool_web_extract,
+    "web_research": tool_web_research,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,

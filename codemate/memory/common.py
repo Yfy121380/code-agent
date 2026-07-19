@@ -105,13 +105,3 @@ def _args_preview(args):
         preview[str(key)] = _preview_value(args[key], limit=limit)
     return preview
 
-
-def _affected_paths(args, metadata, workspace_root=None):
-    paths = [
-        canonicalize_path(path, workspace_root)
-        for path in _ensure_list((metadata or {}).get("affected_paths", []))
-        if str(path).strip()
-    ]
-    if isinstance(args, dict) and args.get("path"):
-        paths.append(canonicalize_path(args["path"], workspace_root))
-    return _dedupe_preserve_order([path for path in paths if path])

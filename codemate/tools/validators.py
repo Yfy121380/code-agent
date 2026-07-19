@@ -1,9 +1,135 @@
 # 工具参数校验：在工具真正执行前检查参数、路径边界和审批门禁。
 
-from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, TODO_STATUSES
+import ipaddress
+from datetime import datetime
+from urllib.parse import urlparse
+
+from .constants import (
+    GREP_MODES,
+    MAX_GREP_CONTEXT_LINES,
+    TODO_STATUSES,
+    WEB_EXTRACT_DEPTHS,
+    WEB_EXTRACT_FORMATS,
+    WEB_RESEARCH_MODELS,
+    WEB_RESEARCH_OUTPUT_LENGTHS,
+    WEB_SEARCH_DEPTHS,
+    WEB_SEARCH_TOPICS,
+    WEB_TIME_RANGES,
+    WEB_TOOL_NAMES,
+)
 from .mcp import is_mcp_tool_name
-from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, resolve_tool_path
+from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_web, resolve_tool_path
 from .shell_safety import analyze_shell_command
+
+
+def _validate_string_array(args, name, limit=20):
+    value = args.get(name, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list of strings")
+    if len(value) > limit:
+        raise ValueError(f"{name} must contain at most {limit} items")
+    cleaned = []
+    for index, item in enumerate(value):
+        text = str(item).strip()
+        if not text:
+            raise ValueError(f"{name}[{index}] must not be empty")
+        cleaned.append(text)
+    return cleaned
+
+
+def _validate_date(value, name):
+    if not value:
+        return
+    try:
+        datetime.strptime(str(value), "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{name} must be in YYYY-MM-DD format") from exc
+
+
+def _validate_public_http_url(value):
+    parsed = urlparse(str(value))
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("web_extract URLs must use http or https")
+    if not parsed.hostname:
+        raise ValueError("web_extract URL must include a hostname")
+    hostname = parsed.hostname.strip().lower()
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+        raise ValueError("web_extract refuses localhost URLs")
+    try:
+        address = ipaddress.ip_address(hostname.strip("[]"))
+    except ValueError:
+        return
+    if address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved:
+        raise ValueError("web_extract refuses private, loopback, link-local, multicast, or reserved IP URLs")
+
+
+def _validate_web_search(args):
+    query = str(args.get("query", "")).strip()
+    if not query:
+        raise ValueError("query must not be empty")
+    if len(query) > 1000:
+        raise ValueError("query must be <= 1000 characters")
+    max_results = int(args.get("max_results", 5))
+    if max_results < 1 or max_results > 20:
+        raise ValueError("max_results must be in [1, 20]")
+    search_depth = str(args.get("search_depth", "basic"))
+    if search_depth not in WEB_SEARCH_DEPTHS:
+        raise ValueError("search_depth must be one of: basic, advanced, fast, ultra-fast")
+    topic = str(args.get("topic", "general"))
+    if topic not in WEB_SEARCH_TOPICS:
+        raise ValueError("topic must be one of: general, news, finance")
+    time_range = args.get("time_range")
+    if time_range and str(time_range) not in WEB_TIME_RANGES:
+        raise ValueError("time_range must be one of: day, week, month, year")
+    _validate_date(args.get("start_date"), "start_date")
+    _validate_date(args.get("end_date"), "end_date")
+    if time_range and (args.get("start_date") or args.get("end_date")):
+        raise ValueError("time_range cannot be combined with start_date or end_date")
+    _validate_string_array(args, "include_domains")
+    _validate_string_array(args, "exclude_domains")
+
+
+def _validate_web_extract(args):
+    urls = args.get("urls")
+    if not isinstance(urls, list) or not urls:
+        raise ValueError("urls must be a non-empty list")
+    if len(urls) > 20:
+        raise ValueError("urls must contain at most 20 items")
+    for item in urls:
+        _validate_public_http_url(item)
+    extract_depth = str(args.get("extract_depth", "basic"))
+    if extract_depth not in WEB_EXTRACT_DEPTHS:
+        raise ValueError("extract_depth must be one of: basic, advanced")
+    output_format = str(args.get("format", "markdown"))
+    if output_format not in WEB_EXTRACT_FORMATS:
+        raise ValueError("format must be one of: markdown, text")
+    query = str(args.get("query", "")).strip()
+    if len(query) > 1000:
+        raise ValueError("query must be <= 1000 characters")
+    chunks = int(args.get("chunks_per_source", 3))
+    if chunks < 1 or chunks > 5:
+        raise ValueError("chunks_per_source must be in [1, 5]")
+    timeout = int(args.get("timeout", 30))
+    if timeout < 5 or timeout > 120:
+        raise ValueError("timeout must be in [5, 120]")
+
+
+def _validate_web_research(args):
+    research_input = str(args.get("input", "")).strip()
+    if not research_input:
+        raise ValueError("input must not be empty")
+    if len(research_input) > 4000:
+        raise ValueError("input must be <= 4000 characters")
+    model = str(args.get("model", "auto"))
+    if model not in WEB_RESEARCH_MODELS:
+        raise ValueError("model must be one of: mini, pro, auto")
+    output_length = str(args.get("output_length", "standard"))
+    if output_length not in WEB_RESEARCH_OUTPUT_LENGTHS:
+        raise ValueError("output_length must be one of: short, standard, long")
+    _validate_string_array(args, "include_domains")
+    _validate_string_array(args, "exclude_domains")
 
 
 def _normalize_todos(raw_todos):
@@ -66,6 +192,15 @@ def validate_tool(agent, name, args):
 
     if is_mcp_tool_name(name):
         return gate_for_mcp(agent)
+
+    if name in WEB_TOOL_NAMES:
+        if name == "web_search":
+            _validate_web_search(args)
+        elif name == "web_extract":
+            _validate_web_extract(args)
+        else:
+            _validate_web_research(args)
+        return gate_for_web(agent)
 
     if name == "list_files":
         decision = resolve_tool_path(agent, args.get("path", "."), access="read")

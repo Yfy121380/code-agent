@@ -12,5 +12,4 @@ PROCESS_NOTE_KIND_BY_ERROR_CODE = {
     "approval_denied": "approval_denied",
     "unknown_tool": "rejected",
     "tool_failed": "error",
-    "tool_partial_success": "partial_success",
 }

@@ -11,7 +11,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from .summaries import summarize_read_tool_result, summarize_tool_call, summarize_tool_result
+from .summaries import COMPACT_RESULT_TOOLS, summarize_read_tool_result, summarize_tool_call, summarize_tool_result
 
 
 class NullUI:
@@ -50,7 +50,7 @@ class TerminalUI(NullUI):
 
     def tool_start(self, name, args, risk_level=""):
         summary = summarize_tool_call(name, args)
-        if name in {"list_files", "read_file", "grep"}:
+        if name in COMPACT_RESULT_TOOLS:
             first_line = summary.splitlines()[0] if summary else name
             self.console.print(f"[cyan]◇ {first_line}[/cyan]")
             return
@@ -62,7 +62,7 @@ class TerminalUI(NullUI):
     def tool_result(self, name, args, result, metadata=None):
         metadata = dict(metadata or {})
         status = metadata.get("tool_status", "ok")
-        if name in {"list_files", "read_file", "grep"} and status == "ok":
+        if name in COMPACT_RESULT_TOOLS and status == "ok":
             self.console.print(f"[green]  -> {summarize_read_tool_result(name, result, metadata)}[/green]")
             return
         border_style = "green" if status == "ok" else "yellow"

@@ -2,7 +2,7 @@
 
 import subprocess
 
-from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, TODO_STATUSES
+from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, TODO_STATUSES, WEB_TOOL_NAMES
 from .handlers import (
     tool_delegate,
     tool_grep,
@@ -13,6 +13,9 @@ from .handlers import (
     tool_skill_load,
     tool_skill_unload,
     tool_todo_write,
+    tool_web_extract,
+    tool_web_research,
+    tool_web_search,
     tool_write_file,
 )
 from .registry import build_tool_registry
@@ -20,7 +23,7 @@ from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC
 from .validators import validate_tool
 from .mcp import close_mcp_connections, is_mcp_tool_name
-from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, resolve_tool_path
+from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_web, resolve_tool_path
 
 __all__ = [
     "BASE_TOOL_SPECS",
@@ -28,6 +31,7 @@ __all__ = [
     "GREP_MODES",
     "MAX_GREP_CONTEXT_LINES",
     "TODO_STATUSES",
+    "WEB_TOOL_NAMES",
     "ShellCommandAnalysis",
     "ToolGate",
     "ToolPolicyError",
@@ -36,6 +40,7 @@ __all__ = [
     "close_mcp_connections",
     "gate_for_access",
     "gate_for_mcp",
+    "gate_for_web",
     "is_mcp_tool_name",
     "resolve_tool_path",
     "validate_tool",
@@ -48,6 +53,9 @@ __all__ = [
     "tool_skill_load",
     "tool_skill_unload",
     "tool_todo_write",
+    "tool_web_extract",
+    "tool_web_research",
+    "tool_web_search",
     "tool_write_file",
     "subprocess",
 ]

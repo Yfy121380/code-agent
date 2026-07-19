@@ -4,13 +4,9 @@ import hashlib
 
 from ..workspace import clip, now
 from .common import (
-    _affected_paths,
     _args_digest,
     _args_preview,
-    _dedupe_preserve_order,
-    _ensure_list,
     _stable_json,
-    canonicalize_path,
 )
 from .constants import PROCESS_NOTE_KIND_BY_ERROR_CODE, PROCESS_NOTE_LIMIT, PROCESS_NOTE_TTL_TURNS
 
@@ -21,8 +17,6 @@ def _process_note_kind(metadata):
     if error_code in PROCESS_NOTE_KIND_BY_ERROR_CODE:
         return PROCESS_NOTE_KIND_BY_ERROR_CODE[error_code]
     status = str(metadata.get("tool_status", "")).strip()
-    if status == "partial_success":
-        return "partial_success"
     if status == "error":
         return "error"
     if status == "rejected":
@@ -30,12 +24,11 @@ def _process_note_kind(metadata):
     return ""
 
 
-def _note_key(kind, tool, args_digest, affected_paths):
+def _note_key(kind, tool, args_digest):
     payload = {
         "kind": kind,
         "tool": str(tool),
         "args_digest": args_digest,
-        "affected_paths": list(affected_paths),
     }
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()[:16]
 
@@ -49,24 +42,10 @@ def _normalize_process_note(note, workspace_root=None):
     if not kind or not tool or not message:
         return None
 
-    affected_paths = _dedupe_preserve_order(
-        [
-            canonicalize_path(path, workspace_root)
-            for path in _ensure_list(note.get("affected_paths", []))
-            if str(path).strip()
-        ]
-    )
-    inspected_paths = _dedupe_preserve_order(
-        [
-            canonicalize_path(path, workspace_root)
-            for path in _ensure_list(note.get("inspected_paths", []))
-            if str(path).strip()
-        ]
-    )
     args_digest = str(note.get("args_digest", "")).strip()
     if not args_digest:
         args_digest = _args_digest(note.get("args_preview", {}))
-    note_id = str(note.get("id", "")).strip() or _note_key(kind, tool, args_digest, affected_paths)
+    note_id = str(note.get("id", "")).strip() or _note_key(kind, tool, args_digest)
     return {
         "id": note_id,
         "kind": kind,
@@ -74,8 +53,6 @@ def _normalize_process_note(note, workspace_root=None):
         "tool_error_code": str(note.get("tool_error_code", "")).strip(),
         "args_digest": args_digest,
         "args_preview": note.get("args_preview", {}) if isinstance(note.get("args_preview", {}), dict) else {},
-        "affected_paths": affected_paths,
-        "inspected_paths": inspected_paths,
         "message": message,
         "count": max(1, int(note.get("count", 1) or 1)),
         "created_turn": max(0, int(note.get("created_turn", 0) or 0)),
@@ -104,9 +81,8 @@ def record_process_note(state, tool, args, metadata, message, current_turn, work
     if not kind:
         return state
 
-    affected_paths = _affected_paths(args, metadata, workspace_root)
     digest = _args_digest(args)
-    note_id = _note_key(kind, tool, digest, affected_paths)
+    note_id = _note_key(kind, tool, digest)
     timestamp = now()
     incoming = {
         "id": note_id,
@@ -115,8 +91,6 @@ def record_process_note(state, tool, args, metadata, message, current_turn, work
         "tool_error_code": str((metadata or {}).get("tool_error_code", "")).strip(),
         "args_digest": digest,
         "args_preview": _args_preview(args),
-        "affected_paths": affected_paths,
-        "inspected_paths": [],
         "message": clip(str(message).strip(), 500),
         "count": 1,
         "created_turn": max(0, int(current_turn or 0)),
@@ -152,9 +126,6 @@ def record_process_note(state, tool, args, metadata, message, current_turn, work
 def resolve_process_notes_after_success(state, tool, args, current_turn, workspace_root=None):
     state = expire_process_notes(state, current_turn, workspace_root=workspace_root)
     tool = str(tool)
-    read_path = ""
-    if tool == "read_file" and isinstance(args, dict) and args.get("path"):
-        read_path = canonicalize_path(args["path"], workspace_root)
 
     kept = []
     for note in state["process_notes"]:
@@ -162,17 +133,6 @@ def resolve_process_notes_after_success(state, tool, args, current_turn, workspa
         if kind == "repeated_call":
             continue
         if kind in {"invalid_arguments", "approval_denied", "rejected", "error"} and note.get("tool") == tool:
-            continue
-        if kind == "partial_success" and read_path:
-            inspected = _dedupe_preserve_order([*note.get("inspected_paths", []), read_path])
-            affected = set(note.get("affected_paths", []))
-            if affected and affected.issubset(set(inspected)):
-                continue
-            updated = dict(note)
-            updated["inspected_paths"] = inspected
-            updated["updated_turn"] = max(0, int(current_turn or 0))
-            updated["updated_at"] = now()
-            kept.append(updated)
             continue
         kept.append(note)
     state["process_notes"] = kept[-PROCESS_NOTE_LIMIT:]

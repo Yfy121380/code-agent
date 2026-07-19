@@ -71,7 +71,6 @@ def test_process_notes_merge_duplicate_abnormal_tool_calls():
     metadata = {
         "tool_status": "rejected",
         "tool_error_code": "invalid_arguments",
-        "affected_paths": [],
     }
 
     memory.record_process_note("patch_file", {"path": "README.md"}, metadata, "error: invalid arguments", current_turn=1)
@@ -82,7 +81,6 @@ def test_process_notes_merge_duplicate_abnormal_tool_calls():
     assert len(notes) == 1
     assert notes[0]["kind"] == "invalid_arguments"
     assert notes[0]["tool"] == "patch_file"
-    assert notes[0]["affected_paths"] == ["README.md"]
     assert notes[0]["count"] == 2
     assert notes[0]["updated_turn"] == 2
     assert notes[0]["message"] == "error: invalid arguments again"
@@ -93,7 +91,6 @@ def test_process_notes_expire_by_turn_ttl():
     metadata = {
         "tool_status": "rejected",
         "tool_error_code": "repeated_identical_call",
-        "affected_paths": [],
     }
 
     memory.record_process_note("read_file", {"path": "README.md"}, metadata, "error: repeated", current_turn=1)
@@ -112,14 +109,14 @@ def test_process_notes_clear_after_success_rules():
     memory.record_process_note(
         "patch_file",
         {"path": "README.md"},
-        {"tool_status": "rejected", "tool_error_code": "invalid_arguments", "affected_paths": []},
+        {"tool_status": "rejected", "tool_error_code": "invalid_arguments"},
         "error: invalid arguments",
         current_turn=1,
     )
     memory.record_process_note(
         "read_file",
         {"path": "README.md"},
-        {"tool_status": "rejected", "tool_error_code": "repeated_identical_call", "affected_paths": []},
+        {"tool_status": "rejected", "tool_error_code": "repeated_identical_call"},
         "error: repeated",
         current_turn=1,
     )
@@ -134,32 +131,11 @@ def test_process_notes_clear_after_success_rules():
     assert memory.to_dict()["process_notes"] == []
 
 
-def test_partial_success_clears_after_all_affected_files_are_read():
-    memory = LayeredMemory()
-    metadata = {
-        "tool_status": "partial_success",
-        "tool_error_code": "tool_partial_success",
-        "affected_paths": ["a.txt", "b.txt"],
-    }
-
-    memory.record_process_note("run_shell", {"command": "make edit"}, metadata, "error: command failed", current_turn=1)
-    memory.resolve_process_notes_after_success("read_file", {"path": "a.txt"}, current_turn=1)
-
-    notes = memory.to_dict()["process_notes"]
-    assert len(notes) == 1
-    assert notes[0]["inspected_paths"] == ["a.txt"]
-
-    memory.resolve_process_notes_after_success("read_file", {"path": "b.txt"}, current_turn=1)
-
-    assert memory.to_dict()["process_notes"] == []
-
-
 def test_render_memory_text_includes_process_notes_near_file_summaries():
     memory = LayeredMemory()
     metadata = {
         "tool_status": "error",
         "tool_error_code": "tool_failed",
-        "affected_paths": [],
     }
 
     memory.record_process_note("run_shell", {"command": "pytest"}, metadata, "exit_code: 1", current_turn=1)
@@ -168,7 +144,7 @@ def test_render_memory_text_includes_process_notes_near_file_summaries():
 
     assert "- file_summaries:" in text
     assert "- process_notes:" in text
-    assert "run_shell error on workspace, count=1" in text
+    assert "run_shell error, count=1" in text
     assert "exit_code: 1" in text
 
 
