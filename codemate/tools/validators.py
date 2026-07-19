@@ -1,7 +1,8 @@
 # 工具参数校验：在工具真正执行前检查参数、路径边界和审批门禁。
 
 from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, TODO_STATUSES
-from .path_policy import ToolGate, ToolPolicyError, gate_for_access, resolve_tool_path
+from .mcp import is_mcp_tool_name
+from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, resolve_tool_path
 from .shell_safety import analyze_shell_command
 
 
@@ -62,6 +63,9 @@ def validate_tool(agent, name, args):
     # 这里不执行实际动作，但会完成参数校验、路径硬边界校验和审批门禁判断。
     # deny 在这里直接抛出；返回值只可能是 allow/ask gate。
     args = args or {}
+
+    if is_mcp_tool_name(name):
+        return gate_for_mcp(agent)
 
     if name == "list_files":
         decision = resolve_tool_path(agent, args.get("path", "."), access="read")

@@ -3,6 +3,7 @@
 from functools import partial
 
 from .handlers import _TOOL_RUNNERS, tool_delegate
+from .mcp import build_mcp_tool_registry
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC
 
 
@@ -17,4 +18,5 @@ def build_tool_registry(agent):
     # 就连 delegate 这个工具都不再暴露给模型。
     if agent.depth < agent.max_depth:
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
+    tools.update(build_mcp_tool_registry(agent))
     return tools

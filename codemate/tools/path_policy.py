@@ -215,3 +215,27 @@ def gate_for_access(agent, access, path_decisions=()):
         return ToolGate("ask", "workspace_write", paths, False)
 
     raise ValueError(f"unknown access kind: {access}")
+
+
+def gate_for_mcp(agent):
+    """MCP 是外部动态工具，默认必须询问。
+
+    即使当前 approval policy 是 auto，也不能把 MCP 当成内置低风险工具放行；
+    只有 full 明确表示全部自动通过。never 和 read_only 都直接拒绝。
+    """
+    if agent.read_only:
+        raise ToolPolicyError(
+            "MCP tools are blocked in read-only mode",
+            code="mcp_read_only_block",
+            security_event_type="read_only_block",
+        )
+    policy = str(agent.approval_policy)
+    if policy == "full":
+        return ToolGate("allow", "mcp_full")
+    if policy == "never":
+        raise ToolPolicyError(
+            "MCP tool requires approval",
+            code="mcp_approval_required",
+            security_event_type="approval_denied",
+        )
+    return ToolGate("ask", "mcp_default_ask")

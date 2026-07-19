@@ -122,6 +122,7 @@ class CodeMate:
         self.session["memory"] = self.memory.to_dict()
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
+        print([name for name, tool in self.tools.items()])
         # 可复用的前缀提示词，包括 agent的身份、可用的工具、git仓库状态等等
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
@@ -1167,6 +1168,8 @@ class CodeMate:
         return analysis.to_metadata()
 
     def tool_risk_level(self, name, tool):
+        if str(name).startswith("mcp__"):
+            return "high"
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
             if analysis is not None and getattr(analysis, "kind", "") == "read":
@@ -1174,10 +1177,26 @@ class CodeMate:
         return "high" if tool["risky"] else "low"
 
     def tool_metadata_read_only(self, name, tool):
+        if str(name).startswith("mcp__"):
+            return False
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
             return bool(analysis is not None and getattr(analysis, "kind", "") == "read")
         return not tool["risky"]
+
+    def tool_runtime_metadata(self, name, tool):
+        metadata = {
+            "risk_level": self.tool_risk_level(name, tool),
+            "read_only": self.tool_metadata_read_only(name, tool),
+        }
+        if str(name).startswith("mcp__"):
+            metadata.update(
+                {
+                    "mcp_server": tool.get("mcp_server", ""),
+                    "mcp_tool": tool.get("mcp_tool", ""),
+                }
+            )
+        return metadata
 
     def approval_decision(self, name, args, tool):
         # validate_tool 已经完成 allow/ask/deny 判定。
@@ -1233,8 +1252,7 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": exc.code,
                 "security_event_type": exc.security_event_type,
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
@@ -1249,8 +1267,7 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": "invalid_arguments",
                 "security_event_type": security_event_type,
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
@@ -1265,8 +1282,7 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": "repeated_identical_call",
                 "security_event_type": "",
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
@@ -1283,8 +1299,7 @@ class CodeMate:
                 "tool_status": "rejected",
                 "tool_error_code": "approval_denied",
                 "security_event_type": "read_only_block" if self.read_only else "approval_denied",
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": [],
                 "workspace_changed": False,
                 "diff_summary": [],
@@ -1325,8 +1340,7 @@ class CodeMate:
                 "tool_status": tool_status,
                 "tool_error_code": tool_error_code,
                 "security_event_type": "",
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": affected_paths,
                 "workspace_changed": workspace_changed,
                 "workspace_fingerprint": self.workspace.fingerprint(),
@@ -1349,8 +1363,7 @@ class CodeMate:
                 "tool_status": "partial_success" if workspace_changed else "error",
                 "tool_error_code": "tool_partial_success" if workspace_changed else "tool_failed",
                 "security_event_type": security_event_type,
-                "risk_level": self.tool_risk_level(name, tool),
-                "read_only": self.tool_metadata_read_only(name, tool),
+                **self.tool_runtime_metadata(name, tool),
                 "affected_paths": affected_paths,
                 "workspace_changed": workspace_changed,
                 "workspace_fingerprint": self.workspace.fingerprint(),
@@ -1459,8 +1472,9 @@ class CodeMate:
     def prompt_approval(self, name, args):
         if self.read_only:
             return False
+        tool = self.tools.get(name, {"risky": True})
         metadata = {
-            "risk_level": self.tool_risk_level(name, self.tools.get(name, {"risky": True})),
+            **self.tool_runtime_metadata(name, tool),
             **self.shell_analysis_metadata(),
         }
         gate = getattr(self, "_last_tool_gate", None)
