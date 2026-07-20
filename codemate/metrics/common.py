@@ -89,7 +89,9 @@ def aggregate_run_artifacts(runs_root):
     if sessions_root.name != "sessions":
         sessions_root = sessions_root / "sessions"
     run_dirs = sorted(path for path in sessions_root.glob("*/runs/*") if path.is_dir())
-    reports = []
+    task_states = []
+    prompt_metadata_items = []
+    completion_metadata_items = []
     tool_status_counts = {}
     tool_name_counts = {}
     security_event_counts = {}
@@ -99,14 +101,20 @@ def aggregate_run_artifacts(runs_root):
     stop_reasons = {}
 
     for run_dir in run_dirs:
-        report_path = run_dir / "report.json"
+        task_state_path = run_dir / "task_state.json"
         trace_path = run_dir / "trace.jsonl"
-        if report_path.exists():
-            reports.append(json.loads(report_path.read_text(encoding="utf-8")))
+        if task_state_path.exists():
+            task_states.append(json.loads(task_state_path.read_text(encoding="utf-8")))
         events = []
         if trace_path.exists():
             events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         run_durations.append(_infer_run_duration_ms(events))
+        prompt_event = next((event for event in reversed(events) if event.get("event") == "prompt_built"), None)
+        if prompt_event and isinstance(prompt_event.get("prompt_metadata"), dict):
+            prompt_metadata_items.append(prompt_event["prompt_metadata"])
+        model_event = next((event for event in reversed(events) if event.get("event") == "model_parsed"), None)
+        if model_event and isinstance(model_event.get("completion_metadata"), dict):
+            completion_metadata_items.append(model_event["completion_metadata"])
         for event in events:
             if event.get("event") == "prompt_built" and event.get("duration_ms") is not None:
                 prompt_durations.append(float(event["duration_ms"]))
@@ -124,24 +132,24 @@ def aggregate_run_artifacts(runs_root):
             if event.get("duration_ms") is not None:
                 tool_durations.append(float(event["duration_ms"]))
 
-    tool_steps = [int(report.get("tool_steps", 0)) for report in reports]
-    attempts = [int(report.get("attempts", 0)) for report in reports]
-    prompt_chars = [int((report.get("prompt_metadata") or {}).get("prompt_chars", 0)) for report in reports]
-    cached_tokens = [int((report.get("prompt_metadata") or {}).get("cached_tokens", 0) or 0) for report in reports]
-    cache_hits = [bool((report.get("prompt_metadata") or {}).get("cache_hit")) for report in reports]
-    input_tokens = [int((report.get("prompt_metadata") or {}).get("input_tokens", 0) or 0) for report in reports]
+    tool_steps = [int(state.get("tool_steps", 0)) for state in task_states]
+    attempts = [int(state.get("attempts", 0)) for state in task_states]
+    prompt_chars = [int(metadata.get("prompt_chars", 0)) for metadata in prompt_metadata_items]
+    cached_tokens = [int(metadata.get("cached_tokens", 0) or 0) for metadata in completion_metadata_items]
+    cache_hits = [bool(metadata.get("cache_hit")) for metadata in completion_metadata_items]
+    input_tokens = [int(metadata.get("input_tokens", 0) or 0) for metadata in completion_metadata_items]
     prefix_reused = [
-        not bool((report.get("prompt_metadata") or {}).get("prefix_changed"))
-        for report in reports
-        if "prefix_changed" in (report.get("prompt_metadata") or {})
+        not bool(metadata.get("prefix_changed"))
+        for metadata in prompt_metadata_items
+        if "prefix_changed" in metadata
     ]
-    for report in reports:
-        stop_reason = str(report.get("stop_reason", "")).strip()
+    for state in task_states:
+        stop_reason = str(state.get("stop_reason", "")).strip()
         if stop_reason:
             stop_reasons[stop_reason] = stop_reasons.get(stop_reason, 0) + 1
 
     return {
-        "run_count": len(reports) if reports else len(run_dirs),
+        "run_count": len(task_states) if task_states else len(run_dirs),
         "avg_tool_steps": _safe_mean(tool_steps),
         "avg_attempts": _safe_mean(attempts),
         "avg_prompt_chars": _safe_mean(prompt_chars),

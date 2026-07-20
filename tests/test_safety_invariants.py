@@ -861,8 +861,8 @@ def test_delegate_child_is_read_only(tmp_path):
     assert tool_events[0]["name"] == "delegate"
     assert "delegate_result" in tool_events[0]["content"]
 
-# 构造包含 secret 值的 payload，然后写 trace 和 report。
-def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
+# 构造包含 secret 值的 payload，然后写 trace。
+def test_configured_secret_env_names_are_redacted_in_trace(tmp_path):
     github_pat = "ghp_configured_secret_123"
     gh_pat = "ghp_configured_secret_456"
     with patch.dict(os.environ, {"GITHUB_PAT": github_pat, "GH_PAT": gh_pat}, clear=True):
@@ -883,18 +883,10 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
             "list": [github_pat, gh_pat],
         }
         agent.emit_trace(state, "tool_executed", payload)
-        agent.run_store.write_report(
-            state,
-            agent.redact_artifact({"task_state": state.to_dict(), "payload": payload}),
-        )
 
     run_dir = agent.run_store.run_dir(state.run_id)
     trace_text = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
-    report_text = (run_dir / "report.json").read_text(encoding="utf-8")
 
     assert github_pat not in trace_text
     assert gh_pat not in trace_text
-    assert github_pat not in report_text
-    assert gh_pat not in report_text
     assert trace_text.count("<redacted>") >= 4
-    assert report_text.count("<redacted>") >= 4

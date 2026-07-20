@@ -409,8 +409,6 @@ class BenchmarkEvaluator:
         task_state = agent.current_task_state
         run_dir = Path(agent.current_run_dir)
         task_state_path = agent.run_store.task_state_path(task_state)
-        report_path = agent.run_store.report_path(task_state)
-        report = agent.run_store.load_report(task_state.run_id)
 
         artifact_path = _artifact_path_for_task(task)
         artifact_file = fixture_copy_root / artifact_path
@@ -448,7 +446,6 @@ class BenchmarkEvaluator:
             "run_id": task_state.run_id,
             "run_dir_relpath": _workspace_relative(run_dir, self.workspace_root),
             "task_state_relpath": _workspace_relative(task_state_path, self.workspace_root),
-            "report_relpath": _workspace_relative(report_path, self.workspace_root),
             "allowed_tools": list(task["allowed_tools"]),
             "step_budget": int(task["step_budget"]),
             "expected_artifact": task["expected_artifact"],
@@ -476,7 +473,6 @@ class BenchmarkEvaluator:
             "initial_task_summary_empty": initial_task_summary_empty,
             "initial_process_notes_empty": initial_process_notes_empty,
             "task_state": task_state.to_dict(),
-            "report": report,
         }
 
     def _failure_category(

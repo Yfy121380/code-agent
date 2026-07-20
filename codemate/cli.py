@@ -234,7 +234,7 @@ def build_arg_parser():
         dest="secret_env_names",
         action="append",
         default=[],
-        help="Extra environment variable names to treat as secrets for trace/report redaction.",
+        help="Extra environment variable names to treat as secrets for trace and task-state redaction.",
     )
     parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Maximum model output tokens per step.")

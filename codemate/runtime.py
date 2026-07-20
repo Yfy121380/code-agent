@@ -133,15 +133,21 @@ class CodeMate:
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
         self.current_run_dir = None
+        # 最近一次 prompt 组装元数据，供实验指标读取。
         self.last_prompt_metadata = {}
-        self.last_completion_metadata = {}
+        # 当前请求召回的长期记忆，后续工具循环复用，避免重复召回。
         self.relevant_long_term_memory = []
+        # 长期记忆召回状态，会写入 prompt metadata，便于排查上下文来源。
         self.long_term_memory_status = "not_run"
-        self.long_term_memory_metadata = {}
+        # 当前请求长期记忆召回缓存键，防止同一输入重复触发模型召回。
         self._long_term_memory_cache_key = None
+        # 最近一次工具执行元数据，供 UI、trace 和测试读取。
         self._last_tool_result_metadata = {}
+        # 最近一次 bash 静态分析结果，供审批和工具元数据复用。
         self._last_shell_analysis = None
+        # 最近一次工具门禁结果，供审批 UI 展示和 trace 记录。
         self._last_tool_gate = None
+        # 最近一次 prefix 刷新结果，说明仓库信息或工具签名是否变化。
         self._last_prefix_refresh = {
             "workspace_facts_changed": False,
             "prefix_changed": False,
@@ -673,7 +679,7 @@ class CodeMate:
         self.invalidate_stale_memory()
         prompt, metadata = self.context_manager.build(user_message)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
-        # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
+        # 后面 trace 和实验指标才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
             {
                 "prefix_chars": len(self.prefix),
@@ -806,7 +812,6 @@ class CodeMate:
         """
         self.relevant_long_term_memory = []
         self.long_term_memory_status = "disabled"
-        self.long_term_memory_metadata = {}
         if not (self.feature_enabled("memory") and self.feature_enabled("relevant_memory") and self.feature_enabled("long_term_memory")):
             return
         if self.runtime_mode != "agent":
@@ -828,22 +833,22 @@ class CodeMate:
             result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message)
         except Exception as exc:
             self.long_term_memory_status = "failed"
-            self.long_term_memory_metadata = {"error": str(exc), "memory_hash": cache_key}
-            self.emit_trace(task_state, "memory_retrieval_failed", self.long_term_memory_metadata)
+            metadata = {"error": str(exc), "memory_hash": cache_key}
+            self.emit_trace(task_state, "memory_retrieval_failed", metadata)
             self._long_term_memory_cache_key = cache_key
             return
 
         selected = list(result.get("selected", []) or [])
         self.relevant_long_term_memory = selected
         self.long_term_memory_status = str(result.get("status", "ok"))
-        self.long_term_memory_metadata = {
+        metadata = {
             "status": self.long_term_memory_status,
             "selected_count": len(selected),
             "selected_sources": [str(item.get("source", "")) for item in selected],
             "duration_ms": int(result.get("duration_ms", 0) or 0),
             "memory_hash": cache_key,
         }
-        self.emit_trace(task_state, "memory_retrieval_finished", self.long_term_memory_metadata)
+        self.emit_trace(task_state, "memory_retrieval_finished", metadata)
         self._long_term_memory_cache_key = cache_key
 
     def schedule_dream_if_needed(self, task_state):
@@ -919,7 +924,7 @@ class CodeMate:
         为什么存在：
         `ask()` 是整个 runtime 的总调度器。它把“用户提一个请求”扩展成一条
         可持续推进的控制循环：记录会话、组 prompt、调用模型、执行工具、
-        写 trace/report、更新状态，直到模型给出最终答案或系统主动停下。
+        写 trace、更新状态，直到模型给出最终答案或系统主动停下。
 
         输入 / 输出：
         - 输入：`user_message`，即用户这一次的任务描述
@@ -1001,7 +1006,6 @@ class CodeMate:
             completion_metadata.update(response_metadata)
             if completion_metadata:
                 prompt_metadata.update(completion_metadata)
-            self.last_completion_metadata = completion_metadata
             self.last_prompt_metadata = prompt_metadata
             kind = getattr(response, "kind", "final")
             self.emit_trace(
@@ -1096,7 +1100,6 @@ class CodeMate:
                     },
                 )
                 self.schedule_dream_if_needed(task_state)
-                self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
                 self.ui.final_answer(final)
                 return final
 
@@ -1129,7 +1132,6 @@ class CodeMate:
             },
         )
         self.schedule_dream_if_needed(task_state)
-        self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
         self.ui.final_answer(final)
         return final
 
@@ -1341,24 +1343,6 @@ class CodeMate:
     @staticmethod
     def new_run_id():
         return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    def build_report(self, task_state):
-        # report 是一次运行的最终摘要；
-        # 和 trace 的区别在于，trace 关注过程，report 关注结果与关键指标。
-        # 记录 (1)运行结果, (2)循环次数, (3)提示词指标, (4)长期记忆提取
-        return {
-            "run_id": task_state.run_id,
-            "task_id": task_state.task_id,
-            "status": task_state.status,
-            "stop_reason": task_state.stop_reason,
-            "final_answer": task_state.final_answer,
-            "tool_steps": task_state.tool_steps,
-            "attempts": task_state.attempts,
-            "task_state": task_state.to_dict(),
-            "prompt_metadata": self.last_prompt_metadata,
-            "long_term_memory": dict(self.long_term_memory_metadata),
-            "redacted_env": self.detected_secret_env_summary(),
-        }
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""

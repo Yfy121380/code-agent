@@ -67,7 +67,6 @@ def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
 #                 run_20260529-xxxxxx-abcdef/
 #                   task_state.json
 #                   trace.jsonl
-#                   report.json
 #endregion
 # 测试 run_fixed_benchmark / BenchmarkEvaluator.run() 是否会使用全新的 fixture 副本和全新的 run 目录。
 def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp_path):
@@ -139,7 +138,6 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         assert not row["fixture_copy_relpath"].startswith("/")
         assert not row["run_dir_relpath"].startswith("/")
         assert not row["task_state_relpath"].startswith("/")
-        assert not row["report_relpath"].startswith("/")
         assert row["status"] == "pass"
         assert row["passed"] is True
         assert row["within_budget"] is True

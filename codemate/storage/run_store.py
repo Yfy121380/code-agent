@@ -1,7 +1,7 @@
 """运行工件落盘。
 
 session.json 负责保存“可恢复的会话状态”；RunStore 负责保存“单次运行的审计工件”，
-例如 task_state、trace 和 report。两者分开后，恢复现场和复盘证据不会混在一起。
+目前只包含 task_state 和 trace。两者分开后，恢复现场和复盘证据不会混在一起。
 """
 
 import json
@@ -29,9 +29,6 @@ class RunStore:
     def trace_path(self, run_id):
         return self.run_dir(run_id) / "trace.jsonl"
 
-    def report_path(self, run_id):
-        return self.run_dir(run_id) / "report.json"
-
     def start_run(self, task_state):
         # 每次 ask() 都会生成一个 run 目录。
         # 这样一次用户请求对应一组独立工件，后续排查更容易。
@@ -56,17 +53,8 @@ class RunStore:
             handle.write("\n")
         return path
 
-    def write_report(self, task_state, report):
-        path = self.report_path(task_state)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json_atomic(path, report)
-        return path
-
     def load_task_state(self, task_id):
         return json.loads(self.task_state_path(task_id).read_text(encoding="utf-8"))
-
-    def load_report(self, task_id):
-        return json.loads(self.report_path(task_id).read_text(encoding="utf-8"))
 
     def _write_json_atomic(self, path, payload):
         # 原子写：先写临时文件，再 replace。
