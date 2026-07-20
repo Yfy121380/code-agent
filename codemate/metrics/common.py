@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from ..config import load_project_env, provider_env
+from ..config import ensure_codemate_layout, load_project_env, provider_env
 from ..evaluator import run_fixed_benchmark
 from ..models import AnthropicCompatibleModelClient, FakeModelClient, ModelResponse, OpenAICompatibleModelClient
 from ..runtime import CodeMate
@@ -205,7 +205,8 @@ def build_stress_agent_metrics():
         workspace_root = Path(temp_dir)
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         workspace = WorkspaceContext.build(workspace_root)
-        store = SessionStore(workspace_root / ".codemate" / "sessions")
+        paths = ensure_codemate_layout(workspace_root)
+        store = SessionStore(paths.sessions_root)
         agent = CodeMate(
             model_client=FakeModelClient([]),
             workspace=workspace,

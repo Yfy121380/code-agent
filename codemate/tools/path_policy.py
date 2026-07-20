@@ -113,7 +113,14 @@ def resolve_tool_path(agent, raw_path, access="read"):
     candidate = path if path.is_absolute() else root / path
     resolved = candidate.resolve()
     home = Path.home().resolve()
-    internal_root = (root / ".codemate").resolve()
+    paths = getattr(agent, "paths", None)
+    internal_roots = [(root / ".codemate").resolve()]
+    if paths is not None:
+        internal_roots = [
+            paths.project_config_root.resolve(),
+            paths.sessions_root.resolve(),
+            paths.memory_root.resolve(),
+        ]
 
     in_workspace = _is_relative_to(resolved, root)
     if not in_workspace and not _is_relative_to(resolved, home):
@@ -139,7 +146,7 @@ def resolve_tool_path(agent, raw_path, access="read"):
             security_event_type="path_outside_memory_scope",
         )
 
-    if _is_relative_to(resolved, internal_root):
+    if any(_is_relative_to(resolved, internal_root) for internal_root in internal_roots):
         location = "internal"
     elif in_workspace:
         location = "workspace"

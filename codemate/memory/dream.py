@@ -94,8 +94,8 @@ def dream_prompt(processing_state_text=""):
         )
     return (
         "Consolidate codemate long-term memory.\n\n"
-        "Allowed workspace scope: `.codemate/memory/` only.\n"
-        "Use Runtime context for current_local_datetime, current_local_date, timezone, and today_daily_log_path.\n"
+        "Allowed scope: the memory_root shown in Runtime context only.\n"
+        "Use Runtime context for memory_root, current_local_datetime, current_local_date, timezone, and today_daily_log_path.\n"
         "Use todo_write if it helps plan this consolidation.\n\n"
         "Daily log processing state:\n"
         f"{processing_state_text}\n\n"
@@ -121,7 +121,7 @@ def dream_prompt(processing_state_text=""):
         "- [2026-07-08T14:25:42+08:00] The project is named codemate and is a local coding assistant.\n"
         "- [2026-07-08T14:28:10+08:00] Long-term memory uses daily logs plus background dream consolidation.\n\n"
         "Phases:\n"
-        "1. Orient: list `.codemate/memory`, read the three long-term memory files, and inspect recent daily logs.\n"
+        "1. Orient: list memory_root, read the three long-term memory files, and inspect recent daily logs.\n"
         "2. Gather: extract long-term information only from unprocessed daily log entries after the cursor above. Ignore one-off task details, current todos, raw tool output, secrets, and transient debugging notes.\n"
         "3. Consolidate: classify useful daily log entries into `user_profile.md`, `feedback_workflow.md`, and `project_context.md` with stable, deduplicated facts.\n"
         "4. Prune: remove stale, duplicated, contradicted, or overly verbose entries. Keep each file concise.\n\n"

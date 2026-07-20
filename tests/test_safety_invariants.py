@@ -131,7 +131,7 @@ def test_memory_directory_is_explicitly_accessible_but_not_default_listed(tmp_pa
     agent = build_agent(tmp_path, [])
 
     root_listing = agent.run_tool("list_files", {"path": "."})
-    memory_listing = agent.run_tool("list_files", {"path": ".codemate/memory"})
+    memory_listing = agent.run_tool("list_files", {"path": str(agent.paths.memory_root)})
     ignored_listing = agent.run_tool("list_files", {"path": ".codemate"})
 
     assert ".codemate" not in root_listing
@@ -142,9 +142,9 @@ def test_memory_directory_is_explicitly_accessible_but_not_default_listed(tmp_pa
 def test_grep_can_search_memory_directory_explicitly(tmp_path):
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("grep", {"pattern": "User Profile", "path": ".codemate/memory", "mode": "content"})
+    result = agent.run_tool("grep", {"pattern": "User Profile", "path": str(agent.paths.memory_root), "mode": "content"})
 
-    assert ".codemate/memory/user_profile.md" in result
+    assert "memory/user_profile.md" in result
 
 
 def test_list_and_grep_can_access_skills_directory_explicitly(tmp_path):
@@ -171,7 +171,7 @@ def test_skill_load_and_unload_update_active_skills(tmp_path):
     assert "skill loaded: backend" in loaded
     assert "skill already active" in duplicate
     assert "active_skills:" in memory_text
-    assert "Root: .codemate/skills/backend" in memory_text
+    assert f"Root: {agent.paths.project_skills / 'backend'}" in memory_text
     assert "Use references/guide.md" in memory_text
     assert "skill unloaded: backend" in unloaded
     assert "skill is not active" in missing

@@ -1,7 +1,7 @@
 # 长期记忆文件管理。
-# 本文件只负责 `.codemate/memory` 下的文件结构、读写路径和 dream 状态。
-# 它不负责模型召回，也不负责判断哪些信息值得记忆；这些决策由 runtime
-# 和专门的 retrieval / dream 流程完成。
+# 本文件负责项目绑定的长期记忆目录、daily log 目录和 dream 状态文件。
+# 长期记忆物理位置位于用户级 codemate 状态目录下，并按项目 id 隔离。
+# 它不负责模型召回，也不判断哪些信息值得记忆。
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from ..config.paths import codemate_paths
 from ..workspace import now
 
 LONG_TERM_MEMORY_FILES = {
@@ -38,7 +39,7 @@ DREAM_LOCK_TTL_SECONDS = 60 * 30
 
 
 def memory_root(workspace_root):
-    return Path(workspace_root) / ".codemate" / "memory"
+    return codemate_paths(workspace_root).memory_root
 
 
 def daily_logs_dir(workspace_root):
@@ -100,7 +101,7 @@ def has_long_term_content(memory_files):
 
 def is_memory_path(workspace_root, path):
     root = memory_root(workspace_root).resolve()
-    resolved = Path(path).resolve()
+    resolved = Path(path).expanduser().resolve()
     try:
         return os.path.commonpath([str(root), str(resolved)]) == str(root)
     except ValueError:

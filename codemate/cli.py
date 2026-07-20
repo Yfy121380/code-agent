@@ -14,7 +14,7 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
-from .config import load_project_env, provider_env
+from .config import ensure_codemate_layout, load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import CodeMate
 from .storage import SessionStore
@@ -180,8 +180,9 @@ def build_agent(args, ui=None):
     load_project_env(workspace.repo_root)
     # 读取工具仓库环境配置作为兜底，不覆盖目标项目或父进程已设置的变量。
     load_project_env(Path(__file__).resolve().parent.parent, override=False)
+    paths = ensure_codemate_layout(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
-    store = SessionStore(workspace.repo_root + "/.codemate/sessions")
+    store = SessionStore(paths.sessions_root)
     model = _build_model_client(args)
     session_id = args.resume
     if session_id == "latest":

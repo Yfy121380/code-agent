@@ -1,19 +1,19 @@
-# MCP 工具接入模块：把项目配置中的 MCP server 动态转换成 codemate 工具。
+# MCP 工具接入模块：把 settings 中的 MCP server 动态转换成 codemate 工具。
 #
-# 配置文件位于当前工作区 `.codemate/mcp.json`。启动时读取 server 配置，
-# 为每个可用 server 调用 tools/list，然后把每个 MCP tool 包装成
-# `mcp__server__tool` 形式的普通工具。MCP 连接运行在独立后台事件循环中，
-# 后续工具调用复用已有 session；如果调用失败，则关闭旧连接并重连重试一次。
+# 启动时读取用户级和项目级 settings.json 中的 mcp.servers 配置，为每个可用
+# server 调用 tools/list，然后把每个 MCP tool 包装成 `mcp__server__tool`
+# 形式的普通工具。MCP 连接运行在独立后台事件循环中，后续工具调用复用
+# 已有 session；如果调用失败，则关闭旧连接并重连重试一次。
 
 import asyncio
 import concurrent.futures
-import json
 import os
 import re
 import threading
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
+
+from ..config import load_codemate_settings
 
 
 MCP_TOOL_PREFIX = "mcp__"
@@ -86,14 +86,10 @@ def _result_to_text(result):
 
 
 def load_mcp_config(root):
-    path = Path(root) / ".codemate" / "mcp.json"
-    if not path.is_file():
+    settings = load_codemate_settings(root)
+    servers = settings.mcp_servers
+    if not servers:
         return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    servers = data.get("mcpServers") if isinstance(data, dict) else None
-    if not isinstance(servers, dict):
-        raise ValueError(".codemate/mcp.json must contain an object field named mcpServers")
-
     configs = []
     for raw_name, raw_config in servers.items():
         if not isinstance(raw_config, dict):

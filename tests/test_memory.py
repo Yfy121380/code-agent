@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from codemate.memory import LayeredMemory
 from codemate.memory import dream as dreamlib
@@ -151,7 +152,7 @@ def test_render_memory_text_includes_process_notes_near_file_summaries():
 def test_long_term_memory_files_are_initialized(tmp_path):
     memory = LayeredMemory(workspace_root=tmp_path)
 
-    memory_root = tmp_path / ".codemate" / "memory"
+    memory_root = longterm.memory_root(tmp_path)
 
     assert (memory_root / "user_profile.md").is_file()
     assert (memory_root / "feedback_workflow.md").is_file()
@@ -161,7 +162,7 @@ def test_long_term_memory_files_are_initialized(tmp_path):
 
 
 def test_long_term_memory_migrates_legacy_user_preferences_file(tmp_path):
-    memory_root = tmp_path / ".codemate" / "memory"
+    memory_root = longterm.memory_root(tmp_path)
     memory_root.mkdir(parents=True)
     (memory_root / "user_preferences.md").write_text("# User Preferences\n\n- old preference\n", encoding="utf-8")
 
@@ -184,9 +185,10 @@ def test_remember_long_term_appends_today_daily_log(tmp_path):
 
     result = agent.remember_long_term("用户希望以后先说明修改范围")
 
-    log_path = tmp_path / result["path"]
+    log_path = Path(result["path"])
     text = log_path.read_text(encoding="utf-8")
-    assert result["path"].startswith(".codemate/memory/daily_logs/")
+    assert "/.codemate/projects/" in result["path"]
+    assert "/memory/daily_logs/" in result["path"]
     assert "- [" in result["entry"]
     assert "用户希望以后先说明修改范围" in text
 
@@ -227,7 +229,7 @@ def test_run_dream_once_updates_cursor_without_counting_dream_session(tmp_path):
         session_store=store,
         approval_policy="auto",
     )
-    log_dir = tmp_path / ".codemate" / "memory" / "daily_logs"
+    log_dir = longterm.daily_logs_dir(tmp_path)
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "2026-07-09.md").write_text("- [t1] first\n- [t2] second\n", encoding="utf-8")
 

@@ -35,11 +35,13 @@ def _allow_memory_tree(agent, path):
 
 
 def _allow_skill_tree(agent, path):
-    try:
-        path.relative_to(agent.skills_root())
-        return True
-    except ValueError:
-        return False
+    for root in (agent.paths.user_skills, agent.paths.project_skills):
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _allow_internal_tree(agent, path):
@@ -51,7 +53,7 @@ def tool_list_files(agent, args):
     if not path.is_dir():
         raise ValueError("path is not a directory")
     if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be listed explicitly")
+        raise ValueError("path is ignored; only codemate memory and skills directories may be listed explicitly")
     entries = [
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         if item.name not in IGNORED_PATH_NAMES or _allow_internal_tree(agent, item)
@@ -85,7 +87,7 @@ def _grep_context_args(args):
 
 def _grep_files(agent, path):
     if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be searched explicitly")
+        raise ValueError("path is ignored; only codemate memory and skills directories may be searched explicitly")
     if path.is_file():
         return [path]
     allow_internal = _allow_internal_tree(agent, path)
@@ -121,7 +123,7 @@ def _format_grep_count_output(stdout):
 
 def _tool_grep_rg(agent, pattern, path, mode, args):
     if _path_is_under_ignored_dir(agent, path) and not _allow_internal_tree(agent, path):
-        raise ValueError("path is ignored; only .codemate/memory and .codemate/skills may be searched explicitly")
+        raise ValueError("path is ignored; only codemate memory and skills directories may be searched explicitly")
     command = ["rg", "--smart-case"]
     if _allow_internal_tree(agent, path):
         command.append("--hidden")
@@ -319,11 +321,10 @@ def tool_skill_load(agent, args):
             {
                 "skill": skill["name"],
                 "root": skill["root"],
-                "source": skill["source"],
             },
         )
     agent.session_store.save(agent.session)
-    return f"skill loaded: {skill['name']} ({skill['source']})"
+    return f"skill loaded: {skill['name']} ({skill['root']})"
 
 
 def tool_skill_unload(agent, args):
@@ -336,7 +337,6 @@ def tool_skill_unload(agent, args):
             {
                 "skill": removed["name"],
                 "root": removed.get("root", ""),
-                "source": removed.get("source", ""),
                 "reason": reason,
             },
         )

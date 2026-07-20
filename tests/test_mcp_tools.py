@@ -2,12 +2,14 @@ from dataclasses import dataclass
 from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
+from codemate.config import ensure_codemate_layout
 from codemate.tools.mcp import McpConnection, McpManager, McpServerConfig, McpToolInfo
 
 
 def build_agent(tmp_path, outputs=None, **kwargs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
+    paths = ensure_codemate_layout(tmp_path)
     store = SessionStore(tmp_path / ".codemate" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
     return MiniAgent(
@@ -94,15 +96,21 @@ class FakeMcpTool:
 
 def test_mcp_config_discovery_builds_wrapped_tool(tmp_path):
     config_dir = tmp_path / ".codemate"
-    config_dir.mkdir()
-    (config_dir / "mcp.json").write_text(
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "settings.json").write_text(
         """
         {
-          "mcpServers": {
-            "notes": {
-              "type": "http",
-              "url": "http://localhost:3000/mcp"
+          "mcp": {
+            "servers": {
+              "notes": {
+                "type": "http",
+                "url": "http://localhost:3000/mcp"
+              }
             }
+          },
+          "permissions": {
+            "read": {"allow": [], "deny": []},
+            "write": {"allow": [], "deny": []}
           }
         }
         """,

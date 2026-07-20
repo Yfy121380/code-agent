@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import memory as memorylib
+from .config import ensure_codemate_layout
 from .models import FakeModelClient, ModelResponse
 from .runtime import CodeMate
 from .storage import RunStore, SessionStore, STOP_REASON_FINAL_ANSWER_RETURNED
@@ -384,7 +385,8 @@ class BenchmarkEvaluator:
             fixture_copy_root,
             repo_root_override=fixture_copy_root,
         )
-        session_store = SessionStore(fixture_copy_root / ".codemate" / "sessions")
+        paths = ensure_codemate_layout(fixture_copy_root)
+        session_store = SessionStore(paths.sessions_root)
         if self.model_client_factory is not None:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:

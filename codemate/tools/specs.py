@@ -509,7 +509,7 @@ Negative examples:
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Name of an available skill under .codemate/skills/<name>/SKILL.md."},
+                "name": {"type": "string", "description": "Name of an available skill listed in the Available skills section."},
             },
             "required": ["name"],
             "additionalProperties": False,
@@ -521,8 +521,9 @@ Load a skill into Working memory when it is clearly useful for the current task.
 Use this only for skills listed in Available skills. Do not load a skill that is already active.
 After loading, follow the skill instructions while they remain relevant.
 
-Skill files live at .codemate/skills/<name>/SKILL.md.
-Relative resources mentioned by the skill, such as scripts/, references/, examples/, and templates/, are located under .codemate/skills/<name>/.
+Available skills may come from the project skill root or the user skill root.
+After loading, Working memory shows the skill's absolute Root.
+Relative resources mentioned by the skill, such as scripts/, references/, examples/, and templates/, are located under that Root.
 """.strip(),
     },
     "skill_unload": {

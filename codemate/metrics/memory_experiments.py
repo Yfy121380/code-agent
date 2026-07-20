@@ -42,7 +42,8 @@ class _MemoryExperimentModelClient(FakeModelClient):
 
 def _build_memory_experiment_agent(workspace_root, expected_fact, filename):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    paths = ensure_codemate_layout(workspace_root)
+    store = SessionStore(paths.sessions_root)
     return CodeMate(
         model_client=_MemoryExperimentModelClient(expected_fact, filename),
         workspace=workspace,

@@ -12,7 +12,7 @@ from .file_memory import (
     summarize_read_result,
 )
 from .process_notes import expire_process_notes, record_process_note, resolve_process_notes_after_success
-from .long_term import daily_log_path, ensure_long_term_memory, read_long_term_memory
+from .long_term import daily_log_path, ensure_long_term_memory, memory_root, read_long_term_memory
 from .retrieval import retrieve_long_term_memory
 from .state import default_memory_state, is_effectively_empty, normalize_memory_state, render_memory_text
 
@@ -31,6 +31,7 @@ __all__ = [
     "normalize_memory_state",
     "record_process_note",
     "remember_file",
+    "memory_root",
     "read_long_term_memory",
     "render_memory_text",
     "resolve_process_notes_after_success",

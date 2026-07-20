@@ -496,7 +496,7 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
             "完成。",
         ],
     )
-    memory_path = tmp_path / ".codemate" / "memory" / "feedback_workflow.md"
+    memory_path = agent.paths.memory_root / "feedback_workflow.md"
     memory_path.write_text("# Feedback Workflow\n\n- 回答时使用中文。\n", encoding="utf-8")
 
     result = agent.ask("介绍一下项目")
@@ -511,6 +511,7 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
     assert "project_context:" in agent.model_client.prompts[1]
     assert "Runtime context:" in agent.model_client.prompts[1]
     assert "current_local_datetime:" in agent.model_client.prompts[1]
-    assert "today_daily_log_path: .codemate/memory/daily_logs/" in agent.model_client.prompts[1]
+    assert "today_daily_log_path: " in agent.model_client.prompts[1]
+    assert "/memory/daily_logs/" in agent.model_client.prompts[1]
     assert agent.model_client.structured_outputs[0]["name"] == "long_term_memory_retrieval"
     assert agent.model_client.structured_outputs[1] is None

@@ -190,7 +190,8 @@ def _truncate_read_history(agent):
 
 def _build_real_agent(workspace_root, provider, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    paths = ensure_codemate_layout(workspace_root)
+    store = SessionStore(paths.sessions_root)
     return CodeMate(
         model_client=_make_provider_client(provider),
         workspace=workspace,

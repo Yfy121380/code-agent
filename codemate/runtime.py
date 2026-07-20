@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from . import memory as memorylib
 from .memory import dream as dreamlib
 from .memory import long_term as longterm
+from .config import ensure_codemate_layout, load_codemate_settings
 from .context import ContextManager
 from .storage import RunStore, SessionStore, TaskState
 from .ui import NullUI
@@ -78,6 +79,12 @@ class CodeMate:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        # codemate 的项目/用户配置和本项目状态目录。
+        # session、memory、skills、settings 都从这里获得统一绝对路径。
+        self.paths = ensure_codemate_layout(self.root)
+        self.settings = load_codemate_settings(self.paths)
+        # 聚合后的读写权限规则，后续 path policy 和沙箱会共用这一份规则。
+        self.permission_rules = self.settings.permission_rules
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -227,7 +234,7 @@ class CodeMate:
             tool_use_rules = textwrap.dedent(
                 """\
                 Tool use:
-                - Use tools only for memory consolidation under `.codemate/memory/`.
+                - Use tools only for memory consolidation under the memory root shown in Runtime context.
                 - Use todo_write if it helps plan the consolidation.
                 - Read existing memory files before patching or overwriting them.
                 - Do not rewrite daily logs; daily logs are append-only raw records.
@@ -241,7 +248,7 @@ class CodeMate:
 
                 {tool_use_rules}
 
-                Your scope is `.codemate/memory/` only. Do not inspect or edit project files outside that directory.
+                Your scope is the memory root shown in Runtime context only. Do not inspect or edit project files outside that directory.
                 """
             ).strip()
             return PromptPrefix(
@@ -369,7 +376,7 @@ class CodeMate:
         return dict(self._last_prefix_refresh)
 
     def skills_root(self):
-        return self.root / ".codemate" / "skills"
+        return self.paths.project_skills
 
     def normalize_skill_name(self, name):
         name = str(name or "").strip().lstrip("/")
@@ -381,7 +388,10 @@ class CodeMate:
 
     def skill_file(self, name):
         name = self.normalize_skill_name(name)
-        return self.skills_root() / name / "SKILL.md"
+        for skill in self.available_skills():
+            if skill["name"] == name:
+                return Path(skill["root"]) / "SKILL.md"
+        return self.paths.project_skills / name / "SKILL.md"
 
     def _skill_metadata_from_content(self, content):
         text = str(content)
@@ -401,37 +411,36 @@ class CodeMate:
         return metadata
 
     def available_skills(self):
-        root = self.skills_root()
-        if not root.is_dir():
-            return []
-        skills = []
-        for item in sorted(root.iterdir(), key=lambda path: path.name.lower()):
-            if not item.is_dir():
+        discovered = {}
+        # 用户级技能先加载，项目级同名技能覆盖用户级技能。
+        for scope, root in (("user", self.paths.user_skills), ("project", self.paths.project_skills)):
+            if not root.is_dir():
                 continue
-            try:
-                name = self.normalize_skill_name(item.name)
-            except ValueError:
-                continue
-            skill_file = item / "SKILL.md"
-            if not skill_file.is_file():
-                continue
-            content = skill_file.read_text(encoding="utf-8", errors="replace")
-            metadata = self._skill_metadata_from_content(content)
-            frontmatter_name = metadata.get("name", "")
-            if frontmatter_name != name:
-                continue
-            description = metadata.get("description", "")
-            if not description:
-                continue
-            skills.append(
-                {
+            for item in sorted(root.iterdir(), key=lambda path: path.name.lower()):
+                if not item.is_dir():
+                    continue
+                try:
+                    name = self.normalize_skill_name(item.name)
+                except ValueError:
+                    continue
+                skill_file = item / "SKILL.md"
+                if not skill_file.is_file():
+                    continue
+                content = skill_file.read_text(encoding="utf-8", errors="replace")
+                metadata = self._skill_metadata_from_content(content)
+                frontmatter_name = metadata.get("name", "")
+                if frontmatter_name != name:
+                    continue
+                description = metadata.get("description", "")
+                if not description:
+                    continue
+                discovered[name] = {
                     "name": name,
                     "description": description,
-                    "root": item.relative_to(self.root).as_posix(),
-                    "source": skill_file.relative_to(self.root).as_posix(),
+                    "root": str(item.resolve(strict=False)),
+                    "scope": scope,
                 }
-            )
-        return skills
+        return [discovered[name] for name in sorted(discovered)]
 
     def available_skills_text(self):
         lines = ["Available skills:"]
@@ -453,7 +462,26 @@ class CodeMate:
         active_skills = self.session.setdefault("active_skills", [])
         if len(active_skills) >= MAX_ACTIVE_SKILLS:
             raise ValueError(f"at most {MAX_ACTIVE_SKILLS} skills may be active")
-        skill_file = self.skill_file(name)
+        available = {skill["name"]: skill for skill in self.available_skills()}
+        skill_info = available.get(name)
+        if skill_info is None:
+            # 如果 SKILL.md 存在但 frontmatter 不合法，仍然读取并给出准确错误，
+            # 而不是在 available_skills 阶段被过滤后只报告 skill not found。
+            raw_candidates = [
+                ("project", self.paths.project_skills / name / "SKILL.md"),
+                ("user", self.paths.user_skills / name / "SKILL.md"),
+            ]
+            for scope, candidate in raw_candidates:
+                if candidate.is_file():
+                    skill_info = {
+                        "name": name,
+                        "root": str(candidate.parent.resolve(strict=False)),
+                        "scope": scope,
+                    }
+                    break
+        if skill_info is None:
+            raise ValueError(f"skill not found: {name}")
+        skill_file = Path(skill_info["root"]) / "SKILL.md"
         if not skill_file.is_file():
             raise ValueError(f"skill not found: {name}")
         content = skill_file.read_text(encoding="utf-8", errors="replace")
@@ -461,11 +489,10 @@ class CodeMate:
         frontmatter_name = metadata.get("name", "")
         if frontmatter_name != name:
             raise ValueError(f"skill frontmatter name must match directory name: {name}")
-        root = skill_file.parent.relative_to(self.root).as_posix()
         skill = {
             "name": name,
-            "root": root,
-            "source": skill_file.relative_to(self.root).as_posix(),
+            "root": skill_info["root"],
+            "scope": skill_info.get("scope", ""),
             "content": content,
             "loaded_at": now(),
         }
@@ -532,13 +559,14 @@ class CodeMate:
     def runtime_context_text(self):
         local_now = self.local_now()
         current_date = local_now.date().isoformat()
-        daily_log = memorylib.daily_log_path(self.root, date=current_date).relative_to(self.root).as_posix()
+        daily_log = memorylib.daily_log_path(self.root, date=current_date)
         return textwrap.dedent(
             f"""\
             Runtime context:
             - current_local_datetime: {local_now.isoformat(timespec="seconds")}
             - current_local_date: {current_date}
             - timezone: {self.timezone_name}
+            - memory_root: {memorylib.memory_root(self.root)}
             - today_daily_log_path: {daily_log}
             """
         ).strip()
@@ -559,7 +587,7 @@ class CodeMate:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(entry + "\n")
         return {
-            "path": path.relative_to(self.root).as_posix(),
+            "path": str(path),
             "entry": entry,
         }
 

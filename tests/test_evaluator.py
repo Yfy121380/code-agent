@@ -89,7 +89,8 @@ def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp
     assert run_dir.exists()
     assert not row["fixture_copy_relpath"].startswith("/")
     assert not row["run_dir_relpath"].startswith("/")
-    assert "/.codemate/sessions/" in row["run_dir_relpath"]
+    assert "/.codemate/projects/" in row["run_dir_relpath"]
+    assert "/sessions/" in row["run_dir_relpath"]
     assert "/runs/" in row["run_dir_relpath"]
     assert row["initial_history_empty"] is True
     assert row["initial_memory_empty"] is True

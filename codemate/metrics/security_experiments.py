@@ -5,7 +5,8 @@ from .provider_experiments import _build_real_agent
 
 def _security_agent(workspace_root, approval_policy="auto", read_only=False):
     workspace = WorkspaceContext.build(workspace_root)
-    store = SessionStore(workspace_root / ".codemate" / "sessions")
+    paths = ensure_codemate_layout(workspace_root)
+    store = SessionStore(paths.sessions_root)
     return CodeMate(
         model_client=FakeModelClient([]),
         workspace=workspace,

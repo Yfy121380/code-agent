@@ -1,4 +1,7 @@
-"""Project-local configuration helpers."""
+# 环境变量配置加载。
+# 本文件负责读取项目 `.env`，并提供模型 provider 配置读取的轻量封装。
+# 这里只处理进程环境变量，不负责 codemate 的 settings.json、
+# 本地状态目录或权限规则。
 
 import os
 import re

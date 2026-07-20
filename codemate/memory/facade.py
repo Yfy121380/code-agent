@@ -1,6 +1,6 @@
 # 记忆门面：LayeredMemory 向 runtime 暴露统一 API。
 # 工作记忆、文件摘要和过程笔记仍然保存在 session 中。
-# 长期记忆改为 `.codemate/memory` 下的三类文件，由 dedicated 模块管理。
+# 长期记忆按项目隔离存放在用户级 codemate 状态目录，由 dedicated 模块管理。
 
 from pathlib import Path
 
