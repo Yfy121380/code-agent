@@ -5,7 +5,13 @@ runtime 通过这些方法汇报模型请求、工具调用、审批和最终回
 TerminalUI 再使用 rich 与 prompt_toolkit 把信息渲染成清晰的终端输出。
 """
 
-from prompt_toolkit import prompt
+from prompt_toolkit.application import Application
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -41,6 +47,56 @@ class TerminalUI(NullUI):
 
     def __init__(self, console=None):
         self.console = console or Console()
+
+    def approval_menu(self, choices):
+        # 审批菜单使用 prompt_toolkit 接管按键：
+        # 上下键选择，Enter 确认，Ctrl+C 按拒绝处理。
+        selected = 0
+        bindings = KeyBindings()
+
+        def menu_text():
+            fragments = [("class:hint", "Use ↑/↓ to select, Enter to confirm.\n")]
+            for index, (_label, _decision) in enumerate(choices):
+                prefix = "> " if index == selected else "  "
+                style = "class:selected" if index == selected else ""
+                fragments.append((style, f"{prefix}{_label}\n"))
+            return FormattedText(fragments)
+
+        control = FormattedTextControl(menu_text)
+
+        @bindings.add("up")
+        def _(event):
+            nonlocal selected
+            selected = (selected - 1) % len(choices)
+            event.app.invalidate()
+
+        @bindings.add("down")
+        def _(event):
+            nonlocal selected
+            selected = (selected + 1) % len(choices)
+            event.app.invalidate()
+
+        @bindings.add("enter")
+        def _(event):
+            event.app.exit(result=choices[selected][1])
+
+        @bindings.add("c-c")
+        def _(event):
+            event.app.exit(result={"allowed": False})
+
+        app = Application(
+            layout=Layout(Window(content=control, always_hide_cursor=True)),
+            key_bindings=bindings,
+            style=Style.from_dict(
+                {
+                    "hint": "fg:#64748b",
+                    "selected": "fg:#e5e7eb bg:#334155",
+                }
+            ),
+            full_screen=False,
+            erase_when_done=True,
+        )
+        return app.run()
 
     def model_start(self):
         self.console.print("[dim]Thinking...[/dim]")
@@ -79,12 +135,24 @@ class TerminalUI(NullUI):
         if metadata.get("outside_workspace"):
             summary += "\n\nWarning: target path is outside the current workspace."
         self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=title, border_style="yellow"))
+        access = str(metadata.get("approval_access", "") or "").strip()
+        allow_dir = str(metadata.get("suggested_allow_dir", "") or "").strip()
+        choices = [
+            ("Allow once", {"allowed": True}),
+        ]
+        if access in {"read", "write"} and allow_dir:
+            choices.append(
+                (
+                    f"Allow {access} for {allow_dir} this session",
+                    {"allowed": True, "remember": {"access": access, "path": allow_dir}},
+                )
+            )
+        choices.append(("Deny", {"allowed": False}))
         try:
-            answer = prompt("Approve? [y/N] ")
+            return self.approval_menu(choices)
         except (EOFError, KeyboardInterrupt):
             self.console.print()
-            return False
-        return answer.strip().lower() in {"y", "yes"}
+            return {"allowed": False}
 
     def final_answer(self, text):
         text = str(text or "").strip()

@@ -17,7 +17,7 @@ SLASH_COMMANDS = [
     ("/approval", "/approval", "Show current approval policy."),
     ("/approval ask", "/approval ask", "Ask before risky tool calls."),
     ("/approval auto", "/approval auto", "Auto-approve ordinary risky tool calls."),
-    ("/approval never", "/approval never", "Deny calls that require approval."),
+    ("/approval read_only", "/approval read_only", "Allow read-only actions and reject writes."),
     ("/approval full", "/approval full", "Auto-approve all approval prompts in this process."),
     ("/provider", "/provider", "Show current model provider."),
     ("/provider openai", "/provider openai", "Use OpenAI-compatible provider."),
@@ -43,7 +43,7 @@ HELP_DETAILS = textwrap.dedent(
     Commands:
     /help                Show this help message.
     /approval            Show current approval policy.
-    /approval <mode>     Set approval policy: ask, auto, never, or full.
+    /approval <mode>     Set approval policy: ask, auto, read_only, or full.
     /provider            Show current provider and available providers.
     /provider <name>     Set provider: openai, anthropic, or deepseek.
     /model               Show current model and available models.

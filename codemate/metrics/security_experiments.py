@@ -72,7 +72,7 @@ def _scenario_grep_outside_home(workspace_root):
 
 
 def _scenario_approval_denied(workspace_root):
-    agent = _security_agent(workspace_root, approval_policy="never")
+    agent = _security_agent(workspace_root, approval_policy="read_only")
     agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
     return dict(agent._last_tool_result_metadata)
 

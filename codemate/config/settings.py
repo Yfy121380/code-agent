@@ -131,27 +131,28 @@ def _compact_paths(paths):
         if any(path == parent or path.is_relative_to(parent) for parent in result):
             continue
         result.append(path)
-    print(result)
     return tuple(result)
 
 
-def build_permission_rules(paths: CodematePaths, user_settings, project_settings):
-    # 默认规则、用户 settings、项目 settings 在启动时聚合成一份规则。
+def build_permission_rules(paths: CodematePaths, user_settings, project_settings, temporary_settings=None):
+    # 默认规则、用户 settings、项目 settings 和本进程临时 allow 在这里聚合。
     # write allow 自动带来 read allow；read deny 自动带来 write deny。
     workspace = paths.workspace_root
     read_allow_raw = [
         paths.workspace_root,
         paths.project_config_root,
-        paths.project_state_root
+        paths.project_state_root,
     ]
     write_allow_raw = [
         paths.project_config_root,
-        paths.project_state_root
+        paths.project_state_root,
     ]
     read_deny_raw = [*DEFAULT_READ_DENY_PREFIXES, *DEFAULT_READ_DENY_EXACT]
     write_deny_raw = [*DEFAULT_WRITE_DENY_EXACT]
 
-    for settings in (user_settings, project_settings):
+    for settings in (user_settings, project_settings, temporary_settings):
+        if not settings:
+            continue
         read_allow_raw.extend(_permission_list(settings, "read", "allow"))
         read_deny_raw.extend(_permission_list(settings, "read", "deny"))
         write_allow_raw.extend(_permission_list(settings, "write", "allow"))

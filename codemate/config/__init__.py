@@ -5,12 +5,13 @@
 
 from .env import find_project_env, load_project_env, provider_env
 from .paths import CodematePaths, codemate_home, codemate_paths, ensure_codemate_layout, project_id_for_root
-from .settings import CodemateSettings, PermissionRules, default_settings, load_codemate_settings
+from .settings import CodemateSettings, PermissionRules, build_permission_rules, default_settings, load_codemate_settings
 
 __all__ = [
     "CodematePaths",
     "CodemateSettings",
     "PermissionRules",
+    "build_permission_rules",
     "codemate_home",
     "codemate_paths",
     "default_settings",

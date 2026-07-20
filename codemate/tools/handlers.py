@@ -360,7 +360,7 @@ def tool_delegate(agent, args):
         workspace=agent.workspace,
         session_store=agent.session_store,
         run_store=agent.run_store,
-        approval_policy="never",
+        approval_policy="read_only",
         max_steps=int(args.get("max_steps", 3)),
         max_new_tokens=agent.max_new_tokens,
         depth=agent.depth + 1,

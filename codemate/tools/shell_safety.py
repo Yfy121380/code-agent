@@ -118,7 +118,7 @@ def _subject_kind(subject):
         return "risky", "risky_command"
     if subject in SHELL_DANGEROUS_SUBJECTS:
         return "dangerous", "dangerous_command"
-    return "risky", "unknown_command"
+    return "unknown", "unknown_command"
 
 
 def _strip_redirection_tokens(tokens):

@@ -41,8 +41,8 @@ def test_web_search_auto_policy_allows_without_approval(tmp_path):
     assert agent._last_tool_result_metadata["risk_level"] == "low"
 
 
-def test_web_search_never_policy_allows_without_approval(tmp_path):
-    agent = build_agent(tmp_path, approval_policy="never")
+def test_web_search_read_only_policy_allows_without_approval(tmp_path):
+    agent = build_agent(tmp_path, approval_policy="read_only")
 
     with patch("codemate.tools.web._tavily_post", return_value={"results": []}) as fake_post:
         result = agent.run_tool("web_search", {"query": "FastAPI latest release"})

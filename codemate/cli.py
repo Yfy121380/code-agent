@@ -38,7 +38,7 @@ DEFAULT_SECRET_ENV_NAMES = (
     "GH_PAT",
 )
 
-APPROVAL_POLICIES = ("ask", "auto", "never", "full")
+APPROVAL_POLICIES = ("ask", "auto", "read_only", "full")
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
@@ -301,12 +301,12 @@ def main(argv=None):
             continue
         if user_input == "/approval":
             print(f"approval: {agent.approval_policy}")
-            print("modes: ask, auto, never, full")
+            print("modes: ask, auto, read_only, full")
             continue
         if user_input.startswith("/approval "):
             mode = user_input[len("/approval "):].strip()
             if mode not in APPROVAL_POLICIES:
-                print("usage: /approval [ask|auto|never|full]")
+                print("usage: /approval [ask|auto|read_only|full]")
                 continue
             old = agent.approval_policy
             agent.approval_policy = mode

@@ -258,6 +258,8 @@ def validate_tool(agent, name, args):
         path_decisions = [resolve_tool_path(agent, path, access=access) for path in analysis.paths if str(path).strip() != "-"]
         if analysis.kind == "dangerous":
             return gate_for_access(agent, "dangerous", path_decisions)
+        if analysis.kind == "unknown":
+            return gate_for_access(agent, "unknown", path_decisions)
         return gate_for_access(agent, access, path_decisions)
 
     if name == "write_file":

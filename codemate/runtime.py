@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from . import memory as memorylib
 from .memory import dream as dreamlib
 from .memory import long_term as longterm
-from .config import ensure_codemate_layout, load_codemate_settings
+from .config import build_permission_rules, ensure_codemate_layout, load_codemate_settings
 from .context import ContextManager
 from .storage import RunStore, SessionStore, TaskState
 from .ui import NullUI
@@ -83,6 +83,14 @@ class CodeMate:
         # session、memory、skills、settings 都从这里获得统一绝对路径。
         self.paths = ensure_codemate_layout(self.root)
         self.settings = load_codemate_settings(self.paths)
+        # 本进程内临时加入的权限规则，不写回 settings.json。
+        # 用户在审批时选择“本会话允许某目录”后，会更新这里并重建聚合规则。
+        self.temporary_permission_settings = {
+            "permissions": {
+                "read": {"allow": [], "deny": []},
+                "write": {"allow": [], "deny": []},
+            }
+        }
         # 聚合后的读写权限规则，后续 path policy 和沙箱会共用这一份规则。
         self.permission_rules = self.settings.permission_rules
         self.session_store = session_store
@@ -129,7 +137,6 @@ class CodeMate:
         self.session["memory"] = self.memory.to_dict()
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
-        print([name for name, tool in self.tools.items()])
         # 可复用的前缀提示词，包括 agent的身份、可用的工具、git仓库状态等等
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
@@ -1183,10 +1190,14 @@ class CodeMate:
     def tool_metadata_read_only(self, name, tool):
         if str(name).startswith("mcp__"):
             return False
+        if name in toolkit.WEB_TOOL_NAMES:
+            return True
+        if name in {"list_files", "read_file", "grep"}:
+            return True
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
             return bool(analysis is not None and getattr(analysis, "kind", "") == "read")
-        return not tool["risky"]
+        return False
 
     def tool_runtime_metadata(self, name, tool):
         metadata = {
@@ -1375,6 +1386,12 @@ class CodeMate:
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
         gate = toolkit.validate_tool(self, name, args)
+        if self.approval_policy == "read_only" and not self.tool_metadata_read_only(name, self.tools.get(name, {"risky": True})):
+            raise toolkit.ToolPolicyError(
+                "tool is blocked in read-only approval mode",
+                code="read_only_block",
+                security_event_type="read_only_block",
+            )
         if name in {"write_file", "patch_file"}:
             self.require_fresh_read_before_edit(name, args)
         if name == "delegate":
@@ -1432,7 +1449,34 @@ class CodeMate:
         gate = getattr(self, "_last_tool_gate", None)
         if gate is not None and hasattr(gate, "to_metadata"):
             metadata.update(gate.to_metadata())
-        return bool(self.ui.approval_request(name, args, metadata=metadata))
+        decision = self.ui.approval_request(name, args, metadata=metadata)
+        if isinstance(decision, dict):
+            allowed = bool(decision.get("allowed"))
+            remember = decision.get("remember") or {}
+            if allowed and remember:
+                self.add_temporary_permission(remember.get("access"), remember.get("path"))
+            return allowed
+        return bool(decision)
+
+    def add_temporary_permission(self, access, directory):
+        # 审批中的“本会话允许”只影响当前进程。
+        # 规则仍走 build_permission_rules 聚合，保证默认/settings/临时规则语义一致。
+        access = str(access or "").strip()
+        if access not in {"read", "write"}:
+            raise ValueError("temporary permission access must be read or write")
+        path = toolkit.resolve_tool_path(self, directory, access=access).path
+        if not path.exists() or not path.is_dir():
+            raise ValueError("temporary permission path must be a directory")
+        values = self.temporary_permission_settings["permissions"][access]["allow"]
+        text = str(path)
+        if text not in values:
+            values.append(text)
+        self.permission_rules = build_permission_rules(
+            self.paths,
+            self.settings.user,
+            self.settings.project,
+            self.temporary_permission_settings,
+        )
 
     def reset(self):
         self.session["history"] = []

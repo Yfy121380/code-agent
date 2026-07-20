@@ -1,42 +1,13 @@
-# 路径安全策略模块：统一处理文件工具和 shell 命令中的路径边界。
+# 路径安全策略模块：统一处理文件工具和 shell 命令的访问门禁。
 #
-# 本模块只负责三件事：把模型给出的路径解析成真实路径、识别路径属于
-# .codemate 内部目录 / 当前工作区 / home 内的工作区外路径，以及根据当前
-# approval policy 产出 allow/ask 或直接拒绝。工具参数本身是否合法仍由
-# validators.py 负责，工具的实际读写仍由 handlers.py 负责。
+# 本模块把模型传入的路径解析为真实绝对路径，并用聚合后的 read/write
+# allow/deny 规则判断工具调用是直接放行、需要询问，还是应当拒绝。
+# 这里不执行工具动作，只负责在执行前给 runtime 一个清晰的门禁结果。
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..memory.long_term import is_memory_path
-
-
-READ_WRITE_DENY_PREFIXES = (
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".azure",
-    ".gcloud",
-    ".kube",
-    ".docker",
-    ".config/gh",
-    ".password-store",
-)
-READ_WRITE_DENY_EXACT = (
-    ".netrc",
-    ".npmrc",
-    ".pypirc",
-    ".git-credentials",
-)
-WRITE_DENY_EXACT = (
-    ".bashrc",
-    ".zshrc",
-    ".profile",
-    ".bash_profile",
-    ".zprofile",
-    ".zshenv",
-    ".gitconfig",
-)
 
 
 @dataclass(frozen=True)
@@ -56,6 +27,8 @@ class ToolGate:
     reason: str = ""
     paths: tuple[str, ...] = field(default_factory=tuple)
     outside_workspace: bool = False
+    access: str = ""
+    suggested_allow_dir: str = ""
 
     def to_metadata(self):
         return {
@@ -63,6 +36,8 @@ class ToolGate:
             "approval_reason": self.reason,
             "approval_paths": list(self.paths),
             "outside_workspace": self.outside_workspace,
+            "approval_access": self.access,
+            "suggested_allow_dir": self.suggested_allow_dir,
         }
 
 
@@ -81,31 +56,68 @@ def _is_relative_to(path, base):
         return False
 
 
-def _home_child(home, relative):
-    return (home / relative).resolve()
+def _matches_rule(path, rules):
+    return any(path == rule or _is_relative_to(path, rule) for rule in rules)
 
 
-def _sensitive_path_error(home, resolved, access, raw_path):
-    for relative in READ_WRITE_DENY_PREFIXES:
-        sensitive = _home_child(home, relative)
-        if resolved == sensitive or _is_relative_to(resolved, sensitive):
-            return f"path is sensitive and cannot be accessed: {raw_path}"
-    for relative in READ_WRITE_DENY_EXACT:
-        if resolved == _home_child(home, relative):
-            return f"path is sensitive and cannot be accessed: {raw_path}"
-    if access == "write":
-        for relative in WRITE_DENY_EXACT:
-            if resolved == _home_child(home, relative):
-                return f"write to sensitive config is blocked: {raw_path}"
-    return ""
+def _rules(agent):
+    rules = getattr(agent, "permission_rules", None)
+    if rules is None:
+        raise ToolPolicyError("permission rules are not loaded", code="missing_permission_rules")
+    return rules
+
+
+def _rule_hit(agent, access, decision):
+    rules = _rules(agent)
+    if access == "read":
+        if _matches_rule(decision.path, rules.read_deny):
+            return "deny"
+        if _matches_rule(decision.path, rules.read_allow):
+            return "allow"
+        return "ask"
+    if _matches_rule(decision.path, rules.write_deny):
+        return "deny"
+    if _matches_rule(decision.path, rules.write_allow):
+        return "allow"
+    return "ask"
+
+
+def _suggest_allow_dir(decisions):
+    # 临时 allow 以目录为粒度。
+    # 文件路径使用父目录，目录路径使用自身；多个不同目录时不提供快捷记住选项。
+    dirs = []
+    for decision in decisions:
+        path = decision.path
+        directory = path if path.exists() and path.is_dir() else path.parent
+        dirs.append(directory)
+    unique = {str(item) for item in dirs}
+    return unique.pop() if len(unique) == 1 else ""
+
+
+def _gate(action, reason, decisions, access=""):
+    decisions = tuple(decisions or ())
+    paths = tuple(str(item.path) for item in decisions)
+    outside = any(item.outside_workspace for item in decisions)
+    suggested = _suggest_allow_dir(decisions) if action == "ask" and access in {"read", "write"} else ""
+    return ToolGate(action, reason, paths, outside, access, suggested)
+
+
+def _deny_for_access(access, decision):
+    if access == "read":
+        message = f"read denied by permission rules: {decision.raw}"
+        code = "read_permission_denied"
+    else:
+        message = f"write denied by permission rules: {decision.raw}"
+        code = "write_permission_denied"
+    raise ToolPolicyError(message, code=code, security_event_type="permission_denied")
 
 
 def resolve_tool_path(agent, raw_path, access="read"):
     """解析工具路径并做不可绕过的硬边界校验。
 
-    这里会解析 `../` 和符号链接，最终用真实路径判断边界。当前工作区始终
-    是可信根；工作区外路径必须位于当前用户 home 下，且不能命中敏感目录。
-    是否需要用户审批不在这里决定，而是交给 `gate_for_access()`。
+    这里会解析 `../` 和符号链接，最终用真实路径判断边界。路径必须位于
+    当前工作区或当前用户 home 下；是否命中 allow/deny 规则、是否需要用户
+    审批不在这里决定，而是交给 `gate_for_access()`。
     """
     root = Path(agent.root).resolve()
     raw_text = str(raw_path)
@@ -118,8 +130,7 @@ def resolve_tool_path(agent, raw_path, access="read"):
     if paths is not None:
         internal_roots = [
             paths.project_config_root.resolve(),
-            paths.sessions_root.resolve(),
-            paths.memory_root.resolve(),
+            paths.project_state_root.resolve(),
         ]
 
     in_workspace = _is_relative_to(resolved, root)
@@ -129,15 +140,6 @@ def resolve_tool_path(agent, raw_path, access="read"):
             code="path_outside_home",
             security_event_type="path_outside_home",
         )
-
-    if _is_relative_to(resolved, home):
-        sensitive_error = _sensitive_path_error(home, resolved, str(access), raw_path)
-        if sensitive_error:
-            raise ToolPolicyError(
-                sensitive_error,
-                code="sensitive_path",
-                security_event_type="sensitive_path",
-            )
 
     if agent.memory_scope_only and not is_memory_path(root, resolved):
         raise ToolPolicyError(
@@ -156,70 +158,55 @@ def resolve_tool_path(agent, raw_path, access="read"):
 
 
 def gate_for_access(agent, access, path_decisions=()):
-    """把路径分类、工具访问类型和 approval policy 合并成执行门禁。
+    """把路径规则、工具访问类型和 approval policy 合并成执行门禁。
 
     返回值只可能是 allow 或 ask；deny 会在这里直接抛出 ToolPolicyError。
     这样 runtime 只需要在 ask 时进入人工审批，allow 可以直接执行。
     """
     decisions = tuple(path_decisions or ())
-    paths = tuple(str(item.path) for item in decisions)
-    outside = any(item.outside_workspace for item in decisions)
-    all_internal = bool(decisions) and all(item.location == "internal" for item in decisions)
     policy = str(agent.approval_policy)
 
     if access == "read":
-        if not outside:
-            return ToolGate("allow", "read_in_workspace", paths, False)
-        if policy == "never":
-            raise ToolPolicyError(
-                "reading outside the current workspace requires approval",
-                code="outside_workspace_read_denied",
-                security_event_type="outside_workspace",
-            )
-        if policy in {"auto", "full"}:
-            return ToolGate("allow", "outside_workspace_read", paths, True)
-        return ToolGate("ask", "outside_workspace_read", paths, True)
+        hits = [_rule_hit(agent, "read", decision) for decision in decisions]
+        for decision, hit in zip(decisions, hits):
+            if hit == "deny":
+                _deny_for_access("read", decision)
+        if not decisions or all(hit == "allow" for hit in hits):
+            return _gate("allow", "read_allowed_by_rule", decisions, "read")
+        if policy in {"auto", "full", "read_only"}:
+            return _gate("allow", "read_allowed_by_policy", decisions, "read")
+        return _gate("ask", "read_requires_approval", decisions, "read")
 
-    if agent.read_only:
+    if agent.read_only or policy == "read_only":
         raise ToolPolicyError(
             "write operations are blocked in read-only mode",
             code="read_only_block",
             security_event_type="read_only_block",
         )
 
-    if access == "dangerous":
-        if policy == "never":
-            raise ToolPolicyError(
-                "dangerous shell command requires approval",
-                code="dangerous_shell_denied",
-                security_event_type="approval_denied",
-            )
-        if policy == "full":
-            return ToolGate("allow", "dangerous_shell_full", paths, outside)
-        return ToolGate("ask", "dangerous_shell", paths, outside)
-
     if access == "write":
-        if all_internal:
-            return ToolGate("allow", "internal_write", paths, outside)
-        if outside:
-            if policy == "never":
-                raise ToolPolicyError(
-                    "writing outside the current workspace requires approval",
-                    code="outside_workspace_write_denied",
-                    security_event_type="outside_workspace",
-                )
-            if policy == "full":
-                return ToolGate("allow", "outside_workspace_write_full", paths, True)
-            return ToolGate("ask", "outside_workspace_write", paths, True)
-        if policy == "never":
-            raise ToolPolicyError(
-                "write operation requires approval",
-                code="write_denied",
-                security_event_type="approval_denied",
-            )
-        if policy in {"auto", "full"}:
-            return ToolGate("allow", "workspace_write", paths, False)
-        return ToolGate("ask", "workspace_write", paths, False)
+        hits = [_rule_hit(agent, "write", decision) for decision in decisions]
+        for decision, hit in zip(decisions, hits):
+            if hit == "deny":
+                _deny_for_access("write", decision)
+        if decisions and all(hit == "allow" for hit in hits):
+            return _gate("allow", "write_allowed_by_rule", decisions, "write")
+        if policy == "full":
+            return _gate("allow", "write_allowed_by_full", decisions, "write")
+        if policy == "auto" and all(decision.location in {"workspace", "internal"} for decision in decisions):
+            return _gate("allow", "workspace_write_allowed_by_auto", decisions, "write")
+        return _gate("ask", "write_requires_approval", decisions, "write")
+
+    if access == "unknown":
+        # 未知 shell 命令可能读写文件、访问网络或启动子进程，full 才直接放行。
+        if policy == "full":
+            return _gate("allow", "unknown_shell_full", decisions, "write")
+        return _gate("ask", "unknown_shell", decisions, "write")
+
+    if access == "dangerous":
+        if policy == "full":
+            return _gate("allow", "dangerous_shell_full", decisions, "write")
+        return _gate("ask", "dangerous_shell", decisions, "write")
 
     raise ValueError(f"unknown access kind: {access}")
 
@@ -228,9 +215,9 @@ def gate_for_mcp(agent):
     """MCP 是外部动态工具，默认必须询问。
 
     即使当前 approval policy 是 auto，也不能把 MCP 当成内置低风险工具放行；
-    只有 full 明确表示全部自动通过。never 和 read_only 都直接拒绝。
+    只有 full 明确表示全部自动通过。read_only 直接拒绝。
     """
-    if agent.read_only:
+    if agent.read_only or str(agent.approval_policy) == "read_only":
         raise ToolPolicyError(
             "MCP tools are blocked in read-only mode",
             code="mcp_read_only_block",
@@ -239,12 +226,6 @@ def gate_for_mcp(agent):
     policy = str(agent.approval_policy)
     if policy == "full":
         return ToolGate("allow", "mcp_full")
-    if policy == "never":
-        raise ToolPolicyError(
-            "MCP tool requires approval",
-            code="mcp_approval_required",
-            security_event_type="approval_denied",
-        )
     return ToolGate("ask", "mcp_default_ask")
 
 

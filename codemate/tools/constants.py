@@ -13,7 +13,7 @@ WEB_EXTRACT_DEPTHS = {"basic", "advanced"}
 WEB_EXTRACT_FORMATS = {"markdown", "text"}
 WEB_RESEARCH_MODELS = {"mini", "pro", "auto"}
 WEB_RESEARCH_OUTPUT_LENGTHS = {"short", "standard", "long"}
-SHELL_KIND_ORDER = {"read": 0, "risky": 1, "dangerous": 2}
+SHELL_KIND_ORDER = {"read": 0, "risky": 1, "unknown": 2, "dangerous": 3}
 SHELL_GLOB_CHARS = ("*", "?", "[", "]")
 SHELL_READ_SUBJECTS = {
     "pwd",

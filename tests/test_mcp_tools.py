@@ -77,14 +77,14 @@ def test_mcp_tool_full_policy_runs_wrapper(tmp_path):
     assert agent._last_tool_result_metadata["mcp_server"] == "notes"
 
 
-def test_mcp_tool_never_policy_rejects_in_validation(tmp_path):
+def test_mcp_tool_read_only_policy_rejects_in_validation(tmp_path):
     with patch("codemate.tools.mcp.discover_mcp_tools", return_value=[fake_mcp_tool()]):
-        agent = build_agent(tmp_path, approval_policy="never")
+        agent = build_agent(tmp_path, approval_policy="read_only")
 
     result = agent.run_tool("mcp__notes__create_note", {"title": "demo"})
 
-    assert result == "error: MCP tool requires approval"
-    assert agent._last_tool_result_metadata["tool_error_code"] == "mcp_approval_required"
+    assert result == "error: MCP tools are blocked in read-only mode"
+    assert agent._last_tool_result_metadata["tool_error_code"] == "mcp_read_only_block"
 
 
 @dataclass

@@ -44,3 +44,19 @@ def test_permission_rules_compact_each_rule_class_independently(tmp_path):
     assert "/tmp/secret" in {str(path) for path in rules.read_deny}
     assert "/var" in {str(path) for path in rules.write_allow}
     assert "/var/blocked" in {str(path) for path in rules.write_deny}
+
+
+def test_permission_rules_include_temporary_settings(tmp_path):
+    paths = codemate_paths(tmp_path, home_root=tmp_path / "home")
+    temporary = {
+        "permissions": {
+            "read": {"allow": ["/tmp/session-read"], "deny": []},
+            "write": {"allow": ["/tmp/session-write"], "deny": []},
+        }
+    }
+
+    rules = build_permission_rules(paths, user_settings={}, project_settings={}, temporary_settings=temporary)
+
+    assert "/tmp/session-read" in {str(path) for path in rules.read_allow}
+    assert "/tmp/session-write" in {str(path) for path in rules.write_allow}
+    assert "/tmp/session-write" in {str(path) for path in rules.read_allow}

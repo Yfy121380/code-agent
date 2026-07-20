@@ -1,13 +1,47 @@
 import os
 import shlex
 import sys
+from io import StringIO
 from unittest.mock import patch
 
 from prompt_toolkit.document import Document
+from rich.console import Console
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli as mini_cli
 from codemate.storage import TaskState
+from codemate.ui import TerminalUI
+
+
+class RememberingApprovalUI:
+    def __init__(self):
+        self.calls = []
+
+    def approval_request(self, name, args, metadata=None):
+        metadata = dict(metadata or {})
+        self.calls.append({"name": name, "args": dict(args or {}), "metadata": metadata})
+        return {
+            "allowed": True,
+            "remember": {
+                "access": metadata["approval_access"],
+                "path": metadata["suggested_allow_dir"],
+            },
+        }
+
+    def tool_start(self, name, args, risk_level=""):
+        pass
+
+    def tool_result(self, name, args, result, metadata=None):
+        pass
+
+    def model_start(self):
+        pass
+
+    def model_end(self, kind="", metadata=None):
+        pass
+
+    def final_answer(self, text):
+        pass
 
 
 def build_workspace(tmp_path):
@@ -37,18 +71,30 @@ def write_skill(tmp_path, name="backend", description="Backend workflow", body="
     )
     return skill_dir
 
+
+def isolated_env(tmp_path, extra=None):
+    # 有些测试需要 clear=True 验证环境变量收集逻辑。
+    # 这里把测试隔离用 HOME/CODEMATE_HOME 补回去，避免状态写进真实 ~/.codemate。
+    values = {
+        "HOME": str(tmp_path.parent),
+        "CODEMATE_HOME": str(tmp_path.parent / f"{tmp_path.name}-home" / ".codemate"),
+    }
+    values.update(extra or {})
+    return values
+
 # 工作区外且 home 外路径拒绝
 def test_outside_workspace_and_home_read_is_rejected(tmp_path):
-    (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
+    outside = tmp_path.parent.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("read_file", {"path": "../outside.txt"})
+    result = agent.run_tool("read_file", {"path": f"../../{outside.name}"})
 
     assert "outside the current workspace and outside home" in result
 
 # 符号链接解析后指向 home 外路径时拒绝
 def test_symlink_to_outside_home_is_rejected(tmp_path):
-    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside = tmp_path.parent.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (tmp_path / "linked.txt").symlink_to(outside)
     agent = build_agent(tmp_path, [])
@@ -60,7 +106,7 @@ def test_symlink_to_outside_home_is_rejected(tmp_path):
 def test_grep_outside_workspace_and_home_is_rejected(tmp_path):
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("grep", {"pattern": "abc", "path": "../outside"})
+    result = agent.run_tool("grep", {"pattern": "abc", "path": "../../outside"})
 
     assert "outside the current workspace and outside home" in result
 
@@ -89,6 +135,57 @@ def test_outside_workspace_home_write_auto_policy_asks(tmp_path):
     assert not outside.exists()
     assert agent._last_tool_result_metadata["outside_workspace"] is True
     assert agent._last_tool_result_metadata["approval_gate"] == "ask"
+
+
+def test_approval_can_add_temporary_write_allow_for_session(tmp_path):
+    ui = RememberingApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=ui)
+
+    first = agent.run_tool("write_file", {"path": "first.txt", "content": "one\n"})
+    second = agent.run_tool("write_file", {"path": "second.txt", "content": "two\n"})
+
+    assert first == "wrote first.txt (4 chars)"
+    assert second == "wrote second.txt (4 chars)"
+    assert len(ui.calls) == 1
+    assert ui.calls[0]["metadata"]["approval_access"] == "write"
+    assert ui.calls[0]["metadata"]["suggested_allow_dir"] == str(tmp_path.resolve())
+
+
+def test_approval_can_add_temporary_read_allow_for_session(tmp_path):
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside-read-dir"
+    outside_dir.mkdir()
+    (outside_dir / "one.txt").write_text("one\n", encoding="utf-8")
+    (outside_dir / "two.txt").write_text("two\n", encoding="utf-8")
+    ui = RememberingApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=ui)
+
+    with patch("codemate.tools.path_policy.Path.home", return_value=tmp_path.parent):
+        first = agent.run_tool("read_file", {"path": f"../{outside_dir.name}/one.txt", "start": 1, "end": 1})
+        second = agent.run_tool("read_file", {"path": f"../{outside_dir.name}/two.txt", "start": 1, "end": 1})
+
+    assert "one" in first
+    assert "two" in second
+    assert len(ui.calls) == 1
+    assert ui.calls[0]["metadata"]["approval_access"] == "read"
+    assert ui.calls[0]["metadata"]["suggested_allow_dir"] == str(outside_dir.resolve())
+
+
+def test_permission_deny_overrides_temporary_allow(tmp_path):
+    secret_dir = tmp_path / "secret"
+    secret_dir.mkdir()
+    (secret_dir / "note.txt").write_text("secret\n", encoding="utf-8")
+    (tmp_path / ".codemate").mkdir(exist_ok=True)
+    (tmp_path / ".codemate" / "settings.json").write_text(
+        '{"mcp":{"servers":{}},"permissions":{"read":{"allow":[],"deny":["secret"]},"write":{"allow":[],"deny":[]}}}\n',
+        encoding="utf-8",
+    )
+    agent = build_agent(tmp_path, [], approval_policy="full")
+    agent.add_temporary_permission("read", secret_dir)
+
+    result = agent.run_tool("read_file", {"path": "secret/note.txt", "start": 1, "end": 1})
+
+    assert "read denied by permission rules" in result
+    assert agent._last_tool_result_metadata["tool_error_code"] == "read_permission_denied"
 
 
 def test_search_tool_name_is_not_registered(tmp_path):
@@ -338,7 +435,7 @@ def test_write_file_rejects_unknown_mode(tmp_path):
 
 
 def test_todo_write_updates_session_without_workspace_change(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
 
     result = agent.run_tool(
         "todo_write",
@@ -373,7 +470,7 @@ def test_todo_write_updates_session_without_workspace_change(tmp_path):
         },
         {"phase": "Add tests", "status": "pending", "tasks": []},
     ]
-    assert agent._last_tool_result_metadata["read_only"] is True
+    assert agent._last_tool_result_metadata["read_only"] is False
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
 
 
@@ -418,6 +515,16 @@ def test_todo_write_rejects_empty_content(tmp_path):
     result = agent.run_tool("todo_write", {"todos": [{"phase": "  ", "status": "pending", "tasks": []}]})
 
     assert "phase must not be empty" in result
+    assert agent.session["todos"] == []
+
+
+def test_read_only_policy_blocks_todo_write(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+
+    result = agent.run_tool("todo_write", {"todos": [{"phase": "Inspect files", "status": "pending", "tasks": []}]})
+
+    assert result == "error: tool is blocked in read-only approval mode"
+    assert agent._last_tool_result_metadata["tool_error_code"] == "read_only_block"
     assert agent.session["todos"] == []
 
 
@@ -547,9 +654,9 @@ def test_invalid_argument_process_note_clears_after_same_tool_success(tmp_path):
     assert agent.session["memory"]["process_notes"] == []
 
 
-def test_read_shell_command_allows_valid_workspace_paths_even_with_never_policy(tmp_path):
+def test_read_shell_command_allows_valid_workspace_paths_in_read_only_policy(tmp_path):
     (tmp_path / "notes.txt").write_text("safe read\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
 
     result = agent.run_tool("run_shell", {"command": "cat notes.txt", "timeout": 20})
 
@@ -562,7 +669,7 @@ def test_read_shell_command_allows_valid_workspace_paths_even_with_never_policy(
 def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
     (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
 
     result = agent.run_tool("run_shell", {"command": "cat *.txt", "timeout": 20})
 
@@ -573,11 +680,11 @@ def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
 
 
 def test_shell_read_outside_workspace_and_home_is_rejected(tmp_path):
-    outside = tmp_path.parent / f"{tmp_path.name}-outside-shell.txt"
+    outside = tmp_path.parent.parent / f"{tmp_path.name}-outside-shell.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
-    result = agent.run_tool("run_shell", {"command": f"cat ../{outside.name}", "timeout": 20})
+    result = agent.run_tool("run_shell", {"command": f"cat ../../{outside.name}", "timeout": 20})
 
     assert "outside the current workspace and outside home" in result
     assert agent._last_tool_result_metadata["shell_kind"] == "read"
@@ -656,13 +763,13 @@ def test_dangerous_shell_command_rejects_root_targets_without_approval(tmp_path)
     assert "dangerous shell target is blocked: /" in result
 
 
-# 危险工具审批拒绝
-def test_risky_tool_deny_behavior(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="never")
+# read_only 模式拒绝非读取工具
+def test_read_only_policy_blocks_write_like_shell(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
 
     result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
-    assert result == "error: write operation requires approval"
+    assert result == "error: write operations are blocked in read-only mode"
 
 """
 secret来源
@@ -681,7 +788,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    with patch.dict(os.environ, {"GITHUB_PAT": "ghp-1", "GH_PAT": "ghp-2"}, clear=True), patch(
+    with patch.dict(os.environ, isolated_env(tmp_path, {"GITHUB_PAT": "ghp-1", "GH_PAT": "ghp-2"}), clear=True), patch(
         "codemate.cli.OllamaModelClient",
         DummyModelClient,
     ):
@@ -711,7 +818,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    with patch.dict(os.environ, {"GH_PAT": "ghp-default-1"}, clear=True), patch(
+    with patch.dict(os.environ, isolated_env(tmp_path, {"GH_PAT": "ghp-default-1"}), clear=True), patch(
         "codemate.cli.OllamaModelClient",
         DummyModelClient,
     ):
@@ -731,7 +838,7 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     (tmp_path / ".env").write_text("CODEMATE_DEEPSEEK_API_KEY=sk-project-secret\n", encoding="utf-8")
-    with patch.dict(os.environ, {}, clear=True), patch("codemate.cli.AnthropicCompatibleModelClient", DummyModelClient):
+    with patch.dict(os.environ, isolated_env(tmp_path), clear=True), patch("codemate.cli.AnthropicCompatibleModelClient", DummyModelClient):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
         agent = mini_cli.build_agent(args)
         assert "CODEMATE_DEEPSEEK_API_KEY" in agent.secret_env_summary()["secret_env_names"]
@@ -749,10 +856,13 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(
         os.environ,
-        {
-            "MCA_CUSTOM_SECRET": "custom-secret-value",
-            "MINI_CODING_AGENT_SECRET_ENV_NAMES": "MCA_CUSTOM_SECRET",
-        },
+        isolated_env(
+            tmp_path,
+            {
+                "MCA_CUSTOM_SECRET": "custom-secret-value",
+                "MINI_CODING_AGENT_SECRET_ENV_NAMES": "MCA_CUSTOM_SECRET",
+            },
+        ),
         clear=True,
     ), patch("codemate.cli.OllamaModelClient", DummyModelClient):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
@@ -767,8 +877,10 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     remember_items = list(completer.get_completions(Document("/rem"), None))
     provider_items = list(completer.get_completions(Document("/provider "), None))
     model_items = list(completer.get_completions(Document("/model "), None))
+    approval_items = list(completer.get_completions(Document("/approval "), None))
 
     assert any(str(item.display_text) == "/help" and str(item.display_meta_text) for item in root_items)
+    assert any(str(item.display_text) == "/approval read_only" for item in approval_items)
     assert any(str(item.display_text) == "/provider openai" for item in provider_items)
     assert any(str(item.display_text) == "/provider anthropic" for item in provider_items)
     assert any(str(item.display_text) == "/model gpt-5.5" for item in model_items)
@@ -776,6 +888,39 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     remember = next(item for item in remember_items if str(item.display_text) == "/remember <text>")
     assert remember.text == "/remember "
     assert str(remember.display_meta_text) == "Append a memory entry to today's daily log."
+
+
+def test_terminal_approval_can_return_session_allow_choice():
+    ui = TerminalUI(console=Console(file=StringIO(), force_terminal=False))
+    captured_choices = []
+
+    def fake_menu(choices):
+        captured_choices.extend(choices)
+        return choices[1][1]
+
+    with patch.object(ui, "approval_menu", fake_menu):
+        decision = ui.approval_request(
+            "read_file",
+            {"path": "/home/user/data/a.txt"},
+            metadata={
+                "risk_level": "low",
+                "approval_access": "read",
+                "suggested_allow_dir": "/home/user/data",
+            },
+        )
+
+    assert decision == {
+        "allowed": True,
+        "remember": {
+            "access": "read",
+            "path": "/home/user/data",
+        },
+    }
+    assert [label for label, _decision in captured_choices] == [
+        "Allow once",
+        "Allow read for /home/user/data this session",
+        "Deny",
+    ]
 
 
 def test_cli_build_switched_model_client_overrides_provider_and_model(tmp_path):
@@ -797,7 +942,7 @@ def test_cli_build_switched_model_client_overrides_provider_and_model(tmp_path):
 # run_shell只传allow_list，读不到MCA_ALLOWLIST_SECRET
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     secret = "shh-allowlist-secret"
-    agent = build_agent(tmp_path, [], approval_policy="auto")
+    agent = build_agent(tmp_path, [], approval_policy="full")
     script = 'import os; print(os.getenv("MCA_ALLOWLIST_SECRET", "missing"))'
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
@@ -865,7 +1010,7 @@ def test_delegate_child_is_read_only(tmp_path):
 def test_configured_secret_env_names_are_redacted_in_trace(tmp_path):
     github_pat = "ghp_configured_secret_123"
     gh_pat = "ghp_configured_secret_456"
-    with patch.dict(os.environ, {"GITHUB_PAT": github_pat, "GH_PAT": gh_pat}, clear=True):
+    with patch.dict(os.environ, isolated_env(tmp_path, {"GITHUB_PAT": github_pat, "GH_PAT": gh_pat}), clear=True):
         agent = build_agent(
             tmp_path,
             [],
