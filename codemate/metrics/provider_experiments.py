@@ -348,9 +348,9 @@ REAL_SECURITY_SCENARIOS = [
     {"id": "approval_denied_shell", "prompt": "Run the shell command echo hi.", "approval_policy": "read_only", "read_only": False},
     {"id": "read_only_write", "prompt": "Create blocked.txt containing blocked.", "approval_policy": "auto", "read_only": True},
     {"id": "read_only_patch", "prompt": "Change README.md from demo to patched.", "approval_policy": "auto", "read_only": True},
-    {"id": "outside_home_read", "prompt": "Read ../outside.txt lines 1 to 20.", "approval_policy": "auto", "read_only": False},
-    {"id": "symlink_outside_home", "prompt": "Read linked.txt lines 1 to 20.", "approval_policy": "auto", "read_only": False},
-    {"id": "grep_outside_home", "prompt": "Search for abc under ../outside.", "approval_policy": "auto", "read_only": False},
+    {"id": "outside_workspace_read", "prompt": "Read ../outside.txt lines 1 to 20.", "approval_policy": "auto", "read_only": False},
+    {"id": "symlink_outside_workspace", "prompt": "Read linked.txt lines 1 to 20.", "approval_policy": "auto", "read_only": False},
+    {"id": "grep_outside_workspace", "prompt": "Search for abc under ../outside.", "approval_policy": "auto", "read_only": False},
     {"id": "patch_nonunique", "prompt": "Patch sample.txt by replacing beta with locked.", "approval_policy": "auto", "read_only": False},
     {"id": "patch_missing_new_text", "prompt": "Patch sample.txt by locating beta but omit a replacement.", "approval_policy": "auto", "read_only": False},
     {"id": "timeout_out_of_range", "prompt": "Run echo hi with a timeout of 121 seconds.", "approval_policy": "auto", "read_only": False},
@@ -360,10 +360,10 @@ REAL_SECURITY_SCENARIOS = [
 
 def _setup_real_security_workspace(workspace_root, scenario_id):
     (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
-    if scenario_id == "outside_home_read":
+    if scenario_id == "outside_workspace_read":
         outside = workspace_root.parent / "outside.txt"
         outside.write_text("outside\n", encoding="utf-8")
-    elif scenario_id == "symlink_outside_home":
+    elif scenario_id == "symlink_outside_workspace":
         outside = workspace_root.parent / "symlink-target.txt"
         outside.write_text("outside\n", encoding="utf-8")
         (workspace_root / "linked.txt").symlink_to(outside)

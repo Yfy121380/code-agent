@@ -260,6 +260,7 @@ Use run_shell for tests, syntax checks, git status/log, package scripts, and oth
 
 Read-only commands with allowed paths may run directly. Write-like commands are risky. Dangerous commands require approval.
 Paths are resolved like file tools: workspace paths are preferred, home paths may require approval, and sensitive paths are blocked.
+When sandbox.enabled is true, shell commands run inside a bubblewrap filesystem sandbox: most files are read-only, read-deny paths are hidden, write access is limited to allowed directories, and network access is available.
 Keep commands focused and avoid unnecessary destructive operations.
 """.strip(),
     },

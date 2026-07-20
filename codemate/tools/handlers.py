@@ -8,6 +8,7 @@ import textwrap
 from ..workspace import IGNORED_PATH_NAMES
 from ..memory.long_term import is_memory_path
 from .constants import TODO_STATUSES
+from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .validators import _normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
 
@@ -229,16 +230,33 @@ def tool_grep(agent, args):
 def tool_run_shell(agent, args):
     # shell 命令实际执行入口。
     # 风险识别和审批在 runtime/validators 中已经完成，这里只负责在受控环境中运行命令。
+    # sandbox.enabled 为 true 时，命令会在 bwrap 中执行，作为路径校验之外的第二层防线。
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
     if timeout < 1 or timeout > 120:
         raise ValueError("timeout must be in [1, 120]")
+    run_args = command
+    shell = True
+    if sandbox_enabled(agent):
+        preflight_error = sandbox_preflight_error()
+        if preflight_error:
+            return textwrap.dedent(
+                f"""\
+                exit_code: 126
+                stdout:
+                (empty)
+                stderr:
+                {preflight_error}
+                """
+            ).strip()
+        run_args = build_shell_sandbox_command(agent, command)
+        shell = False
     result = subprocess.run(
-        command,
+        run_args,
         cwd=agent.root,
-        shell=True,
+        shell=shell,
         capture_output=True,
         text=True,
         timeout=timeout,

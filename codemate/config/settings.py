@@ -44,6 +44,9 @@ SETTINGS_TEMPLATE = {
     "mcp": {
         "servers": {},
     },
+    "sandbox": {
+        "enabled": True,
+    },
     "permissions": {
         "read": {
             "allow": [],
@@ -71,6 +74,7 @@ class CodemateSettings:
     project: dict
     merged: dict
     mcp_servers: dict
+    sandbox: dict
     permission_rules: PermissionRules
 
 
@@ -200,6 +204,22 @@ def _merged_permissions(user_settings, project_settings):
     return permissions
 
 
+def _merged_sandbox(user_settings, project_settings):
+    sandbox = copy.deepcopy(default_settings()["sandbox"])
+    for settings in (user_settings, project_settings):
+        value = settings.get("sandbox", {})
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError("sandbox must be an object")
+        sandbox.update(copy.deepcopy(value))
+    enabled = sandbox.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("sandbox.enabled must be a boolean")
+    sandbox["enabled"] = enabled
+    return sandbox
+
+
 def load_codemate_settings(paths_or_workspace_root):
     paths = paths_or_workspace_root
     if not isinstance(paths_or_workspace_root, CodematePaths):
@@ -208,11 +228,13 @@ def load_codemate_settings(paths_or_workspace_root):
     project_settings = load_settings_file(paths.project_settings)
     merged = default_settings()
     merged["mcp"]["servers"] = _merged_mcp_servers(user_settings, project_settings)
+    merged["sandbox"] = _merged_sandbox(user_settings, project_settings)
     merged["permissions"] = _merged_permissions(user_settings, project_settings)
     return CodemateSettings(
         user=user_settings,
         project=project_settings,
         merged=merged,
         mcp_servers=merged["mcp"]["servers"],
+        sandbox=merged["sandbox"],
         permission_rules=build_permission_rules(paths, user_settings, project_settings),
     )

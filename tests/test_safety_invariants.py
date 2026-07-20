@@ -82,18 +82,20 @@ def isolated_env(tmp_path, extra=None):
     values.update(extra or {})
     return values
 
-# 工作区外且 home 外路径拒绝
-def test_outside_workspace_and_home_read_is_rejected(tmp_path):
+# 工作区外路径不再由 home 边界硬拒绝，读权限交给规则和 approval policy 判断。
+def test_outside_workspace_read_auto_policy_allows(tmp_path):
     outside = tmp_path.parent.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
     result = agent.run_tool("read_file", {"path": f"../../{outside.name}"})
 
-    assert "outside the current workspace and outside home" in result
+    assert "outside" in result
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "allow"
 
-# 符号链接解析后指向 home 外路径时拒绝
-def test_symlink_to_outside_home_is_rejected(tmp_path):
+
+def test_symlink_to_outside_workspace_read_auto_policy_allows(tmp_path):
     outside = tmp_path.parent.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (tmp_path / "linked.txt").symlink_to(outside)
@@ -101,14 +103,22 @@ def test_symlink_to_outside_home_is_rejected(tmp_path):
 
     result = agent.run_tool("read_file", {"path": "linked.txt"})
 
-    assert "outside the current workspace and outside home" in result
+    assert "outside" in result
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "allow"
 
-def test_grep_outside_workspace_and_home_is_rejected(tmp_path):
+
+def test_grep_outside_workspace_read_auto_policy_allows(tmp_path):
+    outside = tmp_path.parent.parent / f"{tmp_path.name}-outside-grep"
+    outside.mkdir(exist_ok=True)
+    (outside / "note.txt").write_text("abc\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
-    result = agent.run_tool("grep", {"pattern": "abc", "path": "../../outside"})
+    result = agent.run_tool("grep", {"pattern": "abc", "path": f"../../{outside.name}", "mode": "content"})
 
-    assert "outside the current workspace and outside home" in result
+    assert "abc" in result
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "allow"
 
 
 def test_outside_workspace_home_read_auto_policy_allows(tmp_path):
@@ -135,6 +145,19 @@ def test_outside_workspace_home_write_auto_policy_asks(tmp_path):
     assert not outside.exists()
     assert agent._last_tool_result_metadata["outside_workspace"] is True
     assert agent._last_tool_result_metadata["approval_gate"] == "ask"
+
+
+def test_outside_workspace_write_uses_rules_and_approval_instead_of_path_denial(tmp_path):
+    outside = tmp_path.parent.parent / f"{tmp_path.name}-outside-write.txt"
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("write_file", {"path": f"../../{outside.name}", "content": "outside\n"})
+
+    assert result == "error: approval denied for write_file"
+    assert not outside.exists()
+    assert agent._last_tool_result_metadata["outside_workspace"] is True
+    assert agent._last_tool_result_metadata["approval_gate"] == "ask"
+    assert agent._last_tool_result_metadata["tool_error_code"] == "approval_denied"
 
 
 def test_approval_can_add_temporary_write_allow_for_session(tmp_path):
@@ -679,15 +702,17 @@ def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
     assert agent._last_tool_result_metadata["shell_has_glob"] is True
 
 
-def test_shell_read_outside_workspace_and_home_is_rejected(tmp_path):
+def test_shell_read_outside_workspace_auto_policy_allows(tmp_path):
     outside = tmp_path.parent.parent / f"{tmp_path.name}-outside-shell.txt"
     outside.write_text("outside\n", encoding="utf-8")
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
     result = agent.run_tool("run_shell", {"command": f"cat ../../{outside.name}", "timeout": 20})
 
-    assert "outside the current workspace and outside home" in result
+    assert "exit_code: 0" in result
+    assert "outside" in result
     assert agent._last_tool_result_metadata["shell_kind"] == "read"
+    assert agent._last_tool_result_metadata["approval_gate"] == "allow"
 
 
 def test_risky_shell_command_auto_policy_allows_workspace_write(tmp_path):

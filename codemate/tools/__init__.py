@@ -19,6 +19,7 @@ from .handlers import (
     tool_write_file,
 )
 from .registry import build_tool_registry
+from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC
 from .validators import validate_tool
@@ -36,6 +37,7 @@ __all__ = [
     "ToolGate",
     "ToolPolicyError",
     "analyze_shell_command",
+    "build_shell_sandbox_command",
     "build_tool_registry",
     "close_mcp_connections",
     "gate_for_access",
@@ -43,6 +45,8 @@ __all__ = [
     "gate_for_web",
     "is_mcp_tool_name",
     "resolve_tool_path",
+    "sandbox_enabled",
+    "sandbox_preflight_error",
     "validate_tool",
     "tool_delegate",
     "tool_grep",

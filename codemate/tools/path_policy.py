@@ -115,16 +115,15 @@ def _deny_for_access(access, decision):
 def resolve_tool_path(agent, raw_path, access="read"):
     """解析工具路径并做不可绕过的硬边界校验。
 
-    这里会解析 `../` 和符号链接，最终用真实路径判断边界。路径必须位于
-    当前工作区或当前用户 home 下；是否命中 allow/deny 规则、是否需要用户
-    审批不在这里决定，而是交给 `gate_for_access()`。
+    这里会解析 `../`、`~` 和符号链接，得到真实绝对路径。路径本身不按
+    home 边界直接拒绝；读写权限统一交给聚合后的 allow/deny 规则和审批
+    策略判断，避免路径解析层和权限层各管一套规则。
     """
     root = Path(agent.root).resolve()
     raw_text = str(raw_path)
     path = Path(raw_text).expanduser()
     candidate = path if path.is_absolute() else root / path
     resolved = candidate.resolve()
-    home = Path.home().resolve()
     paths = getattr(agent, "paths", None)
     internal_roots = [(root / ".codemate").resolve()]
     if paths is not None:
@@ -134,13 +133,6 @@ def resolve_tool_path(agent, raw_path, access="read"):
         ]
 
     in_workspace = _is_relative_to(resolved, root)
-    if not in_workspace and not _is_relative_to(resolved, home):
-        raise ToolPolicyError(
-            f"path is outside the current workspace and outside home: {raw_path}",
-            code="path_outside_home",
-            security_event_type="path_outside_home",
-        )
-
     if agent.memory_scope_only and not is_memory_path(root, resolved):
         raise ToolPolicyError(
             f"path outside memory scope: {raw_path}",
