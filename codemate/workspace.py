@@ -1,7 +1,7 @@
 """工作区快照工具。
 
 这个模块负责在 agent 按需读文件之前，先给它一份便宜的“仓库第一印象”。
-这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
+这份快照刻意保持小而稳定：只包含当前目录、Git 分支、状态和最近提交。
 """
 
 import subprocess
@@ -13,9 +13,6 @@ from pathlib import Path
 
 MAX_TOOL_OUTPUT = 20000
 MAX_HISTORY = 48000
-# 这些文件最可能直接影响 agent 的行动方式。
-# 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
-DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 IGNORED_PATH_NAMES = {".git", ".codemate", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 
@@ -42,14 +39,13 @@ def middle(text, limit):
 
 
 class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
+    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
         self.default_branch = default_branch
         self.status = status
         self.recent_commits = recent_commits
-        self.project_docs = project_docs
 
     @classmethod
     def build(cls, cwd, repo_root_override=None):
@@ -74,19 +70,6 @@ class WorkspaceContext:
             if repo_root_override is not None
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
-        docs = {}
-        # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
-        # 但用相对路径做 key，避免同一份文档被重复收集。
-        for base in (repo_root, cwd):
-            for name in DOC_NAMES:
-                path = base / name
-                if not path.exists():
-                    continue
-                key = str(path.relative_to(repo_root))
-                if key in docs:
-                    continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
-
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
@@ -96,13 +79,11 @@ class WorkspaceContext:
             )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
-            project_docs=docs,
         )
 
     def text(self):
         # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
-        docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
         return textwrap.dedent(
             f"""\
             Workspace:
@@ -116,21 +97,6 @@ class WorkspaceContext:
             {commits}
             """
         ).strip()
-        # return textwrap.dedent(
-        #     f"""\
-        #     Workspace:
-        #     - cwd: {self.cwd}
-        #     - repo_root: {self.repo_root}
-        #     - branch: {self.branch}
-        #     - default_branch: {self.default_branch}
-        #     - status:
-        #     {self.status}
-        #     - recent_commits:
-        #     {commits}
-        #     - project_docs:
-        #     {docs}
-        #     """
-        # ).strip()
 
     def fingerprint(self):
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，
@@ -142,6 +108,5 @@ class WorkspaceContext:
             "default_branch": self.default_branch,
             "status": self.status,
             "recent_commits": list(self.recent_commits),
-            "project_docs": dict(self.project_docs),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()

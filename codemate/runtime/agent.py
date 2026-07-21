@@ -1,31 +1,33 @@
 """Agent 运行时核心逻辑。
 
-CodeMate 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
+CodeMate 是包在模型外面的控制循环：负责组 prompt、解析模型输出、
 校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
+现在主要负责状态管理，调用循环见loop.py、工具在tool_execution.py、
+审批在approvals.py、长期记忆整理在dream.py。
 """
 
 import json
 import os
 import re
 import textwrap
-import threading
 import uuid
 import hashlib
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import memory as memorylib
-from .memory import dream as dreamlib
-from .memory import long_term as longterm
-from .config import build_permission_rules, ensure_codemate_layout, load_codemate_settings
-from .context import ContextManager
-from .storage import RunStore, SessionStore, TaskState
-from .ui import NullUI
-from . import tools as toolkit
-from .workspace import MAX_HISTORY, WorkspaceContext, clip, now
+from .. import memory as memorylib
+from ..config import ensure_codemate_layout, load_codemate_settings
+from ..context import ContextManager
+from ..storage import RunStore
+from ..ui import NullUI
+from .. import tools as toolkit
+from ..workspace import MAX_HISTORY, WorkspaceContext, clip, now
+from .approvals import ApprovalMixin
+from .dream import DreamMixin
+from .loop import RuntimeLoopMixin
+from .tool_execution import ToolExecutionMixin
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
@@ -53,7 +55,7 @@ class PromptPrefix:
     built_at: str
 
 
-class CodeMate:
+class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
     def __init__(
         self,
         model_client,
@@ -182,9 +184,6 @@ class CodeMate:
         self.session.setdefault("memory", memorylib.default_memory_state())
         self.session.setdefault("todos", [])
         self.session.setdefault("active_skills", [])
-        self.session.pop("checkpoints", None)
-        self.session.pop("resume_state", None)
-        self.session.pop("runtime_identity", None)
 
     def invalidate_stale_memory(self):
         invalidated = self.memory.invalidate_stale_file_summaries()
@@ -715,17 +714,21 @@ class CodeMate:
         prompt, metadata = self.context_manager.build(user_message)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
         # 后面 trace 和实验指标才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
+        sections = metadata.get("sections", {})
         metadata.update(
             {
-                "prefix_chars": len(self.prefix),
+                "prefix_chars": sections.get("prefix", {}).get("rendered_chars", len(self.prefix)),
                 "workspace_chars": len(self.workspace.text()),
-                "skills_chars": len(self.available_skills_text()),
-                "memory_chars": len(self.prompt_memory_text()),
-                "runtime_context_chars": len(self.runtime_context_text()),
-                "history_chars": len(self.history_text()),
+                "skills_chars": sections.get("skills", {}).get("rendered_chars", 0),
+                "memory_chars": sections.get("memory", {}).get("rendered_chars", 0),
+                "runtime_context_chars": (
+                    sections.get("skills", {}).get("rendered_chars", 0)
+                    + sections.get("memory", {}).get("rendered_chars", 0)
+                    + sections.get("relevant_memory", {}).get("rendered_chars", 0)
+                ),
+                "history_chars": sections.get("history", {}).get("rendered_chars", 0),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
-                "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
@@ -744,17 +747,21 @@ class CodeMate:
         self.invalidate_stale_memory()
         message_build = self.context_manager.build_messages(user_message)
         metadata = dict(message_build.metadata)
+        sections = metadata.get("sections", {})
         metadata.update(
             {
-                "prefix_chars": len(self.prefix),
+                "prefix_chars": sections.get("prefix", {}).get("rendered_chars", len(self.prefix)),
                 "workspace_chars": len(self.workspace.text()),
-                "skills_chars": len(self.available_skills_text()),
-                "memory_chars": len(self.prompt_memory_text()),
-                "runtime_context_chars": len(self.runtime_context_text()),
-                "history_chars": len(self.history_text()),
+                "skills_chars": sections.get("skills", {}).get("rendered_chars", 0),
+                "memory_chars": sections.get("memory", {}).get("rendered_chars", 0),
+                "runtime_context_chars": (
+                    sections.get("skills", {}).get("rendered_chars", 0)
+                    + sections.get("memory", {}).get("rendered_chars", 0)
+                    + sections.get("relevant_memory", {}).get("rendered_chars", 0)
+                ),
+                "history_chars": sections.get("history", {}).get("rendered_chars", 0),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
-                "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
@@ -839,645 +846,6 @@ class CodeMate:
         self.memory.resolve_process_notes_after_success(name, args, self.current_memory_turn())
         self.session["memory"] = self.memory.to_dict()
 
-    def retrieve_long_term_memory_for_request(self, user_message, task_state):
-        """为当前 ask 执行一次长期记忆模型召回。
-
-        召回只发生在用户请求开始时，后续工具循环复用 `relevant_long_term_memory`，
-        避免每次重新组 prompt 都额外调用模型。失败不会中断主任务，只会降级为空召回。
-        """
-        self.relevant_long_term_memory = []
-        self.long_term_memory_status = "disabled"
-        if not (self.feature_enabled("memory") and self.feature_enabled("relevant_memory") and self.feature_enabled("long_term_memory")):
-            return
-        if self.runtime_mode != "agent":
-            self.long_term_memory_status = "skipped_runtime_mode"
-            return
-
-        memory_files = memorylib.read_long_term_memory(self.root)
-        cache_payload = json.dumps(
-            {"user_message": str(user_message), "memory_files": memory_files},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
-        if self._long_term_memory_cache_key == cache_key:
-            return
-
-        self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key})
-        try:
-            result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message)
-        except Exception as exc:
-            self.long_term_memory_status = "failed"
-            metadata = {"error": str(exc), "memory_hash": cache_key}
-            self.emit_trace(task_state, "memory_retrieval_failed", metadata)
-            self._long_term_memory_cache_key = cache_key
-            return
-
-        selected = list(result.get("selected", []) or [])
-        self.relevant_long_term_memory = selected
-        self.long_term_memory_status = str(result.get("status", "ok"))
-        metadata = {
-            "status": self.long_term_memory_status,
-            "selected_count": len(selected),
-            "selected_sources": [str(item.get("source", "")) for item in selected],
-            "duration_ms": int(result.get("duration_ms", 0) or 0),
-            "memory_hash": cache_key,
-        }
-        self.emit_trace(task_state, "memory_retrieval_finished", metadata)
-        self._long_term_memory_cache_key = cache_key
-
-    def schedule_dream_if_needed(self, task_state):
-        if not self.feature_enabled("memory_dream") or self.runtime_mode != "agent":
-            return
-        session_count = self.session_store.count()
-        due, reason = dreamlib.should_run_dream(self.root, session_count)
-        if not due:
-            return
-        self.start_dream_background(reason=reason)
-        self.emit_trace(task_state, "dream_scheduled", {"reason": reason, "session_count": session_count})
-
-    def start_dream_background(self, reason="manual"):
-        thread = threading.Thread(target=self.run_dream_once, kwargs={"reason": reason, "foreground": False}, daemon=True)
-        thread.start()
-        return thread
-
-    def run_dream_once(self, reason="manual", foreground=True):
-        with longterm.dream_lock(self.root) as acquired:
-            if not acquired:
-                return "dream skipped: another dream process is already running"
-            try:
-                state = longterm.load_dream_state(self.root)
-                cursor_text = dreamlib.render_daily_log_cursor(state)
-                dream_session = {
-                    "id": "dream-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
-                    "created_at": now(),
-                    "workspace_root": str(self.root),
-                    "history": [],
-                    "memory": memorylib.default_memory_state(),
-                    "todos": [],
-                    "runtime_mode": "dream",
-                    "reason": str(reason),
-                }
-                child = CodeMate(
-                    model_client=self.model_client,
-                    workspace=self.workspace,
-                    session_store=self.session_store,
-                    session=dream_session,
-                    approval_policy="auto",
-                    max_steps=12,
-                    max_new_tokens=self.max_new_tokens,
-                    depth=0,
-                    max_depth=0,
-                    read_only=False,
-                    shell_env_allowlist=self.shell_env_allowlist,
-                    secret_env_names=self.secret_env_names,
-                    feature_flags={
-                        **self.feature_flags,
-                        "long_term_memory": False,
-                        "relevant_memory": False,
-                        "memory_dream": False,
-                    },
-                    allowed_tools={"list_files", "read_file", "grep", "write_file", "patch_file", "todo_write"},
-                    memory_scope_only=True,
-                    runtime_mode="dream",
-                    timezone_name=self.timezone_name,
-                    ui=self.ui if foreground else NullUI(),
-                )
-                child.ask(dreamlib.dream_prompt(cursor_text))
-                updated = dreamlib.mark_dream_complete(self.root, self.session_store.count(), status="ok")
-                cursor = updated.get("last_processed_daily_log") or {}
-                file_name = cursor.get("file") or ""
-                line = cursor.get("line", 0) or 0
-                return f"dream completed: processed through {file_name or 'no daily logs'} line {line}"
-            except Exception as exc:
-                dreamlib.mark_dream_failed(self.root, status="error")
-                return f"dream failed: {exc}"
-
-    def ask(self, user_message):
-        """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
-
-        为什么存在：
-        `ask()` 是整个 runtime 的总调度器。它把“用户提一个请求”扩展成一条
-        可持续推进的控制循环：记录会话、组 prompt、调用模型、执行工具、
-        写 trace、更新状态，直到模型给出最终答案或系统主动停下。
-
-        输入 / 输出：
-        - 输入：`user_message`，即用户这一次的任务描述
-        - 输出：字符串形式的最终回答；如果中途达到步数上限或重试上限，
-          返回的是一条停止原因说明
-
-        在 agent 链路里的位置：
-        它是 CLI 和底层工具/模型之间的核心桥梁。CLI 收到用户输入后基本只做
-        一件事：调用 `agent.ask()`。而 `ask()` 内部再去驱动 `ContextManager`
-        组 prompt、`model_client.complete()` 调模型、`run_tool()` 执行动作。
-        如果新人想理解 codemate 是怎么“从一句话跑成一个 agent 流程”的，
-        这里就是最关键的入口。
-        """
-        # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
-        run_started_at = time.monotonic()
-        self.memory.set_task_summary(user_message)
-        self.record({"role": "user", "content": user_message, "created_at": now()})
-        self.expire_process_notes()
-        # 记录当前ask的执行状态，工具和模型调用次数、任务完成情况等
-        task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
-        self.current_task_state = task_state
-        self.current_run_dir = self.run_store.start_run(task_state)
-        self.emit_trace(
-            task_state,
-            "run_started",
-            {
-                "task_id": task_state.task_id,
-                "user_request": clip(user_message, 300),
-            },
-        )
-        self.retrieve_long_term_memory_for_request(user_message, task_state)
-
-        tool_steps = 0
-        attempts = 0
-        max_attempts = max(self.max_steps * 3, self.max_steps + 4)
-
-        # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
-        # 1. 感知：重新组 prompt，把当前状态整理给模型看
-        # 2. 决策：让模型返回一个工具调用，或一个最终答案
-        # 3. 行动：如果是工具调用，就执行工具
-        # 4. 记录：把结果写回 history / task_state / trace / memory
-        # 然后进入下一轮，直到停机条件满足
-        while tool_steps < self.max_steps and attempts < max_attempts:
-            # 2. 每一轮先落盘当前 attempt，再组装模型要看的 messages。
-            attempts += 1
-            task_state.record_attempt()
-            self.run_store.write_task_state(task_state)
-            prompt_started_at = time.monotonic()
-            system, messages, prompt_metadata = self._build_messages_and_metadata(user_message)
-            # print(f"system:{system}")
-            # print(f"message:{messages}")
-            self.emit_trace(
-                task_state,
-                "prompt_built",
-                {
-                    "prompt_metadata": prompt_metadata,
-                    "system": system,
-                    "messages": messages[0],
-                    # "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
-                },
-            )
-            prompt_cache_key = None
-            prompt_cache_retention = None
-            if getattr(self.model_client, "supports_prompt_cache", False):
-                prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-                prompt_cache_retention = "in_memory"
-            model_started_at = time.monotonic()
-            self.ui.model_start()
-            response = self.model_client.complete(
-                messages,
-                self.max_new_tokens,
-                tools=self.model_tools(),
-                system=system,
-                prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=prompt_cache_retention,
-            )
-            completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
-            response_metadata = dict(getattr(response, "metadata", {}) or {})
-            completion_metadata.update(response_metadata)
-            if completion_metadata:
-                prompt_metadata.update(completion_metadata)
-            self.last_prompt_metadata = prompt_metadata
-            kind = getattr(response, "kind", "final")
-            self.emit_trace(
-                task_state,
-                "model_parsed",
-                {
-                    "kind": kind,
-                    "tool_call_count": len(getattr(response, "tool_calls", []) or []),
-                    "completion_metadata": completion_metadata,
-                    "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                },
-            )
-            self.ui.model_end(kind=kind, metadata=completion_metadata)
-
-            if kind == "tool_calls":
-                calls = list(getattr(response, "tool_calls", []) or [])
-                if not calls:
-                    self.record(
-                        {
-                            "role": "assistant",
-                            "content": "Runtime notice: model returned an empty tool call list.",
-                            "created_at": now(),
-                        }
-                    )
-                    self.run_store.write_task_state(task_state)
-                    continue
-                for call in calls:
-                    if tool_steps >= self.max_steps:
-                        break
-                    self.record(
-                        {
-                            "role": "assistant",
-                            "content": str(getattr(response, "text", "") or ""),
-                            "tool_calls": [call.to_dict()],
-                            "created_at": now(),
-                        }
-                    )
-                    tool_steps += 1
-                    name = call.name
-                    args = dict(call.args or {})
-                    task_state.record_tool(name)
-                    tool_started_at = time.monotonic()
-                    result = self.run_tool(name, args, current_tool_call_id=call.id)
-                    self.ui.tool_result(name, args, result, metadata=dict(self._last_tool_result_metadata or {}))
-                    self.record(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "name": name,
-                            "content": result,
-                            "created_at": now(),
-                        }
-                    )
-                    self.run_store.write_task_state(task_state)
-                    self.emit_trace(
-                        task_state,
-                        "tool_executed",
-                        {
-                            "name": name,
-                            "args": args,
-                            "tool_call_id": call.id,
-                            "result": clip(result, 4000),
-                            "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
-                            **dict(self._last_tool_result_metadata or {}),
-                        },
-                    )
-                continue
-
-            if kind == "final":
-                final = str(getattr(response, "text", "") or "").strip()
-                if not final:
-                    self.record(
-                        {
-                            "role": "assistant",
-                            "content": "Runtime notice: model returned an empty final answer.",
-                            "created_at": now(),
-                        }
-                    )
-                    self.run_store.write_task_state(task_state)
-                    continue
-                self.record({"role": "assistant", "content": final, "created_at": now()})
-                task_state.finish_success(final)
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "run_finished",
-                    {
-                        "status": task_state.status,
-                        "stop_reason": task_state.stop_reason,
-                        "final_answer": final,
-                        "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                    },
-                )
-                self.schedule_dream_if_needed(task_state)
-                self.ui.final_answer(final)
-                return final
-
-            self.record(
-                {
-                    "role": "assistant",
-                    "content": f"Runtime notice: unknown model response kind {kind!r}.",
-                    "created_at": now(),
-                }
-            )
-            self.run_store.write_task_state(task_state)
-
-        # 9. 没拿到 final 时安全停机：区分格式重试耗尽和工具步数耗尽。
-        if attempts >= max_attempts and tool_steps < self.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-            task_state.stop_retry_limit(final)
-        else:
-            final = "Stopped after reaching the step limit without a final answer."
-            task_state.stop_step_limit(final)
-        self.record({"role": "assistant", "content": final, "created_at": now()})
-        self.run_store.write_task_state(task_state)
-        self.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        self.schedule_dream_if_needed(task_state)
-        self.ui.final_answer(final)
-        return final
-
-    def shell_analysis_metadata(self):
-        analysis = getattr(self, "_last_shell_analysis", None)
-        if analysis is None or not hasattr(analysis, "to_metadata"):
-            return {}
-        return analysis.to_metadata()
-
-    def tool_risk_level(self, name, tool):
-        if str(name).startswith("mcp__"):
-            return "high"
-        if name in toolkit.WEB_TOOL_NAMES:
-            return "low"
-        if name == "run_shell":
-            analysis = getattr(self, "_last_shell_analysis", None)
-            if analysis is not None and getattr(analysis, "kind", "") == "read":
-                return "low"
-        return "high" if tool["risky"] else "low"
-
-    def tool_metadata_read_only(self, name, tool):
-        if str(name).startswith("mcp__"):
-            return False
-        if name in toolkit.WEB_TOOL_NAMES:
-            return True
-        if name in {"list_files", "read_file", "grep"}:
-            return True
-        if name == "run_shell":
-            analysis = getattr(self, "_last_shell_analysis", None)
-            return bool(analysis is not None and getattr(analysis, "kind", "") == "read")
-        return False
-
-    def tool_runtime_metadata(self, name, tool):
-        metadata = {
-            "risk_level": self.tool_risk_level(name, tool),
-            "read_only": self.tool_metadata_read_only(name, tool),
-        }
-        if str(name).startswith("mcp__"):
-            metadata.update(
-                {
-                    "mcp_server": tool.get("mcp_server", ""),
-                    "mcp_tool": tool.get("mcp_tool", ""),
-                }
-            )
-        return metadata
-
-    def approval_decision(self, name, args, tool):
-        # validate_tool 已经完成 allow/ask/deny 判定。
-        # 只有 gate 为 ask 的工具调用才会进入这里，因此这里不再重复做策略推导。
-        return self.prompt_approval(name, args)
-
-    def run_tool(self, name, args, current_tool_call_id=None):
-        """执行一次工具调用，并在执行前后套上完整护栏。
-
-        为什么存在：
-        在 agent 系统里，真正危险的不是“模型会不会想调用工具”，而是
-        “平台有没有在执行前把边界守住”。这个函数就是工具层的总闸口：
-        所有工具调用都必须先经过它，不能让模型直接碰到底层函数。
-
-        输入 / 输出：
-        - 输入：工具名 `name`，参数字典 `args`
-        - 输出：字符串结果。无论是成功结果还是错误信息，都会统一返回文本，
-          这样模型下一轮都能继续消费这份反馈。
-
-        在 agent 链路里的位置：
-        它位于 `ask()` 的“模型决定要调用工具”之后，是控制循环里真正把模型
-        意图落到外部世界的一步。因此这里串起了几乎所有安全与可控设计：
-        工具是否存在、参数是否合法、是否重复、是否需要审批、执行结果是否裁剪、
-        是否需要回写记忆。
-        """
-        # 工具执行不是“直接调函数”，而是一条带护栏的流水线：
-        # 工具是否存在 -> 参数是否合法 -> 是否重复调用 -> 是否通过审批
-        # -> 真正执行 -> 更新记忆。
-        self._last_shell_analysis = None
-        self._last_tool_gate = None
-        tool = self.tools.get(name)
-        if tool is None:
-            message = f"error: unknown tool '{name}'"
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": "unknown_tool",
-                "security_event_type": "",
-                "risk_level": "high",
-                "read_only": False,
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        try:
-            # 参数合法性、路径硬边界和审批门禁统一在 validate_tool 中完成。
-            gate = self.validate_tool(name, args)
-            self._last_tool_gate = gate
-        except toolkit.ToolPolicyError as exc:
-            message = f"error: {exc}"
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": exc.code,
-                "security_event_type": exc.security_event_type,
-                **self.tool_runtime_metadata(name, tool),
-                **self.shell_analysis_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        except Exception as exc:
-            message = f"error: invalid arguments for {name}: {exc}"
-            security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": "invalid_arguments",
-                "security_event_type": security_event_type,
-                **self.tool_runtime_metadata(name, tool),
-                **self.shell_analysis_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        # 拦截重复调用过两次的工具，若最近两次工具调用请求均和当前一样(包括args)，则拒绝当次请求
-        if self.repeated_tool_call(name, args, exclude_call_id=current_tool_call_id):
-            message = f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": "repeated_identical_call",
-                "security_event_type": "",
-                **self.tool_runtime_metadata(name, tool),
-                **self.shell_analysis_metadata(),
-                **gate.to_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        # validate_tool 只会返回 allow/ask；deny 已在校验阶段拒绝。
-        asked_for_approval = gate.action == "ask"
-        if asked_for_approval and not self.approval_decision(name, args, tool):
-            message = f"error: approval denied for {name}"
-            self._last_tool_result_metadata = {
-                "tool_status": "rejected",
-                "tool_error_code": "approval_denied",
-                "security_event_type": "read_only_block" if self.read_only else "approval_denied",
-                **self.tool_runtime_metadata(name, tool),
-                **self.shell_analysis_metadata(),
-                **gate.to_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-        if not asked_for_approval:
-            self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
-        try:
-            result = str(tool["run"](args))
-            tool_status = "ok"
-            tool_error_code = ""
-            if name == "run_shell":
-                match = re.search(r"exit_code:\s*(-?\d+)", result)
-                exit_code = int(match.group(1)) if match else 0
-                if exit_code != 0:
-                    tool_status = "error"
-                    tool_error_code = "tool_failed"
-            
-            # 提取高价值信息
-            # 最近接触过哪些文件
-            # 某个文件刚刚读到的短摘要
-            # 写文件后旧摘要需要失效
-            self.update_memory_after_tool(name, args, result)
-            self._last_tool_result_metadata = {
-                "tool_status": tool_status,
-                "tool_error_code": tool_error_code,
-                "security_event_type": "",
-                **self.tool_runtime_metadata(name, tool),
-                "workspace_fingerprint": self.workspace.fingerprint(),
-                **self.shell_analysis_metadata(),
-                **gate.to_metadata(),
-            }
-            if tool_status == "ok":
-                self.resolve_process_notes_after_success(name, args)
-            else:
-                self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, result)
-            return result
-        except Exception as exc:
-            security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
-            message = f"error: tool {name} failed: {exc}"
-            self._last_tool_result_metadata = {
-                "tool_status": "error",
-                "tool_error_code": "tool_failed",
-                "security_event_type": security_event_type,
-                **self.tool_runtime_metadata(name, tool),
-                "workspace_fingerprint": self.workspace.fingerprint(),
-                **self.shell_analysis_metadata(),
-                **gate.to_metadata(),
-            }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
-            return message
-
-    def recent_tool_calls(self, exclude_call_id=None):
-        calls = []
-        for item in self.session["history"]:
-            if item.get("role") != "assistant":
-                continue
-            for call in item.get("tool_calls", []) or []:
-                if exclude_call_id is not None and str(call.get("id", "")) == str(exclude_call_id):
-                    continue
-                calls.append({"name": call.get("name", ""), "args": dict(call.get("args", {}) or {})})
-        return calls
-
-    def repeated_tool_call(self, name, args, exclude_call_id=None):
-        # agent 很常见的一种坏循环，是在没有新信息的情况下反复发起同一调用。
-        # 新 history 中以 assistant.tool_calls 代表模型的工具请求，tool 消息只记录结果。
-        tool_calls = self.recent_tool_calls(exclude_call_id=exclude_call_id)
-        if len(tool_calls) < 2:
-            return False
-        recent = tool_calls[-2:]
-        return all(call["name"] == name and call["args"] == args for call in recent)
-
-    @staticmethod
-    def new_task_id():
-        return "task_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    @staticmethod
-    def new_run_id():
-        return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    def validate_tool(self, name, args):
-        """把通用工具校验和 runtime 级额外约束串起来。"""
-        gate = toolkit.validate_tool(self, name, args)
-        if self.approval_policy == "read_only" and not self.tool_metadata_read_only(name, self.tools.get(name, {"risky": True})):
-            raise toolkit.ToolPolicyError(
-                "tool is blocked in read-only approval mode",
-                code="read_only_block",
-                security_event_type="read_only_block",
-            )
-        if name in {"write_file", "patch_file"}:
-            self.require_fresh_read_before_edit(name, args)
-        if name == "delegate":
-            if self.depth >= self.max_depth:
-                raise ValueError("delegate depth exceeded")
-        return gate
-
-    def require_fresh_read_before_edit(self, name, args):
-        path = self.path(args["path"])
-        if name == "write_file" and not path.exists():
-            return
-        if name == "write_file" and str(args.get("mode", "overwrite")) == "append":
-            return
-        if not self.memory.has_fresh_file_summary(args["path"]):
-            raise ValueError(
-                "existing files must be read with read_file before editing; "
-                "grep/list_files results are not enough"
-            )
-
-    def tool_list_files(self, args):
-        return toolkit.tool_list_files(self, args)
-
-    def tool_read_file(self, args):
-        return toolkit.tool_read_file(self, args)
-
-    def tool_grep(self, args):
-        return toolkit.tool_grep(self, args)
-
-    def tool_run_shell(self, args):
-        return toolkit.tool_run_shell(self, args)
-
-    def tool_write_file(self, args):
-        return toolkit.tool_write_file(self, args)
-
-    def tool_patch_file(self, args):
-        return toolkit.tool_patch_file(self, args)
-
-    def tool_skill_load(self, args):
-        return toolkit.tool_skill_load(self, args)
-
-    def tool_skill_unload(self, args):
-        return toolkit.tool_skill_unload(self, args)
-
-    def tool_delegate(self, args):
-        return toolkit.tool_delegate(self, args)
-
-    def prompt_approval(self, name, args):
-        if self.read_only:
-            return False
-        tool = self.tools.get(name, {"risky": True})
-        metadata = {
-            **self.tool_runtime_metadata(name, tool),
-            **self.shell_analysis_metadata(),
-        }
-        gate = getattr(self, "_last_tool_gate", None)
-        if gate is not None and hasattr(gate, "to_metadata"):
-            metadata.update(gate.to_metadata())
-        decision = self.ui.approval_request(name, args, metadata=metadata)
-        if isinstance(decision, dict):
-            allowed = bool(decision.get("allowed"))
-            remember = decision.get("remember") or {}
-            if allowed and remember:
-                self.add_temporary_permission(remember.get("access"), remember.get("path"))
-            return allowed
-        return bool(decision)
-
-    def add_temporary_permission(self, access, directory):
-        # 审批中的“本会话允许”只影响当前进程。
-        # 规则仍走 build_permission_rules 聚合，保证默认/settings/临时规则语义一致。
-        access = str(access or "").strip()
-        if access not in {"read", "write"}:
-            raise ValueError("temporary permission access must be read or write")
-        path = toolkit.resolve_tool_path(self, directory, access=access).path
-        if not path.exists() or not path.is_dir():
-            raise ValueError("temporary permission path must be a directory")
-        values = self.temporary_permission_settings["permissions"][access]["allow"]
-        text = str(path)
-        if text not in values:
-            values.append(text)
-        self.permission_rules = build_permission_rules(
-            self.paths,
-            self.settings.user,
-            self.settings.project,
-            self.temporary_permission_settings,
-        )
-
     def reset(self):
         self.session["history"] = []
         self.session["memory"].clear()
@@ -1485,6 +853,12 @@ class CodeMate:
         self.session["active_skills"] = []
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
         self.session_store.save(self.session)
+
+    def close(self):
+        # 统一释放 runtime 持有的外部资源。
+        # 目前主要是 MCP 的后台事件循环和 stdio/http/sse 连接，后续如果接入
+        # 其他长生命周期资源，也可以继续收口在这里。
+        toolkit.close_mcp_connections(self)
 
     def path(self, raw_path):
         return toolkit.resolve_tool_path(self, raw_path, access="read").path

@@ -32,9 +32,6 @@ SHELL_READ_SUBJECTS = {
     "git show",
     "python -m py_compile",
     "python3 -m py_compile",
-    "pytest",
-    "uv run pytest",
-    "uv run python -m pytest",
 }
 SHELL_RISKY_SUBJECTS = {
     "mkdir",
@@ -45,8 +42,14 @@ SHELL_RISKY_SUBJECTS = {
     "tee",
     "git add",
     "git commit",
+    "pytest",
+    "uv run pytest",
+    "uv run python -m pytest",
 }
 SHELL_DANGEROUS_SUBJECTS = {
+    "python",
+    "python3",
+    "uv run python",
     "rm",
     "chmod",
     "chown",

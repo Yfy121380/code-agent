@@ -9,7 +9,7 @@ from codemate.tools.mcp import McpConnection, McpManager, McpServerConfig, McpTo
 def build_agent(tmp_path, outputs=None, **kwargs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
-    paths = ensure_codemate_layout(tmp_path)
+    ensure_codemate_layout(tmp_path)
     store = SessionStore(tmp_path / ".codemate" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
     return MiniAgent(

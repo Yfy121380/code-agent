@@ -67,6 +67,23 @@ def test_has_fresh_file_summary_requires_recent_file_and_matching_freshness(tmp_
     assert not memory.has_fresh_file_summary("sample.txt")
 
 
+def test_file_summary_freshness_supports_paths_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    workspace.mkdir()
+    outside.write_text("alpha\n", encoding="utf-8")
+    memory = LayeredMemory(workspace_root=workspace)
+
+    memory.set_file_summary(str(outside), "outside: alpha")
+    memory.remember_file(str(outside))
+
+    assert memory.has_fresh_file_summary(str(outside))
+
+    outside.write_text("beta\n", encoding="utf-8")
+
+    assert not memory.has_fresh_file_summary(str(outside))
+
+
 def test_process_notes_merge_duplicate_abnormal_tool_calls():
     memory = LayeredMemory()
     metadata = {
@@ -252,6 +269,9 @@ def test_run_dream_once_returns_error_message_without_raising(tmp_path):
         session_store=store,
         approval_policy="auto",
     )
+    log_dir = longterm.daily_logs_dir(tmp_path)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "2026-07-09.md").write_text("- [t1] should stay pending\n", encoding="utf-8")
 
     result = agent.run_dream_once(reason="manual", foreground=True)
     state = longterm.load_dream_state(tmp_path)
@@ -259,3 +279,4 @@ def test_run_dream_once_returns_error_message_without_raising(tmp_path):
     assert result.startswith("dream failed: ")
     assert "fake model ran out of outputs" in result
     assert state["last_status"] == "error"
+    assert state.get("last_processed_daily_log", {}) == {}

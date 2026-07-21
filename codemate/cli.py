@@ -248,7 +248,14 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     ui = TerminalUI()
     agent = build_agent(args, ui=ui)
+    try:
+        return run_cli(args, ui, agent)
+    finally:
+        agent.close()
 
+
+def run_cli(args, ui, agent):
+    """运行 one-shot 或交互式 CLI，并把资源释放交给 main() 的 finally。"""
     current_provider = getattr(args, "provider", "openai")
     current_model = getattr(agent.model_client, "model", _effective_model(args, current_provider))
 

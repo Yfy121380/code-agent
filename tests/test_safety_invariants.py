@@ -759,6 +759,36 @@ def test_dangerous_shell_command_auto_policy_still_requires_approval(tmp_path):
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
 
 
+def test_python_script_shell_command_is_dangerous(tmp_path):
+    (tmp_path / "test.py").write_text("print('hi')\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "python test.py", "timeout": 20})
+
+    assert result == "error: approval denied for run_shell"
+    assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+
+
+def test_python_py_compile_shell_command_stays_read(tmp_path):
+    (tmp_path / "test.py").write_text("print('hi')\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+
+    result = agent.run_tool("run_shell", {"command": "python -m py_compile test.py", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+
+
+def test_pytest_shell_command_is_risky_not_read(tmp_path):
+    (tmp_path / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+
+    result = agent.run_tool("run_shell", {"command": "pytest", "timeout": 20})
+
+    assert result == "error: write operations are blocked in read-only mode"
+    assert agent._last_tool_result_metadata["shell_kind"] == "risky"
+
+
 def test_dangerous_shell_command_full_policy_allows_without_prompt(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = build_agent(tmp_path, [], approval_policy="full")
@@ -991,7 +1021,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
 
     assert "toolkit-shell" in shell_result
     fake_run.assert_called_once()
-    assert agent.tool_run_shell.__func__.__module__ == "codemate.runtime"
+    assert agent.tool_run_shell.__func__.__module__ == "codemate.runtime.tool_execution"
 
     with patch("codemate.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
         delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
