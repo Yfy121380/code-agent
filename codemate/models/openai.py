@@ -20,6 +20,17 @@ from .types import ModelResponse, ModelToolCall
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
 
 
+def _text_from_openai_content(content):
+    parts = []
+    for item in content or []:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
+
+
 def _extract_openai_text(data):
     if data.get("output_text"):
         return data["output_text"]
@@ -27,11 +38,9 @@ def _extract_openai_text(data):
     for item in data.get("output", []):
         if item.get("type") in {"function_call", "tool_call"}:
             continue
-        for content in item.get("content", []):
-            if isinstance(content, dict):
-                text = content.get("text")
-                if text:
-                    return text
+        text = _text_from_openai_content(item.get("content", []))
+        if text:
+            return text
 
     choices = data.get("choices", [])
     if choices:
@@ -47,6 +56,33 @@ def _extract_openai_text(data):
                         return text
 
     return ""
+
+
+def _extract_openai_phase_texts(data):
+    # Responses API 可以把用户可见的中间进度和最终回答区分为不同 phase。
+    commentary = []
+    final = []
+    fallback = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict) or item.get("type") in {"function_call", "tool_call"}:
+            continue
+        text = _text_from_openai_content(item.get("content", []))
+        if not text:
+            continue
+        phase = str(item.get("phase", "") or "")
+        if phase == "commentary":
+            commentary.append(text)
+        elif phase == "final_answer":
+            final.append(text)
+        else:
+            fallback.append(text)
+    if data.get("output_text") and not final and not commentary:
+        fallback.append(str(data["output_text"]))
+    return {
+        "commentary": "\n".join(commentary).strip(),
+        "final": "\n".join(final).strip(),
+        "fallback": "\n".join(fallback).strip(),
+    }
 
 
 def _extract_openai_tool_calls(data):
@@ -87,6 +123,23 @@ def _extract_openai_tool_calls(data):
     return calls
 
 
+def _extract_openai_model_response(data, metadata):
+    texts = _extract_openai_phase_texts(data)
+    calls = _extract_openai_tool_calls(data)
+    if calls:
+        return ModelResponse.from_tool_calls(
+            calls,
+            text=texts["commentary"] or texts["fallback"] or _extract_openai_text(data),
+            metadata=metadata,
+            raw=data,
+        )
+    if texts["final"]:
+        return ModelResponse.final(texts["final"], metadata=metadata, raw=data)
+    if texts["commentary"]:
+        return ModelResponse.commentary(texts["commentary"], metadata=metadata, raw=data)
+    return ModelResponse.final(texts["fallback"] or _extract_openai_text(data), metadata=metadata, raw=data)
+
+
 def _extract_openai_response_from_sse(body_text):
     last_response = None
     deltas = []
@@ -124,6 +177,7 @@ def _extract_openai_response_from_sse(body_text):
     if deltas:
         return "".join(deltas), last_response or {}
     return "", {}
+
 def _to_openai_input(messages, system=None):
     items = []
     if system:
@@ -133,6 +187,15 @@ def _to_openai_input(messages, system=None):
         if role in {"user", "system"}:
             items.append({"role": role, "content": [{"type": "input_text", "text": str(message.get("content", ""))}]})
         elif role == "assistant" and message.get("tool_calls"):
+            content = str(message.get("content", "") or "")
+            if content:
+                items.append(
+                    {
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": content}],
+                    }
+                )
             for call in message.get("tool_calls") or []:
                 items.append(
                     {
@@ -143,7 +206,13 @@ def _to_openai_input(messages, system=None):
                     }
                 )
         elif role == "assistant":
-            items.append({"role": "assistant", "content": [{"type": "output_text", "text": str(message.get("content", ""))}]})
+            kind = str(message.get("kind", "") or "")
+            item = {"role": "assistant", "content": [{"type": "output_text", "text": str(message.get("content", ""))}]}
+            if kind == "commentary":
+                item["phase"] = "commentary"
+            elif kind == "final":
+                item["phase"] = "final_answer"
+            items.append(item)
         elif role == "tool":
             items.append(
                 {
@@ -231,6 +300,10 @@ class OpenAICompatibleModelClient:
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.supports_tools = True
         self.last_completion_metadata = {}
+
+    def fork(self):
+        """为并发子 agent 创建独立客户端实例，避免 last_completion_metadata 互相覆盖。"""
+        return type(self)(self.model, self.base_url, self.api_key, self.temperature, self.timeout)
 
     def _complete_chat_completions(self, messages, max_new_tokens, tools=None, system=None, structured_output=None):
         payload = {
@@ -366,6 +439,8 @@ class OpenAICompatibleModelClient:
                     "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
                 ) from exc
             text = _extract_openai_text(data)
+        if text and not data.get("output") and not data.get("choices") and not data.get("output_text"):
+            data = {**data, "output_text": text}
         if data.get("error"):
             raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
         metadata = {
@@ -375,7 +450,4 @@ class OpenAICompatibleModelClient:
             **_extract_usage_cache_details(data),
         }
         self.last_completion_metadata = metadata
-        calls = _extract_openai_tool_calls(data)
-        if calls:
-            return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
-        return ModelResponse.final(text, metadata=metadata, raw=data)
+        return _extract_openai_model_response(data, metadata)

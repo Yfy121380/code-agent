@@ -1,11 +1,15 @@
 # 工具执行函数：实现 list/read/grep/shell/write/patch/todo/delegate 等工具的实际动作。
 
+import copy
 import re
 import shutil
 import subprocess
 import textwrap
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..workspace import IGNORED_PATH_NAMES
+from .. import memory as memorylib
+from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
 from .constants import TODO_STATUSES
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
@@ -362,28 +366,79 @@ def tool_skill_unload(agent, args):
     return f"skill unloaded: {removed['name']}" + (f" ({reason})" if reason else "")
 
 
-def tool_delegate(agent, args):
-    # delegate 创建一个受限的只读子 agent，用于短程调查。
-    # 子 agent 不继承写权限，避免把委派变成绕过主流程审批的执行通道。
-    if agent.depth >= agent.max_depth:
-        raise ValueError("delegate depth exceeded")
-    task = str(args.get("task", "")).strip()
-    if not task:
-        raise ValueError("task must not be empty")
+DELEGATE_ALLOWED_TOOLS = {"list_files", "read_file", "grep", "web_search", "web_extract", "todo_write"}
 
+
+def _delegate_prompt(task, focus):
+    focus_text = focus or "No specific focus was provided. Use the task to choose the smallest useful search scope."
+    return textwrap.dedent(
+        f"""\
+        You are a delegated investigation agent for codemate.
+
+        Your job is to perform a focused read-only investigation and report useful findings back to the main agent. You are not responsible for making edits, running verification for edits, or giving the final user-facing answer.
+
+        The main agent will use your report as supporting evidence. It may inspect target files again before editing. Your goal is to reduce noisy exploration and point the main agent toward the most relevant evidence.
+
+        Investigation task:
+        {task}
+
+        Focus:
+        {focus_text}
+
+        Guidelines:
+        - Stay focused on the investigation task.
+        - Prefer direct evidence from files, command output, or web sources over speculation.
+        - Use tools only when they help answer the investigation task.
+        - Do not modify files.
+        - Do not run risky shell commands.
+        - Do not investigate unrelated areas.
+        - Stop once you have enough evidence to give a useful report.
+        - Keep the report concise but specific enough for the main agent to act on.
+        - Mention relevant files, functions, commands, URLs, or uncertainties when they matter.
+        """
+    ).strip()
+
+
+def _delegate_child_session(agent, index, task):
+    # 子 agent 使用独立 session 和 run 目录，避免污染父 history。
+    # temporary_permissions 继承父会话，保证已审批的外部读权限在调查中仍然生效。
+    timestamp = now()
+    return {
+        "id": f"delegate-{agent.session['id']}-{index}-{uuid.uuid4().hex[:6]}",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "title": "delegate investigation",
+        "title_slug": "delegate-investigation",
+        "workspace_root": agent.workspace.repo_root,
+        "history": [],
+        "history_summary": "",
+        "memory": memorylib.default_memory_state(),
+        "todos": [],
+        "active_skills": [],
+        "temporary_permissions": copy.deepcopy(agent.session.get("temporary_permissions", {})),
+        "delegate_parent_session": agent.session.get("id", ""),
+        "delegate_task": task,
+    }
+
+
+def _run_delegate_task(agent, item, index, max_steps):
     from ..runtime import CodeMate
 
+    task = str(item.get("task", "")).strip()
+    focus = str(item.get("focus", "")).strip()
+    child_depth = agent.depth + 1
+    fork_model_client = getattr(agent.model_client, "fork", None)
+    model_client = fork_model_client() if callable(fork_model_client) else agent.model_client
     child = CodeMate(
-        model_client=agent.model_client,
+        model_client=model_client,
         workspace=agent.workspace,
         session_store=agent.session_store,
-        run_store=agent.run_store,
+        session=_delegate_child_session(agent, index, task),
         approval_policy="read_only",
-        max_steps=int(args.get("max_steps", 3)),
+        max_steps=max_steps,
         max_new_tokens=agent.max_new_tokens,
-        depth=agent.depth + 1,
-        max_depth=agent.max_depth,
-        read_only=True,
+        depth=child_depth,
+        max_depth=child_depth,
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
         feature_flags={
@@ -391,14 +446,111 @@ def tool_delegate(agent, args):
             "memory_dream": False,
             "long_term_memory": False,
             "relevant_memory": False,
+            "session_title": False,
         },
+        allowed_tools=DELEGATE_ALLOWED_TOOLS,
         timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
     )
-    # 委派的目标是“调查”，不是“放权执行”。
-    # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
-    child.memory.set_task_summary(task)
+    child.memory.set_task_summary(task if not focus else f"{task}\nFocus: {focus}")
     child.session["memory"] = child.memory.to_dict()
-    return "delegate_result:\n" + child.ask(task)
+    try:
+        report = child.ask(_delegate_prompt(task, focus))
+        status = "ok"
+        error = ""
+    except Exception as exc:
+        report = ""
+        status = "error"
+        error = str(exc)
+    finally:
+        child.close()
+    return {
+        "index": index,
+        "task": task,
+        "focus": focus,
+        "status": status,
+        "report": report,
+        "error": error,
+        "chars": len(report or error),
+        "session_id": child.session.get("id", ""),
+        "run_dir": str(getattr(child, "current_run_dir", "") or ""),
+    }
+
+
+def tool_delegate(agent, args):
+    # delegate 并发创建若干只读调查子 agent。
+    # 它只把最终调查报告交回主 agent，中间工具流水留在各自 child trace 中。
+    if agent.depth >= agent.max_depth:
+        raise ValueError("delegate depth exceeded")
+    tasks = list(args.get("tasks") or [])
+    max_steps = int(args.get("max_steps", 20))
+    if not tasks:
+        raise ValueError("tasks must be a non-empty list")
+    if len(tasks) > 3:
+        raise ValueError("tasks must contain at most 3 items")
+    if max_steps < 1 or max_steps > 40:
+        raise ValueError("max_steps must be in [1, 40]")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {
+            executor.submit(_run_delegate_task, agent, item, index, max_steps): index
+            for index, item in enumerate(tasks, 1)
+        }
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                index = futures[future]
+                item = tasks[index - 1]
+                results.append(
+                    {
+                        "index": index,
+                        "task": str(item.get("task", "")).strip(),
+                        "focus": str(item.get("focus", "")).strip(),
+                        "status": "error",
+                        "report": "",
+                        "error": str(exc),
+                        "chars": len(str(exc)),
+                        "session_id": "",
+                        "run_dir": "",
+                    }
+                )
+    results.sort(key=lambda item: item["index"])
+    failed = sum(1 for item in results if item["status"] != "ok")
+    agent._last_delegate_metadata = {
+        "delegate_status": "ok" if failed == 0 else ("error" if failed == len(results) else "partial_error"),
+        "delegate_task_count": len(results),
+        "delegate_tasks": [
+            {
+                "index": item["index"],
+                "status": item["status"],
+                "chars": item["chars"],
+                "session_id": item["session_id"],
+                "run_dir": item["run_dir"],
+            }
+            for item in results
+        ],
+    }
+
+    lines = ["delegate_result:"]
+    for item in results:
+        lines.extend(
+            [
+                "",
+                f"Task {item['index']}: {item['task']}",
+                f"Focus: {item['focus'] or '(none)'}",
+                f"Status: {item['status']}",
+            ]
+        )
+        if item["session_id"]:
+            lines.append(f"Child session: {item['session_id']}")
+        if item["run_dir"]:
+            lines.append(f"Child run: {item['run_dir']}")
+        if item["status"] == "ok":
+            lines.extend(["Report:", item["report"].strip() or "(empty)"])
+        else:
+            lines.extend(["Error:", item["error"] or "unknown error"])
+    return "\n".join(lines)
 
 
 _TOOL_RUNNERS = {

@@ -556,12 +556,46 @@ DELEGATE_TOOL_SPEC = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "task": {"type": "string", "description": "Bounded read-only investigation task for the child agent."},
-            "max_steps": {"type": "integer", "description": "Maximum child-agent tool steps.", "default": 3},
+            "tasks": {
+                "type": "array",
+                "description": "One to three focused read-only investigation tasks.",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "A concrete investigation question. Include relevant files, symbols, errors, URLs, or behavior when known.",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "description": "Optional scope hint, such as a directory, file, module, feature, URL, or external topic.",
+                        },
+                    },
+                    "required": ["task"],
+                    "additionalProperties": False,
+                },
+            },
+            "max_steps": {
+                "type": "integer",
+                "description": "Maximum steps per delegated investigation. Default 20. Increase only for broad investigations.",
+                "default": 20,
+            },
         },
-        "required": ["task"],
+        "required": ["tasks"],
         "additionalProperties": False,
     },
     "risky": False,
-    "description": "Ask a bounded read-only child agent to investigate.",
+    "description": """
+Run one or more focused read-only investigations and return concise reports.
+
+Use this tool when the current task needs broad, uncertain, or multi-branch evidence gathering before you can decide the next action. It is especially useful for inspecting several independent files or modules, comparing implementations, locating where behavior is defined, or gathering external source evidence.
+
+Provide 1 to 3 concrete investigation tasks. Each task should include a specific question and, when possible, a focus such as a directory, file, symbol, error message, URL, feature, or topic. Separate independent investigation branches into separate tasks.
+
+Do not use this tool for simple file reads, simple grep searches, single-file inspection, direct edits, or tasks where you already know what to do next. Do not ask delegated investigations to modify files, run risky commands, or make the final decision.
+
+The returned reports are supporting evidence and navigation hints. Use them to decide what to inspect or do next. If you will edit a file based on a report, read that exact file yourself before editing.
+""".strip(),
 }

@@ -18,5 +18,7 @@ def build_tool_registry(agent):
     # 就连 delegate 这个工具都不再暴露给模型。
     if agent.depth < agent.max_depth:
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
-    tools.update(build_mcp_tool_registry(agent))
+    allowed_tools = getattr(agent, "allowed_tools", None)
+    if allowed_tools is None or any(str(name).startswith("mcp__") for name in allowed_tools):
+        tools.update(build_mcp_tool_registry(agent))
     return tools

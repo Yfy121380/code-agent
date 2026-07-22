@@ -15,8 +15,6 @@ class ApprovalMixin:
         return self.prompt_approval(name, args)
 
     def prompt_approval(self, name, args):
-        if self.read_only:
-            return False
         tool = self.tools.get(name, {"risky": True})
         metadata = {
             **self.tool_runtime_metadata(name, tool),

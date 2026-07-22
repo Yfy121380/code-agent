@@ -104,7 +104,13 @@ class HistoryContextRenderer:
             if role == "assistant" and item.get("tool_calls"):
                 calls = [dict(call or {}) for call in item.get("tool_calls") or []]
                 call_ids = {str(call.get("id", "")) for call in calls}
-                messages = [{"role": "assistant", "content": str(item.get("content", "")), "tool_calls": calls}]
+                assistant_message = {
+                    "role": "assistant",
+                    "kind": str(item.get("kind", "tool_calls") or "tool_calls"),
+                    "content": str(item.get("content", "")),
+                    "tool_calls": calls,
+                }
+                messages = [assistant_message]
                 index += 1
                 while index < len(history) and history[index].get("role") == "tool":
                     tool_item = dict(history[index])

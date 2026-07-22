@@ -169,7 +169,7 @@ def gate_for_access(agent, access, path_decisions=()):
             return _gate("allow", "read_allowed_by_policy", decisions, "read")
         return _gate("ask", "read_requires_approval", decisions, "read")
 
-    if agent.read_only or policy == "read_only":
+    if policy == "read_only":
         raise ToolPolicyError(
             "write operations are blocked in read-only mode",
             code="read_only_block",
@@ -209,7 +209,7 @@ def gate_for_mcp(agent):
     即使当前 approval policy 是 auto，也不能把 MCP 当成内置低风险工具放行；
     只有 full 明确表示全部自动通过。read_only 直接拒绝。
     """
-    if agent.read_only or str(agent.approval_policy) == "read_only":
+    if str(agent.approval_policy) == "read_only":
         raise ToolPolicyError(
             "MCP tools are blocked in read-only mode",
             code="mcp_read_only_block",

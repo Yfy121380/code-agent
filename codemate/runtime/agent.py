@@ -90,7 +90,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         max_new_tokens=4096,
         depth=0,
         max_depth=1,
-        read_only=False,
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
@@ -114,7 +113,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # 子agent深度
         self.depth = depth
         self.max_depth = max_depth
-        self.read_only = read_only
         self.allowed_tools = None if allowed_tools is None else {str(name) for name in allowed_tools}
         self.memory_scope_only = bool(memory_scope_only)
         self.runtime_mode = str(runtime_mode or "agent")
@@ -192,6 +190,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._last_shell_analysis = None
         # 最近一次工具门禁结果，供审批 UI 展示和 trace 记录。
         self._last_tool_gate = None
+        # 最近一次 delegate 子任务摘要，供 UI 和 trace 展示并发调查结果。
+        self._last_delegate_metadata = {}
         # 最近一次 prefix 刷新结果，说明仓库信息或工具签名是否变化。
         self._last_prefix_refresh = {
             "workspace_facts_changed": False,
@@ -334,6 +334,29 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - If a tool result says a repeated identical call was rejected, do not retry the same investigation; either choose a materially different action or provide the final answer.
             """
         ).strip()
+        progress_rules = textwrap.dedent(
+            """\
+            Progress updates:
+            - You may output commentary before meaningful tool work, when switching to a new work phase, or after collecting enough evidence to summarize an interim finding.
+            - Commentary should help the user understand what is happening: what you are about to inspect, what you just learned, or why the next step is needed.
+            - A response may contain commentary and tool calls together.
+            - Do not output commentary before every trivial tool call.
+            - For simple tool chains, keep commentary to one short sentence.
+            - For non-trivial investigation, debugging, review, or design work, commentary may be a short paragraph with concrete observations, but should not become a final answer.
+            - Use final_answer only when the user's request is complete, blocked, or can be answered without more tool calls.
+
+            Good commentary:
+            - "我先检查模型适配层和 runtime 工具调用链路。"
+            - "我已经确认工具注册和执行入口分开在 runtime 与 tools 两层，接下来检查权限判断如何串起来。"
+            - "目前看报错不是来自 schema，而是 Anthropic 格式转换时 tool_result 没有按同一轮 tool_use 合并；我再看转换函数确认。"
+            - "测试已经覆盖 OpenAI commentary-only 和 Anthropic 多工具结果合并，接下来跑全量测试确认没有回归。"
+
+            Bad commentary:
+            - "我需要思考所有可能原因，然后逐个排除。"
+            - "也许是 A，也许是 B，我先猜一下。"
+            - "第一步我会读文件，第二步我会分析，第三步我会修改。"
+            """
+        ).strip()
         workflow_rules = textwrap.dedent(
             """\
             Workflow rules:
@@ -343,6 +366,18 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
             - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
+            """
+        ).strip()
+        delegation_rules = textwrap.dedent(
+            """\
+            Delegation:
+            - Use delegate only for broad, uncertain, or multi-branch read-only investigations where isolating noisy intermediate search results would help.
+            - Delegate is useful when you need to inspect several independent areas, compare multiple modules, or gather external evidence before deciding the next action.
+            - Do not use delegate for simple file reads, simple grep searches, single-file inspection, direct edits, or tasks where the next action is already clear.
+            - Do not delegate work that requires modifying files, running risky shell commands, making final decisions, or answering the user directly.
+            - Give each delegated task a concrete question and scope. Vague delegated tasks produce weak reports.
+            - Treat delegate results as supporting evidence and navigation hints. You remain responsible for deciding, editing, verifying, and giving the final answer.
+            - If you will edit a file based on delegate findings, read that exact file yourself before editing.
             """
         ).strip()
         long_term_rules = textwrap.dedent(
@@ -386,7 +421,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
             {tool_use_rules}
 
+            {progress_rules}
+
             {workflow_rules}
+
+            {delegation_rules}
 
             {long_term_rules}
 

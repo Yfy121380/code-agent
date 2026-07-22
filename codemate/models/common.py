@@ -49,6 +49,8 @@ def _as_model_response(output):
     if isinstance(output, ModelToolCall):
         return ModelResponse.from_tool_calls([output])
     if isinstance(output, dict):
+        if output.get("kind") == "commentary":
+            return ModelResponse.commentary(output.get("text", ""), raw=output)
         if output.get("kind") == "tool_calls":
             return ModelResponse.from_tool_calls(output.get("tool_calls", []), text=output.get("text", ""), raw=output)
         if output.get("kind") == "final":

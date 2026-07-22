@@ -33,8 +33,22 @@ class ModelResponse:
     raw: dict | None = None
 
     @classmethod
+    def commentary(cls, text, metadata=None, raw=None):
+        return cls(
+            kind="commentary",
+            text=str(text or ""),
+            metadata=dict(metadata or {}),
+            raw=raw,
+        )
+
+    @classmethod
     def final(cls, text, metadata=None, raw=None):
-        return cls(kind="final", text=str(text or ""), metadata=dict(metadata or {}), raw=raw)
+        return cls(
+            kind="final",
+            text=str(text or ""),
+            metadata=dict(metadata or {}),
+            raw=raw,
+        )
 
     @classmethod
     def tool_call(cls, name, args=None, call_id=None, text="", metadata=None, raw=None):
@@ -60,4 +74,10 @@ class ModelResponse:
                         call_id=call.get("id") or call.get("call_id"),
                     )
                 )
-        return cls(kind="tool_calls", text=str(text or ""), tool_calls=normalized, metadata=dict(metadata or {}), raw=raw)
+        return cls(
+            kind="tool_calls",
+            text=str(text or ""),
+            tool_calls=normalized,
+            metadata=dict(metadata or {}),
+            raw=raw,
+        )

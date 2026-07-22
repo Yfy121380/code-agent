@@ -35,6 +35,8 @@ class ToolExecutionMixin:
             return True
         if name in {"list_files", "read_file", "grep"}:
             return True
+        if name in {"todo_write", "skill_load", "skill_unload"}:
+            return True
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
             return bool(analysis is not None and getattr(analysis, "kind", "") == "read")
@@ -78,6 +80,7 @@ class ToolExecutionMixin:
         # -> 真正执行 -> 更新记忆。
         self._last_shell_analysis = None
         self._last_tool_gate = None
+        self._last_delegate_metadata = {}
         tool = self.tools.get(name)
         if tool is None:
             message = f"error: unknown tool '{name}'"
@@ -135,7 +138,7 @@ class ToolExecutionMixin:
             self._last_tool_result_metadata = {
                 "tool_status": "rejected",
                 "tool_error_code": "approval_denied",
-                "security_event_type": "read_only_block" if self.read_only else "approval_denied",
+                "security_event_type": "approval_denied",
                 **self.tool_runtime_metadata(name, tool),
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
@@ -154,6 +157,12 @@ class ToolExecutionMixin:
                 if exit_code != 0:
                     tool_status = "error"
                     tool_error_code = "tool_failed"
+            delegate_metadata = dict(getattr(self, "_last_delegate_metadata", {}) or {})
+            if name == "delegate" and delegate_metadata:
+                delegate_status = str(delegate_metadata.get("delegate_status", "ok"))
+                if delegate_status != "ok":
+                    tool_status = delegate_status
+                    tool_error_code = "delegate_failed"
 
             self.update_memory_after_tool(name, args, result)
             self._last_tool_result_metadata = {
@@ -164,6 +173,7 @@ class ToolExecutionMixin:
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
+                **delegate_metadata,
             }
             if tool_status == "ok":
                 self.resolve_process_notes_after_success(name, args)

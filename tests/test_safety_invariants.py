@@ -324,6 +324,18 @@ def test_skill_load_and_unload_update_active_skills(tmp_path):
     assert "skill is not active" in missing
 
 
+def test_read_only_policy_allows_skill_load_and_unload(tmp_path):
+    write_skill(tmp_path, body="Use references/guide.md for details.")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+
+    loaded = agent.run_tool("skill_load", {"name": "backend"})
+    unloaded = agent.run_tool("skill_unload", {"name": "backend", "reason": "not needed"})
+
+    assert "skill loaded: backend" in loaded
+    assert "skill unloaded: backend" in unloaded
+    assert agent.session["active_skills"] == []
+
+
 def test_skill_load_rejects_frontmatter_name_mismatch(tmp_path):
     skill_dir = tmp_path / ".codemate" / "skills" / "backend"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -520,7 +532,7 @@ def test_todo_write_updates_session_without_workspace_change(tmp_path):
         },
         {"phase": "Add tests", "status": "pending", "tasks": []},
     ]
-    assert agent._last_tool_result_metadata["read_only"] is False
+    assert agent._last_tool_result_metadata["read_only"] is True
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
 
 
@@ -568,14 +580,14 @@ def test_todo_write_rejects_empty_content(tmp_path):
     assert agent.session["todos"] == []
 
 
-def test_read_only_policy_blocks_todo_write(tmp_path):
+def test_read_only_policy_allows_todo_write(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="read_only")
 
     result = agent.run_tool("todo_write", {"todos": [{"phase": "Inspect files", "status": "pending", "tasks": []}]})
 
-    assert result == "error: tool is blocked in read-only approval mode"
-    assert agent._last_tool_result_metadata["tool_error_code"] == "read_only_block"
-    assert agent.session["todos"] == []
+    assert "todos updated: 1 phases" in result
+    assert agent._last_tool_result_metadata["tool_status"] == "ok"
+    assert agent.session["todos"] == [{"phase": "Inspect files", "status": "pending", "tasks": []}]
 
 
 def test_todo_write_rejects_inconsistent_phase_and_task_status(tmp_path):
@@ -653,6 +665,58 @@ def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(
     assert "repeated identical tool call" in third
     notes = agent.session["memory"]["process_notes"]
     assert notes[0]["kind"] == "repeated_call"
+
+
+def test_runtime_records_one_assistant_message_for_multiple_tool_calls(tmp_path):
+    call_id = "toolu_read"
+    second_call_id = "toolu_list"
+    response = ModelResponse.from_tool_calls(
+        [
+            {"id": call_id, "name": "read_file", "args": {"path": "README.md", "start": 1, "end": 1}},
+            {"id": second_call_id, "name": "list_files", "args": {"path": "."}},
+        ],
+        text="我先检查 README 和目录结构。",
+    )
+    agent = build_agent(tmp_path, [response, ModelResponse.final("done")])
+
+    result = agent.ask("inspect README")
+
+    assistant_calls = [item for item in agent.session["history"] if item.get("role") == "assistant" and item.get("tool_calls")]
+    assert result == "done"
+    assert len(assistant_calls) == 1
+    assert assistant_calls[0]["kind"] == "tool_calls"
+    assert assistant_calls[0]["content"] == "我先检查 README 和目录结构。"
+    assert [call["id"] for call in assistant_calls[0]["tool_calls"]] == [call_id, second_call_id]
+
+
+def test_runtime_records_commentary_response_and_continues(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.commentary("我先确认当前任务。"), ModelResponse.final("done")])
+
+    result = agent.ask("say hello")
+
+    assert result == "done"
+    assert any(
+        item.get("role") == "assistant" and item.get("kind") == "commentary" and item.get("content") == "我先确认当前任务。"
+        for item in agent.session["history"]
+    )
+
+
+def test_main_agent_does_not_stop_at_max_steps(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call("read_file", {"path": "README.md", "start": 1, "end": 1}, call_id="call_read"),
+            ModelResponse.tool_call("list_files", {"path": "."}, call_id="call_list"),
+            ModelResponse.final("done"),
+        ],
+        max_steps=1,
+    )
+
+    result = agent.ask("inspect more than one thing")
+
+    assert result == "done"
+    assert agent.current_task_state.tool_steps == 2
+    assert agent.current_task_state.stop_reason == "final_answer_returned"
 
 
 def test_repeated_call_process_note_clears_after_any_successful_tool(tmp_path):
@@ -819,11 +883,11 @@ def test_python_py_compile_shell_command_stays_read(tmp_path):
 
 def test_pytest_shell_command_is_risky_not_read(tmp_path):
     (tmp_path / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    agent = build_agent(tmp_path, [], approval_policy="ask")
 
     result = agent.run_tool("run_shell", {"command": "pytest", "timeout": 20})
 
-    assert result == "error: write operations are blocked in read-only mode"
+    assert result == "error: approval denied for run_shell"
     assert agent._last_tool_result_metadata["shell_kind"] == "risky"
 
 
@@ -856,7 +920,7 @@ def test_dangerous_shell_command_rejects_root_targets_without_approval(tmp_path)
     assert "dangerous shell target is blocked: /" in result
 
 
-# read_only 模式拒绝非读取工具
+# read_only 模式拒绝非读取 shell 命令
 def test_read_only_policy_blocks_write_like_shell(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="read_only")
 
@@ -1062,7 +1126,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     assert agent.tool_run_shell.__func__.__module__ == "codemate.runtime.tool_execution"
 
     with patch("codemate.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
+        delegate_result = agent.tool_delegate({"tasks": [{"task": "inspect README.md"}], "max_steps": 2})
 
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
@@ -1072,7 +1136,7 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
     agent = build_agent(tmp_path, [], depth=1, max_depth=1)
 
     try:
-        agent.validate_tool("delegate", {"task": "inspect README.md", "max_steps": 2})
+        agent.validate_tool("delegate", {"tasks": [{"task": "inspect README.md"}], "max_steps": 2})
     except ValueError as exc:
         assert "delegate depth exceeded" in str(exc)
     else:
@@ -1084,7 +1148,7 @@ def test_delegate_child_is_read_only(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelResponse.tool_call("delegate", {"task": "write a file", "max_steps": 2}),
+            ModelResponse.tool_call("delegate", {"tasks": [{"task": "write a file"}], "max_steps": 2}),
             ModelResponse.tool_call("write_file", {"path": "child-was-not-allowed.txt", "content": "nope"}),
             ModelResponse.final("child done"),
             ModelResponse.final("parent done"),
@@ -1098,6 +1162,57 @@ def test_delegate_child_is_read_only(tmp_path):
     tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate"
     assert "delegate_result" in tool_events[0]["content"]
+
+
+def test_delegate_runs_multiple_read_only_investigations(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final("first report"), ModelResponse.final("second report")], approval_policy="auto")
+
+    result = agent.run_tool(
+        "delegate",
+        {
+            "tasks": [
+                {"task": "inspect README", "focus": "README.md"},
+                {"task": "inspect tests", "focus": "tests"},
+            ],
+            "max_steps": 2,
+        },
+    )
+
+    assert "Task 1: inspect README" in result
+    assert "Task 2: inspect tests" in result
+    assert "Status: ok" in result
+    assert "first report" in result
+    assert "second report" in result
+    assert agent._last_tool_result_metadata["delegate_task_count"] == 2
+    assert [item["status"] for item in agent._last_tool_result_metadata["delegate_tasks"]] == ["ok", "ok"]
+
+
+def test_delegate_child_inherits_temporary_read_permissions(tmp_path):
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-delegate-outside"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "note.txt"
+    outside_file.write_text("delegated evidence\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call("read_file", {"path": str(outside_file), "start": 1, "end": 1}),
+            ModelResponse.final("read delegated evidence"),
+        ],
+        approval_policy="ask",
+    )
+    agent.add_temporary_permission("read", outside_dir)
+
+    result = agent.run_tool("delegate", {"tasks": [{"task": "read outside note", "focus": str(outside_file)}], "max_steps": 3})
+
+    assert "Status: ok" in result
+    assert "read delegated evidence" in result
+    child_sessions = [item for item in agent.session_store.root.iterdir() if item.name.startswith("delegate-")]
+    assert child_sessions
+    child_session = json.loads((child_sessions[0] / "session.json").read_text(encoding="utf-8"))
+    assert child_session["temporary_permissions"]["permissions"]["read"]["allow"] == [str(outside_dir.resolve())]
+    child_tool_results = [item for item in child_session["history"] if item.get("role") == "tool"]
+    assert child_tool_results
+    assert "delegated evidence" in child_tool_results[0]["content"]
 
 # 构造包含 secret 值的 payload，然后写 trace。
 def test_configured_secret_env_names_are_redacted_in_trace(tmp_path):

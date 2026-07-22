@@ -20,8 +20,8 @@ class RuntimeLoopMixin:
 
         输入 / 输出：
         - 输入：`user_message`，即用户这一次的任务描述
-        - 输出：字符串形式的最终回答；如果中途达到步数上限或重试上限，
-          返回的是一条停止原因说明
+        - 输出：字符串形式的最终回答；主 agent 不限制工具步数，delegate/dream
+          这类受控子流程仍会在达到步数上限时返回停止原因
 
         在 agent 链路里的位置：
         它是 CLI 和底层工具/模型之间的核心桥梁。CLI 收到用户输入后基本只做
@@ -50,11 +50,12 @@ class RuntimeLoopMixin:
 
         tool_steps = 0
         attempts = 0
-        max_attempts = max(self.max_steps * 3, self.max_steps + 4)
+        limit_steps = not (self.runtime_mode == "agent" and self.depth == 0)
+        max_attempts = max(self.max_steps * 3, self.max_steps + 4) if limit_steps else None
 
         # 主循环按“感知 -> 决策 -> 行动 -> 记录”推进：
         # 重新组 prompt，调用模型，执行工具或接收 final，再把结果写回状态。
-        while tool_steps < self.max_steps and attempts < max_attempts:
+        while (not limit_steps or tool_steps < self.max_steps) and (max_attempts is None or attempts < max_attempts):
             attempts += 1
             task_state.record_attempt()
             self.run_store.write_task_state(task_state)
@@ -128,6 +129,23 @@ class RuntimeLoopMixin:
             )
             self.ui.model_end(kind=kind, metadata=completion_metadata)
 
+            if kind == "commentary":
+                commentary = str(getattr(response, "text", "") or "").strip()
+                if not commentary:
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "content": "Runtime notice: model returned an empty commentary message.",
+                            "created_at": now(),
+                        }
+                    )
+                    self.run_store.write_task_state(task_state)
+                    continue
+                self.ui.commentary(commentary)
+                self.record({"role": "assistant", "kind": "commentary", "content": commentary, "created_at": now()})
+                self.run_store.write_task_state(task_state)
+                continue
+
             if kind == "tool_calls":
                 calls = list(getattr(response, "tool_calls", []) or [])
                 if not calls:
@@ -140,17 +158,22 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
-                for call in calls:
-                    if tool_steps >= self.max_steps:
-                        break
-                    self.record(
-                        {
-                            "role": "assistant",
-                            "content": str(getattr(response, "text", "") or ""),
-                            "tool_calls": [call.to_dict()],
-                            "created_at": now(),
-                        }
-                    )
+                calls_to_execute = calls
+                if limit_steps:
+                    calls_to_execute = calls[: max(0, self.max_steps - tool_steps)]
+                commentary = str(getattr(response, "text", "") or "")
+                if commentary.strip():
+                    self.ui.commentary(commentary.strip())
+                self.record(
+                    {
+                        "role": "assistant",
+                        "kind": "tool_calls",
+                        "content": commentary,
+                        "tool_calls": [call.to_dict() for call in calls_to_execute],
+                        "created_at": now(),
+                    }
+                )
+                for call in calls_to_execute:
                     tool_steps += 1
                     name = call.name
                     args = dict(call.args or {})
@@ -197,7 +220,7 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
-                self.record({"role": "assistant", "content": final, "created_at": now()})
+                self.record({"role": "assistant", "kind": "final", "content": final, "created_at": now()})
                 task_state.finish_success(final)
                 self.run_store.write_task_state(task_state)
                 self.emit_trace(
@@ -224,7 +247,7 @@ class RuntimeLoopMixin:
             )
             self.run_store.write_task_state(task_state)
 
-        if attempts >= max_attempts and tool_steps < self.max_steps:
+        if max_attempts is not None and attempts >= max_attempts and tool_steps < self.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:

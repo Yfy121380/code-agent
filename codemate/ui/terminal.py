@@ -41,6 +41,9 @@ class NullUI:
     def compact_end(self, status="", metadata=None):
         pass
 
+    def commentary(self, text):
+        pass
+
     def approval_request(self, name, args, metadata=None):
         return False
 
@@ -129,7 +132,7 @@ class TerminalUI(NullUI):
         return app.run()
 
     def model_start(self):
-        self.console.print("[dim]Thinking...[/dim]")
+        pass
 
     def model_end(self, kind="", metadata=None):
         pass
@@ -148,6 +151,11 @@ class TerminalUI(NullUI):
             )
         elif status == "error":
             self.console.print(f"[yellow]  -> history compact failed: {metadata.get('reason', 'unknown error')}[/yellow]")
+
+    def commentary(self, text):
+        text = str(text or "").strip()
+        if text:
+            self.console.print(f"[dim]{text}[/dim]")
 
     def tool_start(self, name, args, risk_level=""):
         summary = summarize_tool_call(name, args)

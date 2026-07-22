@@ -111,7 +111,6 @@ class DreamMixin:
                     max_new_tokens=self.max_new_tokens,
                     depth=0,
                     max_depth=0,
-                    read_only=False,
                     shell_env_allowlist=self.shell_env_allowlist,
                     secret_env_names=self.secret_env_names,
                     feature_flags={

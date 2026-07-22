@@ -47,10 +47,10 @@ class SessionStore:
 
     def list_sessions(self):
         # 返回当前项目下的人类可读 session 列表，按最近更新时间倒序。
-        # dream session 属于后台记忆整理流程，不参与用户会话恢复。
+        # dream/delegate session 属于后台或子任务运行工件，不参与用户会话恢复。
         sessions = []
         for path in self.root.glob("*/session.json"):
-            if path.parent.name.startswith("dream-"):
+            if path.parent.name.startswith(("dream-", "delegate-")):
                 continue
             try:
                 session = json.loads(path.read_text(encoding="utf-8"))

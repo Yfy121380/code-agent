@@ -309,7 +309,20 @@ def validate_tool(agent, name, args):
         return ToolGate("allow", "session_update")
 
     if name == "delegate":
-        task = str(args.get("task", "")).strip()
-        if not task:
-            raise ValueError("task must not be empty")
+        tasks = args.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError("tasks must be a non-empty list")
+        if len(tasks) > 3:
+            raise ValueError("tasks must contain at most 3 items")
+        for index, item in enumerate(tasks):
+            if not isinstance(item, dict):
+                raise ValueError(f"tasks[{index}] must be an object")
+            task = str(item.get("task", "")).strip()
+            if not task:
+                raise ValueError(f"tasks[{index}].task must not be empty")
+            if "focus" in item and not isinstance(item.get("focus"), str):
+                raise ValueError(f"tasks[{index}].focus must be a string")
+        max_steps = int(args.get("max_steps", 20))
+        if max_steps < 1 or max_steps > 40:
+            raise ValueError("max_steps must be in [1, 40]")
         return ToolGate("allow", "delegate_read_only")

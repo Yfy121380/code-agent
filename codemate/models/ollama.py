@@ -50,6 +50,10 @@ class OllamaModelClient:
         self.supports_tools = True
         self.last_completion_metadata = {}
 
+    def fork(self):
+        """为并发子 agent 创建独立客户端实例，避免 last_completion_metadata 互相覆盖。"""
+        return type(self)(self.model, self.host, self.temperature, self.top_p, self.timeout)
+
     def complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
         structured_output = kwargs.pop("structured_output", None)
         del kwargs

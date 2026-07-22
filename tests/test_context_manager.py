@@ -471,6 +471,36 @@ def test_context_manager_keeps_tool_output_structure_without_budget_clipping(tmp
     assert transcript.count("very long output") == 80
 
 
+def test_context_manager_preserves_assistant_tool_call_kind(tmp_path):
+    agent = build_agent(tmp_path, [])
+    call_id = "toolu_1"
+    agent.record(
+        {
+            "role": "assistant",
+            "kind": "tool_calls",
+            "content": "",
+            "tool_calls": [{"id": call_id, "name": "read_file", "args": {"path": "README.md", "start": 1, "end": 1}}],
+            "created_at": "2026-04-07T09:00:00+00:00",
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": "read_file",
+            "content": "# README.md\n   1: demo",
+            "created_at": "2026-04-07T09:00:01+00:00",
+        }
+    )
+
+    message_build = ContextManager(agent).build_messages("continue")
+    assistant_messages = [message for message in message_build.messages if message.get("role") == "assistant"]
+
+    assert assistant_messages
+    assert assistant_messages[0]["kind"] == "tool_calls"
+    assert assistant_messages[0]["tool_calls"][0]["id"] == call_id
+
+
 def test_context_manager_renders_selected_long_term_memory(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.relevant_long_term_memory = [

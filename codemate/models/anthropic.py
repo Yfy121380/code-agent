@@ -13,41 +13,66 @@ from .schemas import _tool_specs_to_anthropic
 from .types import ModelResponse, ModelToolCall
 
 
+def _assistant_content_blocks(message):
+    # codemate 默认不启用 thinking，只回放 Anthropic 需要的可见文本和 tool_use。
+    # 这样 DeepSeek/Anthropic 兼容接口不会被旧 thinking block 污染。
+    content = []
+    text = str(message.get("content", "") or "")
+    if text:
+        content.append({"type": "text", "text": text})
+    content.extend(
+        {
+            "type": "tool_use",
+            "id": call.get("id"),
+            "name": call.get("name"),
+            "input": call.get("args", {}) or {},
+        }
+        for call in message.get("tool_calls") or []
+    )
+    return content
+
+
 def _to_anthropic_messages(messages):
     converted = []
-    for message in messages or []:
+    index = 0
+    messages = list(messages or [])
+    while index < len(messages):
+        message = messages[index]
         role = message.get("role", "user")
         if role == "tool":
+            # Anthropic 要求一条 assistant 消息里的多个 tool_use，
+            # 必须由紧跟其后的一条 user 消息一次性返回所有 tool_result。
+            tool_results = []
+            while index < len(messages) and messages[index].get("role") == "tool":
+                tool_message = messages[index]
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_message.get("tool_call_id"),
+                        "content": str(tool_message.get("content", "")),
+                    }
+                )
+                index += 1
             converted.append(
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": message.get("tool_call_id"),
-                            "content": str(message.get("content", "")),
-                        }
-                    ],
+                    "content": tool_results,
                 }
             )
+            continue
         elif role == "assistant" and message.get("tool_calls"):
             converted.append(
                 {
                     "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": call.get("id"),
-                            "name": call.get("name"),
-                            "input": call.get("args", {}) or {},
-                        }
-                        for call in message.get("tool_calls") or []
-                    ],
+                    "content": _assistant_content_blocks(message),
                 }
             )
         else:
             converted.append({"role": role, "content": [{"type": "text", "text": str(message.get("content", ""))}]})
+        index += 1
     return converted
+
+
 def _extract_anthropic_response(data):
     text_parts = []
     calls = []
@@ -72,6 +97,7 @@ def _extract_anthropic_response(data):
         return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
     return ModelResponse.final(text, metadata=metadata, raw=data)
 
+
 class AnthropicCompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -82,6 +108,10 @@ class AnthropicCompatibleModelClient:
         self.supports_prompt_cache = False
         self.supports_tools = True
         self.last_completion_metadata = {}
+
+    def fork(self):
+        """为并发子 agent 创建独立客户端实例，避免 last_completion_metadata 互相覆盖。"""
+        return type(self)(self.model, self.base_url, self.api_key, self.temperature, self.timeout)
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
         del prompt_cache_key, prompt_cache_retention

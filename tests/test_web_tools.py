@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
-from codemate.ui.summaries import summarize_read_tool_result
+from codemate.ui.summaries import summarize_read_tool_result, summarize_tool_call, summarize_tool_result
 
 
 def build_agent(tmp_path, outputs=None, **kwargs):
@@ -53,14 +53,14 @@ def test_web_search_read_only_policy_allows_without_approval(tmp_path):
     assert agent._last_tool_result_metadata["approval_reason"] == "web_read"
 
 
-def test_web_search_read_only_allows_without_approval(tmp_path):
-    agent = build_agent(tmp_path, approval_policy="auto", read_only=True)
+def test_web_research_read_only_policy_allows_without_approval(tmp_path):
+    agent = build_agent(tmp_path, approval_policy="read_only")
 
-    with patch("codemate.tools.web._tavily_post", return_value={"results": []}) as fake_post:
-        result = agent.run_tool("web_search", {"query": "FastAPI latest release"})
+    with patch("codemate.tools.web._tavily_post", return_value={"output": "research report"}) as fake_post:
+        result = agent.run_tool("web_research", {"input": "FastAPI latest release"})
 
     assert fake_post.call_count == 1
-    assert "Web search results" in result
+    assert "Web research report" in result
     assert agent._last_tool_result_metadata["approval_gate"] == "allow"
     assert agent._last_tool_result_metadata["approval_reason"] == "web_read"
 
@@ -230,3 +230,61 @@ def test_web_tool_results_use_compact_terminal_summaries():
     assert summarize_read_tool_result("web_search", search_result, {"tool_status": "ok"}).startswith("ok, 1 results, 6 lines")
     assert summarize_read_tool_result("web_extract", extract_result, {"tool_status": "ok"}).startswith("ok, 1 sources, 5 lines")
     assert summarize_read_tool_result("web_research", research_result, {"tool_status": "ok"}).startswith("ok, report, 81 lines")
+
+
+def test_run_shell_terminal_summary_keeps_stdout_and_stderr_edges():
+    stdout = "\n".join(f"out-{index}" for index in range(1, 12))
+    stderr = "\n".join(f"err-{index}" for index in range(1, 12))
+    result = f"exit_code: 1\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
+    summary = summarize_tool_result("run_shell", result, {"tool_status": "error"})
+
+    assert "status: error" in summary
+    assert "exit_code: 1" in summary
+    assert "out-1" in summary
+    assert "out-4" in summary
+    assert "out-5" not in summary
+    assert "out-7" not in summary
+    assert "out-8" in summary
+    assert "out-11" in summary
+    assert "err-1" in summary
+    assert "err-4" in summary
+    assert "err-5" not in summary
+    assert "err-7" not in summary
+    assert "err-8" in summary
+    assert "err-11" in summary
+    assert summary.count("... omitted 3 lines ...") == 2
+
+
+def test_delegate_terminal_summary_shows_tasks_and_result_metadata():
+    call_summary = summarize_tool_call(
+        "delegate",
+        {
+            "tasks": [
+                {"task": "inspect runtime loop", "focus": "codemate/runtime"},
+                {"task": "inspect tool summaries", "focus": "codemate/ui"},
+            ],
+            "max_steps": 20,
+        },
+    )
+    result_summary = summarize_tool_result(
+        "delegate",
+        "delegate_result:\n" + ("full report\n" * 50),
+        {
+            "tool_status": "partial_error",
+            "delegate_task_count": 2,
+            "delegate_tasks": [
+                {"index": 1, "status": "ok", "chars": 1200},
+                {"index": 2, "status": "error", "chars": 80},
+            ],
+        },
+    )
+
+    assert "1. inspect runtime loop" in call_summary
+    assert "focus: codemate/runtime" in call_summary
+    assert "2. inspect tool summaries" in call_summary
+    assert "status: partial_error" in result_summary
+    assert "tasks: 2" in result_summary
+    assert "1. ok, 1200 chars" in result_summary
+    assert "2. error, 80 chars" in result_summary
+    assert "full report" not in result_summary

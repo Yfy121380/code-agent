@@ -11,6 +11,7 @@ import json
 MAX_PREVIEW_LINES = 18
 MAX_RESULT_LINES = 40
 MAX_LINE_CHARS = 160
+SHELL_STREAM_EDGE_LINES = 4
 COMPACT_RESULT_TOOLS = {"list_files", "read_file", "grep", "web_search", "web_extract", "web_research"}
 
 
@@ -121,7 +122,17 @@ def summarize_tool_call(name, args):
     if name == "list_files":
         return f"list_files {args.get('path', '.')}"
     if name == "delegate":
-        return f"delegate\n  task: {_clip_line(args.get('task', ''), 140)}"
+        tasks = args.get("tasks") or []
+        lines = ["delegate"]
+        for index, item in enumerate(tasks, 1):
+            task = _clip_line(str(item.get("task", "")).strip(), 120)
+            focus = _clip_line(str(item.get("focus", "")).strip(), 120)
+            lines.append(f"  {index}. {task}")
+            if focus:
+                lines.append(f"     focus: {focus}")
+        if not tasks:
+            lines.append("  (no tasks)")
+        return "\n".join(lines)
     return f"{name}\n  args: {compact_json(args)}"
 
 
@@ -162,6 +173,56 @@ def summarize_read_tool_result(name, result, metadata=None):
     return f"{status}, {len(lines)} lines, {char_count} chars"
 
 
+def _edge_lines(text, edge_lines=SHELL_STREAM_EDGE_LINES):
+    # run_shell 输出常常很长，终端只展示开头和结尾。
+    # 完整 stdout/stderr 仍保留在工具结果、history 和 trace 中。
+    lines = str(text or "").splitlines()
+    if not lines:
+        return ["(empty)"]
+    if len(lines) <= edge_lines * 2:
+        return [_clip_line(line) for line in lines]
+    omitted = len(lines) - edge_lines * 2
+    return [
+        *(_clip_line(line) for line in lines[:edge_lines]),
+        f"... omitted {omitted} lines ...",
+        *(_clip_line(line) for line in lines[-edge_lines:]),
+    ]
+
+
+def summarize_shell_result(result, metadata=None):
+    """解析 run_shell 的标准结果块，分别压缩 stdout 和 stderr。"""
+    metadata = dict(metadata or {})
+    result = str(result or "")
+    lines = []
+    status = metadata.get("tool_status")
+    if status:
+        lines.append(f"status: {status}")
+
+    exit_code = ""
+    stdout_lines = []
+    stderr_lines = []
+    current = None
+    for raw_line in result.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("exit_code:"):
+            exit_code = stripped.split(":", 1)[1].strip()
+            current = None
+        elif stripped == "stdout:":
+            current = stdout_lines
+        elif stripped == "stderr:":
+            current = stderr_lines
+        elif current is not None:
+            current.append(raw_line.strip())
+
+    if exit_code:
+        lines.append(f"exit_code: {exit_code}")
+    lines.append("stdout:")
+    lines.extend(_edge_lines("\n".join(stdout_lines)))
+    lines.append("stderr:")
+    lines.extend(_edge_lines("\n".join(stderr_lines)))
+    return "\n".join(lines)
+
+
 def summarize_tool_result(name, result, metadata=None):
     """把工具结果压成终端可读摘要，完整结果仍保留在 history 和 trace 中。"""
     metadata = dict(metadata or {})
@@ -172,6 +233,16 @@ def summarize_tool_result(name, result, metadata=None):
         lines.append(f"status: {status}")
     if name == "todo_write":
         lines.append(result)
+        return "\n".join(lines)
+    if name == "run_shell":
+        return summarize_shell_result(result, metadata)
+    if name == "delegate" and metadata.get("delegate_tasks"):
+        tasks = list(metadata.get("delegate_tasks") or [])
+        lines.append(f"tasks: {metadata.get('delegate_task_count', len(tasks))}")
+        for item in tasks:
+            status_text = str(item.get("status", "unknown"))
+            chars = int(item.get("chars", 0) or 0)
+            lines.append(f"  {item.get('index', '?')}. {status_text}, {chars} chars")
         return "\n".join(lines)
     result_lines = result.splitlines()
     for line in result_lines[:MAX_RESULT_LINES]:
