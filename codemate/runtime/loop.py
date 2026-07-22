@@ -212,6 +212,7 @@ class RuntimeLoopMixin:
                 )
                 self.schedule_dream_if_needed(task_state)
                 self.ui.final_answer(final)
+                self.maybe_generate_session_title(user_message, final)
                 return final
 
             self.record(

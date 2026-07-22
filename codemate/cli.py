@@ -54,6 +54,7 @@ PROVIDER_MODELS = {
 }
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "CODEMATE_SECRET_ENV_NAMES"
+RESUME_SELECT = "__select__"
 
 
 def _effective_model(args, provider):
@@ -185,8 +186,17 @@ def build_agent(args, ui=None):
     store = SessionStore(paths.sessions_root)
     model = _build_model_client(args)
     session_id = args.resume
+    if session_id == RESUME_SELECT:
+        selected = ui.session_menu(store.list_sessions()) if ui is not None else None
+        session_id = selected.get("id") if isinstance(selected, dict) else None
     if session_id == "latest":
         session_id = store.latest()
+    if session_id:
+        resolved_id, matches = store.resolve(session_id)
+        if resolved_id:
+            session_id = resolved_id
+        elif matches:
+            raise RuntimeError(f"ambiguous session: {session_id}")
     if session_id:
         return CodeMate.from_session(
             model_client=model,
@@ -228,7 +238,7 @@ def build_arg_parser():
     parser.add_argument("--base-url", default=None, help="Provider API base URL for openai, anthropic, or deepseek.")
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
-    parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
+    parser.add_argument("--resume", nargs="?", const=RESUME_SELECT, default=None, help="Session id to resume, 'latest', or omit the value to choose from a list.")
     parser.add_argument("--approval", choices=APPROVAL_POLICIES, default="ask", help="Approval policy for risky tools.")
     parser.add_argument(
         "--secret-env-name",
@@ -247,21 +257,65 @@ def build_arg_parser():
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     ui = TerminalUI()
-    agent = build_agent(args, ui=ui)
+    agent_holder = {"agent": build_agent(args, ui=ui)}
     try:
-        return run_cli(args, ui, agent)
+        return run_cli(args, ui, agent_holder)
     finally:
-        agent.close()
+        agent_holder["agent"].close()
 
 
-def run_cli(args, ui, agent):
+def _session_timestamp(item):
+    return str(item.get("updated_at") or item.get("created_at") or "-").replace("T", " ")[:16]
+
+
+def _format_session_line(item, current_id=""):
+    marker = "*" if item.get("id") == current_id else " "
+    title = item.get("title") or "(untitled)"
+    return f"{marker} {item.get('id')}  {title}  {_session_timestamp(item)}"
+
+
+def _current_session_item(agent):
+    return {
+        "id": agent.session.get("id", ""),
+        "title": agent.session.get("title", ""),
+        "created_at": agent.session.get("created_at", ""),
+        "updated_at": agent.session.get("updated_at", ""),
+    }
+
+
+def run_cli(args, ui, agent_holder):
     """运行 one-shot 或交互式 CLI，并把资源释放交给 main() 的 finally。"""
+    agent = agent_holder["agent"]
     current_provider = getattr(args, "provider", "openai")
     current_model = getattr(agent.model_client, "model", _effective_model(args, current_provider))
 
+    def current_agent():
+        return agent_holder["agent"]
+
     def print_status():
+        agent = current_agent()
         host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
         print(build_welcome(agent, model=f"{current_provider}:{current_model}", host=host))
+
+    def load_session(session_id):
+        # 会话切换只替换 session 相关状态；模型 provider/model、审批策略和 UI 沿用当前进程设置。
+        nonlocal agent
+        old_agent = current_agent()
+        new_agent = CodeMate.from_session(
+            model_client=old_agent.model_client,
+            workspace=old_agent.workspace,
+            session_store=old_agent.session_store,
+            session_id=session_id,
+            approval_policy=old_agent.approval_policy,
+            max_steps=old_agent.max_steps,
+            max_new_tokens=old_agent.max_new_tokens,
+            secret_env_names=old_agent.secret_env_names,
+            ui=ui,
+        )
+        old_agent.close()
+        agent_holder["agent"] = new_agent
+        agent = new_agent
+        return new_agent
 
     print_status()
 
@@ -401,7 +455,41 @@ def run_cli(args, ui, agent):
             print(result)
             continue
         if user_input == "/session":
+            print(_format_session_line(_current_session_item(agent), current_id=agent.session["id"]).lstrip("* "))
             print(agent.session_path)
+            continue
+        if user_input == "/session list":
+            sessions = agent.session_store.list_sessions()
+            if not sessions:
+                print("no sessions")
+                continue
+            for item in sessions:
+                print(_format_session_line(item, current_id=agent.session["id"]))
+            continue
+        if user_input.startswith("/session rename"):
+            title = user_input[len("/session rename"):].strip()
+            if not title:
+                print("usage: /session rename <title>")
+                continue
+            try:
+                title = agent.rename_session(title)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                continue
+            print(f"session renamed: {title}")
+            print_status()
+            continue
+        if user_input == "/session resume":
+            sessions = agent.session_store.list_sessions()
+            if not sessions:
+                print("no sessions")
+                continue
+            selected = ui.session_menu(sessions, current_id=agent.session["id"])
+            if not selected:
+                print("session resume cancelled")
+                continue
+            load_session(selected["id"])
+            print_status()
             continue
         if user_input == "/reset":
             agent.reset()

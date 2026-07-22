@@ -67,6 +67,17 @@ SHELL_DANGEROUS_SUBJECTS = {
     "git clean",
     "git push",
 }
+SHELL_DANGEROUS_PATH_SUBJECTS = {
+    "rm",
+    "chmod",
+    "chown",
+    "dd",
+    "mkfs",
+    "mount",
+    "umount",
+    "git reset",
+    "git clean",
+}
 SHELL_PATH_COMMANDS = {"ls", "cat", "head", "tail", "nl", "wc", "mkdir", "touch", "find"}
 SHELL_COPY_MOVE_COMMANDS = {"cp", "mv"}
 SHELL_REDIRECT_RE = re.compile(r"(?:^|\s)(?:\d*)>>?\s*([^&\s;|]+)")

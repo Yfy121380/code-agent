@@ -9,6 +9,7 @@ class FakeModelClient:
         self.prompts = []
         self.supports_prompt_cache = False
         self.supports_tools = True
+        self.supports_session_title = False
         self.last_completion_metadata = {}
         self.structured_outputs = []
         self.tool_specs = []

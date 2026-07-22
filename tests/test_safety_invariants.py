@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import sys
@@ -172,6 +173,32 @@ def test_approval_can_add_temporary_write_allow_for_session(tmp_path):
     assert len(ui.calls) == 1
     assert ui.calls[0]["metadata"]["approval_access"] == "write"
     assert ui.calls[0]["metadata"]["suggested_allow_dir"] == str(tmp_path.resolve())
+
+
+def test_temporary_permission_persists_when_session_resumes(tmp_path):
+    first_ui = RememberingApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=first_ui)
+
+    first = agent.run_tool("write_file", {"path": "first.txt", "content": "one\n"})
+    session_id = agent.session["id"]
+    saved = json.loads(agent.session_store.path(session_id).read_text(encoding="utf-8"))
+
+    second_ui = RememberingApprovalUI()
+    resumed = MiniAgent(
+        model_client=FakeModelClient([]),
+        workspace=build_workspace(tmp_path),
+        session_store=agent.session_store,
+        session=agent.session_store.load(session_id),
+        approval_policy="ask",
+        ui=second_ui,
+    )
+    second = resumed.run_tool("write_file", {"path": "second.txt", "content": "two\n"})
+
+    assert first == "wrote first.txt (4 chars)"
+    assert second == "wrote second.txt (4 chars)"
+    assert saved["temporary_permissions"]["permissions"]["write"]["allow"] == [str(tmp_path.resolve())]
+    assert len(first_ui.calls) == 1
+    assert second_ui.calls == []
 
 
 def test_approval_can_add_temporary_read_allow_for_session(tmp_path):
@@ -767,6 +794,17 @@ def test_python_script_shell_command_is_dangerous(tmp_path):
 
     assert result == "error: approval denied for run_shell"
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+
+
+def test_python_inline_code_is_dangerous_without_path_glob_rejection(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "python -c 'print(route.dependant.body_params[0].type_)'", "timeout": 20})
+
+    assert result == "error: approval denied for run_shell"
+    assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+    assert agent._last_tool_result_metadata["shell_paths"] == []
+    assert agent._last_tool_result_metadata["shell_has_glob"] is False
 
 
 def test_python_py_compile_shell_command_stays_read(tmp_path):

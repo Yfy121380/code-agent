@@ -44,6 +44,9 @@ class NullUI:
     def approval_request(self, name, args, metadata=None):
         return False
 
+    def session_menu(self, sessions, current_id=""):
+        return None
+
     def final_answer(self, text):
         pass
 
@@ -57,13 +60,34 @@ class TerminalUI(NullUI):
     def approval_menu(self, choices):
         # 审批菜单使用 prompt_toolkit 接管按键：
         # 上下键选择，Enter 确认，Ctrl+C 按拒绝处理。
+        return self._selection_menu(
+            choices,
+            hint="Use ↑/↓ to select, Enter to confirm.",
+            selected_prefix="> ",
+            cancel_result={"allowed": False},
+        )
+
+    def session_menu(self, sessions, current_id=""):
+        choices = []
+        for item in sessions:
+            marker = "*" if item.get("id") == current_id else " "
+            title = item.get("title") or "(untitled)"
+            timestamp = str(item.get("updated_at") or item.get("created_at") or "-").replace("T", " ")[:16]
+            choices.append((f"{marker} {item.get('id')}  {title}  {timestamp}", item))
+        return self._selection_menu(choices, hint="Use ↑/↓ to select a session, Enter to resume.", cancel_result=None)
+
+    def _selection_menu(self, choices, hint="", selected_prefix="> ", cancel_result=None):
+        # 通用终端选择框：审批和 session resume 都走这里，
+        # 但具体返回值仍由调用方决定，避免 UI 了解业务结构。
+        if not choices:
+            return None
         selected = 0
         bindings = KeyBindings()
 
         def menu_text():
-            fragments = [("class:hint", "Use ↑/↓ to select, Enter to confirm.\n")]
+            fragments = [("class:hint", f"{hint}\n")]
             for index, (_label, _decision) in enumerate(choices):
-                prefix = "> " if index == selected else "  "
+                prefix = selected_prefix if index == selected else " " * len(selected_prefix)
                 style = "class:selected" if index == selected else ""
                 fragments.append((style, f"{prefix}{_label}\n"))
             return FormattedText(fragments)
@@ -88,7 +112,7 @@ class TerminalUI(NullUI):
 
         @bindings.add("c-c")
         def _(event):
-            event.app.exit(result={"allowed": False})
+            event.app.exit(result=cancel_result)
 
         app = Application(
             layout=Layout(Window(content=control, always_hide_cursor=True)),

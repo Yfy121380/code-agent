@@ -35,7 +35,10 @@ SLASH_COMMANDS = [
     ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
     ("/dream --background", "/dream --background", "Run dream memory consolidation in background."),
-    ("/session", "/session", "Show the path to the saved session file."),
+    ("/session", "/session", "Show current session information."),
+    ("/session list", "/session list", "List sessions for this project."),
+    ("/session rename ", "/session rename <title>", "Rename the current session."),
+    ("/session resume", "/session resume", "Choose and resume another session."),
     ("/reset", "/reset", "Clear the current session history and memory."),
     ("/exit", "/exit", "Exit the agent."),
 ]
@@ -56,7 +59,10 @@ HELP_DETAILS = textwrap.dedent(
     /remember <text>     Append a memory entry to today's daily log.
     /dream               Run dream memory consolidation in foreground.
     /dream --background  Run dream memory consolidation in background.
-    /session             Show the path to the saved session file.
+    /session             Show current session information.
+    /session list        List sessions for this project.
+    /session rename      Rename the current session.
+    /session resume      Choose and resume another session.
     /reset               Clear the current session history and memory.
     /exit                Exit the agent.
     """

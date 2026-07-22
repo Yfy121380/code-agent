@@ -5,6 +5,7 @@
 
 from ..config import build_permission_rules
 from .. import tools as toolkit
+from ..workspace import now
 
 
 class ApprovalMixin:
@@ -34,7 +35,7 @@ class ApprovalMixin:
         return bool(decision)
 
     def add_temporary_permission(self, access, directory):
-        # 审批中的“本会话允许”只影响当前进程。
+        # 审批中的“本会话允许”写入当前 session。
         # 规则仍走 build_permission_rules 聚合，保证默认/settings/临时规则语义一致。
         access = str(access or "").strip()
         if access not in {"read", "write"}:
@@ -42,13 +43,16 @@ class ApprovalMixin:
         path = toolkit.resolve_tool_path(self, directory, access=access).path
         if not path.exists() or not path.is_dir():
             raise ValueError("temporary permission path must be a directory")
+        self.session["temporary_permissions"] = self.temporary_permission_settings
         values = self.temporary_permission_settings["permissions"][access]["allow"]
         text = str(path)
         if text not in values:
             values.append(text)
+        self.session["updated_at"] = now()
         self.permission_rules = build_permission_rules(
             self.paths,
             self.settings.user,
             self.settings.project,
             self.temporary_permission_settings,
         )
+        self.session_path = self.session_store.save(self.session)

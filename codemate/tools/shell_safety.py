@@ -6,6 +6,7 @@ import shlex
 
 from .constants import (
     SHELL_COPY_MOVE_COMMANDS,
+    SHELL_DANGEROUS_PATH_SUBJECTS,
     SHELL_DANGEROUS_SUBJECTS,
     SHELL_DYNAMIC_RE,
     SHELL_GLOB_CHARS,
@@ -211,7 +212,7 @@ def _extract_shell_paths_for_segment(tokens):
             return _non_option_args(args)
         return []
 
-    if subject in SHELL_DANGEROUS_SUBJECTS:
+    if subject in SHELL_DANGEROUS_PATH_SUBJECTS:
         return _non_option_args(args)
 
     if subject in {"python -m py_compile", "python3 -m py_compile"}:

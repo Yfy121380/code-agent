@@ -19,6 +19,28 @@ def test_session_store_groups_session_json_and_runs_dir(tmp_path):
     assert store.count() == 1
 
 
+def test_session_store_lists_resolves_and_renames_sessions(tmp_path):
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    store.save({"id": "20260722-153012-a8f31c", "title": "实现 history compact", "created_at": "2026-07-22T15:30:00+08:00"})
+    store.save({"id": "20260721-220912-b39fd0", "title": "MCP 接入测试", "created_at": "2026-07-21T22:09:00+08:00"})
+
+    sessions = store.list_sessions()
+
+    assert {item["id"] for item in sessions} == {"20260722-153012-a8f31c", "20260721-220912-b39fd0"}
+    resolved_id, matches = store.resolve("20260722")
+    assert resolved_id == "20260722-153012-a8f31c"
+    assert len(matches) == 1
+    resolved_id, matches = store.resolve("MCP 接入测试")
+    assert resolved_id == "20260721-220912-b39fd0"
+    assert len(matches) == 1
+
+    store.rename("20260721-220912-b39fd0", "MCP 工具验证")
+
+    renamed = store.load("20260721-220912-b39fd0")
+    assert renamed["title"] == "MCP 工具验证"
+    assert renamed["title_slug"] == "mcp-工具验证"
+
+
 def test_run_store_creates_run_directory_and_state_file(tmp_path):
     store = RunStore(tmp_path / ".codemate" / "sessions" / "session_001" / "runs")
     state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Inspect the repo.")

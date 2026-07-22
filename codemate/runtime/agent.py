@@ -18,7 +18,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import memory as memorylib
-from ..config import ensure_codemate_layout, load_codemate_settings
+from ..config import build_permission_rules, ensure_codemate_layout, load_codemate_settings
 from ..context import ContextManager
 from ..context.token_budget import (
     TokenUsageState,
@@ -44,13 +44,28 @@ DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
 MAX_SKILL_DESCRIPTION_CHARS = 250
 MAX_ACTIVE_SKILLS = 3
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+SESSION_TITLE_MAX_CHARS = 20
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
     "long_term_memory": True,
     "memory_dream": True,
+    "session_title": True,
     "prompt_cache": True,
 }
+
+
+def default_temporary_permissions():
+    # 本会话临时权限只记录用户审批时选择的 allow 目录。
+    # 它不会写回 settings.json，但需要随 session 保存，保证恢复会话后权限一致。
+    return {
+        "permissions": {
+            "read": {"allow": [], "deny": []},
+            "write": {"allow": [], "deny": []},
+        }
+    }
+
+
 @dataclass
 class PromptPrefix:
     # prefix 除了文本本身，还带一小份元数据，
@@ -92,16 +107,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # session、memory、skills、settings 都从这里获得统一绝对路径。
         self.paths = ensure_codemate_layout(self.root)
         self.settings = load_codemate_settings(self.paths)
-        # 本进程内临时加入的权限规则，不写回 settings.json。
-        # 用户在审批时选择“本会话允许某目录”后，会更新这里并重建聚合规则。
-        self.temporary_permission_settings = {
-            "permissions": {
-                "read": {"allow": [], "deny": []},
-                "write": {"allow": [], "deny": []},
-            }
-        }
-        # 聚合后的读写权限规则，后续 path policy 和沙箱会共用这一份规则。
-        self.permission_rules = self.settings.permission_rules
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -127,18 +132,32 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
+            "updated_at": now(),
+            "title": "",
+            "title_slug": "",
             "workspace_root": workspace.repo_root,
             "history": [],
             "history_summary": "",
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
             "todos": [],
             "active_skills": [],
+            "temporary_permissions": default_temporary_permissions(),
         }
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
         # 让 session.json 和该会话产生的 runs 保持在同一个文件夹中。
         self.run_store = run_store or RunStore(self.session_store.runs_dir(self.session["id"]))
         # 补齐字段
         self._ensure_session_shape()
+        # 本会话内临时加入的权限规则，不写回 settings.json。
+        # 用户恢复同一 session 后，这些审批过的目录仍然会参与权限聚合。
+        self.temporary_permission_settings = self.session["temporary_permissions"]
+        # 聚合后的读写权限规则，后续 path policy 和沙箱会共用这一份规则。
+        self.permission_rules = build_permission_rules(
+            self.paths,
+            self.settings.user,
+            self.settings.project,
+            self.temporary_permission_settings,
+        )
         # 负责管理当前会话的短期工作记忆、文件摘要、长期记忆并进行相关的笔记召回，为session的一部分
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
@@ -192,9 +211,18 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
     def _ensure_session_shape(self):
         self.session.setdefault("history", [])
         self.session.setdefault("history_summary", "")
+        self.session.setdefault("title", "")
+        self.session.setdefault("title_slug", "")
+        self.session.setdefault("updated_at", self.session.get("created_at", now()))
         self.session.setdefault("memory", memorylib.default_memory_state())
         self.session.setdefault("todos", [])
         self.session.setdefault("active_skills", [])
+        temporary_permissions = self.session.setdefault("temporary_permissions", default_temporary_permissions())
+        permissions = temporary_permissions.setdefault("permissions", {})
+        for access in ("read", "write"):
+            section = permissions.setdefault(access, {})
+            section.setdefault("allow", [])
+            section.setdefault("deny", [])
 
     def invalidate_stale_memory(self):
         invalidated = self.memory.invalidate_stale_file_summaries()
@@ -334,10 +362,20 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         ).strip()
         answer_rules = textwrap.dedent(
             """\
-            Answering:
-            - Never invent tool results.
-            - Keep answers concise and concrete.
-            - When the task is complete, answer with a brief summary of what changed and any verification performed.
+            Answer rules:
+            - Never invent tool results, file changes, command outputs, test results, or source evidence.
+            - Answer in the user's language unless the user asks otherwise.
+            - Match the amount of detail to the user's request and the work performed.
+            - For simple questions or small confirmations, answer directly and briefly.
+            - For completed code edits, include what changed, important files or functions, verification performed, and any remaining caveats.
+            - For debugging tasks, explain the observed symptom, likely cause, evidence from code or trace, and the fix or next step.
+            - For code review tasks, lead with concrete findings ordered by severity; include file/function references when useful.
+            - For design discussions, explain the recommended approach, tradeoffs, affected modules, and risks before suggesting implementation.
+            - If tests, syntax checks, or commands could not be run, state that clearly.
+            - If a task is incomplete or blocked, explain what is blocked and what information or external state is needed.
+            - Keep answers focused on the user's request. Do not dump unrelated implementation details.
+            - Avoid generic follow-up suggestions unless they naturally build on the user's request.
+            - When explaining local project changes, prefer concrete module/function references over vague summaries.
             """
         ).strip()
         # prefix 可以理解成 agent 的“工作手册”：
@@ -634,7 +672,109 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
     def record(self, item):
         self.session["history"].append(item)
+        self.session["updated_at"] = now()
         self.session_path = self.session_store.save(self.session)
+
+    def maybe_generate_session_title(self, user_message, final_answer):
+        """首轮完成后为会话生成一个短标题。
+
+        标题只用于终端展示和会话选择，不参与 session id 或目录名。
+        生成失败不影响主任务结果；compact/dream/工具系统也不会暴露给这个请求。
+        """
+        if not self.feature_enabled("session_title"):
+            return ""
+        if str(self.session.get("title", "")).strip():
+            return ""
+        user_turns = sum(1 for item in self.session.get("history", []) if item.get("role") == "user")
+        assistant_turns = sum(1 for item in self.session.get("history", []) if item.get("role") == "assistant" and not item.get("tool_calls"))
+        if user_turns != 1 or assistant_turns != 1:
+            return ""
+        system = textwrap.dedent(
+            """\
+            Generate a concise session title for a local coding agent session.
+
+            The title is shown in a terminal session list. It must help the user recognize the task later.
+
+            Rules:
+            - Use the same language as the user's request.
+            - Prefer the user's actual task or project goal, not the assistant's response wording.
+            - If the request is only a greeting or casual chat, return 临时对话 or Casual Chat.
+            - For coding tasks, include the object and action, such as 重构上下文压缩, 测试会话恢复, or 实现 Notes API.
+            - Do not use quotes, punctuation, markdown, emojis, or explanations.
+            - Maximum 10 Chinese characters or 6 English words.
+            - Return only the title.
+
+            Bad examples:
+            - 你好回应
+            - 帮助用户
+            - 代码任务
+            - 完成请求
+
+            Good examples:
+            - 测试会话恢复
+            - 重构上下文压缩
+            - 实现 Notes API
+            - MCP 工具验证
+            - 临时对话
+            """
+        ).strip()
+        content = textwrap.dedent(
+            f"""\
+            User request:
+            {clip(user_message, 1200)}
+
+            Assistant final answer:
+            {clip(final_answer, 1200)}
+            """
+        ).strip()
+        try:
+            if not getattr(self.model_client, "supports_session_title", True):
+                return ""
+            response = self.model_client.complete(
+                [{"role": "user", "content": content}],
+                min(self.max_new_tokens, 128),
+                tools=[],
+                system=system,
+                prompt_cache_key=None,
+                prompt_cache_retention=None,
+            )
+            if getattr(response, "kind", "final") != "final":
+                return ""
+            title = self.normalize_session_title(getattr(response, "text", "") or "")
+            if not title:
+                return ""
+            self.rename_session(title)
+            return title
+        except Exception:
+            return ""
+
+    @staticmethod
+    def normalize_session_title(text):
+        title = str(text or "").strip().strip("\"'`“”‘’")
+        title = re.sub(r"<CPA_DONE>\s*$", "", title).strip()
+        title = title.splitlines()[0] if title else ""
+        title = re.sub(r"[\r\n\t]+", " ", title)
+        title = re.sub(r"\s+", " ", title).strip()
+        title = title.strip(" .,:;!?，。！？；：、")
+        if re.fullmatch(r"[\u4e00-\u9fff]+", title or ""):
+            return title[:10].strip()
+        return title[:SESSION_TITLE_MAX_CHARS].strip()
+
+    @staticmethod
+    def session_title_slug(title):
+        value = str(title or "").strip().lower()
+        value = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "-", value)
+        return value.strip("-")[:80]
+
+    def rename_session(self, title):
+        title = self.normalize_session_title(title)
+        if not title:
+            raise ValueError("session title cannot be empty")
+        self.session["title"] = title
+        self.session["title_slug"] = self.session_title_slug(title)
+        self.session["updated_at"] = now()
+        self.session_path = self.session_store.save(self.session)
+        return title
 
     @staticmethod
     def looks_sensitive_env_name(name):
@@ -857,6 +997,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
         self.session["active_skills"] = []
+        self.session["updated_at"] = now()
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
         self.session_store.save(self.session)
 
