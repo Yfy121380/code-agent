@@ -35,6 +35,12 @@ class NullUI:
     def tool_result(self, name, args, result, metadata=None):
         pass
 
+    def compact_start(self, reason=""):
+        pass
+
+    def compact_end(self, status="", metadata=None):
+        pass
+
     def approval_request(self, name, args, metadata=None):
         return False
 
@@ -103,6 +109,21 @@ class TerminalUI(NullUI):
 
     def model_end(self, kind="", metadata=None):
         pass
+
+    def compact_start(self, reason=""):
+        suffix = f" ({reason})" if reason else ""
+        self.console.print(f"[dim]Compacting history{suffix}...[/dim]")
+
+    def compact_end(self, status="", metadata=None):
+        metadata = dict(metadata or {})
+        if status == "ok":
+            self.console.print(
+                "[green]  -> history compacted: "
+                f"{metadata.get('history_before_messages', 0)} -> {metadata.get('history_after_messages', 0)} messages, "
+                f"summary {metadata.get('summary_chars', 0)} chars[/green]"
+            )
+        elif status == "error":
+            self.console.print(f"[yellow]  -> history compact failed: {metadata.get('reason', 'unknown error')}[/yellow]")
 
     def tool_start(self, name, args, risk_level=""):
         summary = summarize_tool_call(name, args)

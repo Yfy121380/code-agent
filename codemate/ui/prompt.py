@@ -29,6 +29,8 @@ SLASH_COMMANDS = [
     ("/model claude-sonnet-4-6", "/model claude-sonnet-4-6", "Use claude-sonnet-4-6."),
     ("/model claude-opus-4-8", "/model claude-opus-4-8", "Use claude-opus-4-8."),
     ("/model deepseek-v4-pro", "/model deepseek-v4-pro", "Use deepseek-v4-pro."),
+    ("/budget", "/budget", "Show context section sizes and token budget usage."),
+    ("/compact", "/compact", "Compact older conversation history now."),
     ("/memory", "/memory", "Show the agent's distilled working memory."),
     ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
@@ -48,6 +50,8 @@ HELP_DETAILS = textwrap.dedent(
     /provider <name>     Set provider: openai, anthropic, or deepseek.
     /model               Show current model and available models.
     /model <name>        Set model from the current provider's allowed model list.
+    /budget              Show context section sizes and token budget usage.
+    /compact             Compact older conversation history now.
     /memory              Show the agent's distilled working memory.
     /remember <text>     Append a memory entry to today's daily log.
     /dream               Run dream memory consolidation in foreground.

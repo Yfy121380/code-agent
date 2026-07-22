@@ -91,6 +91,18 @@ class OllamaModelClient:
 
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
+        metadata = {
+            "input_tokens": data.get("prompt_eval_count"),
+            "output_tokens": data.get("eval_count"),
+            "total_tokens": (
+                (data.get("prompt_eval_count") or 0) + (data.get("eval_count") or 0)
+                if data.get("prompt_eval_count") is not None or data.get("eval_count") is not None
+                else None
+            ),
+            "cached_tokens": 0,
+            "cache_hit": False,
+        }
+        self.last_completion_metadata = metadata
         message = data.get("message", {}) or {}
         calls = []
         for call in message.get("tool_calls", []) or []:
@@ -100,5 +112,5 @@ class OllamaModelClient:
                 continue
             calls.append(ModelToolCall.create(name, args=_json_args(function.get("arguments", {})), call_id=call.get("id")))
         if calls:
-            return ModelResponse.from_tool_calls(calls, text=message.get("content", ""), raw=data)
-        return ModelResponse.final(message.get("content", ""), raw=data)
+            return ModelResponse.from_tool_calls(calls, text=message.get("content", ""), metadata=metadata, raw=data)
+        return ModelResponse.final(message.get("content", ""), metadata=metadata, raw=data)

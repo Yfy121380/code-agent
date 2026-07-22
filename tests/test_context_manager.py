@@ -52,10 +52,26 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["section_order"] == ["prefix", "skills", "memory", "relevant_memory", "history", "current_request"]
+    assert metadata["section_order"] == ["prefix", "skills", "memory", "relevant_memory", "history_summary", "history", "current_request"]
+    assert metadata["sections"]["history_summary"]["rendered_chars"] == 0
 
 
-def test_context_manager_reduces_relevant_memory_before_history_and_preserves_newer_context(tmp_path):
+def test_context_manager_injects_history_summary_before_recent_history(tmp_path):
+    agent = build_agent(tmp_path, [])
+    agent.session["history_summary"] = "## Working Directory\n- `/tmp/project`."
+    agent.record({"role": "user", "content": "recent request", "created_at": "2026-04-07T10:00:00+00:00"})
+
+    prompt, metadata = ContextManager(agent).build("continue")
+    message_build = ContextManager(agent).build_messages("continue")
+
+    assert prompt.index("This session is being continued") < prompt.index("Transcript:")
+    assert prompt.index("Summary:\n## Working Directory") < prompt.index("Transcript:")
+    assert metadata["history_summary"]["has_summary"] is True
+    assert message_build.messages[1]["content"].startswith("This session is being continued")
+    assert message_build.messages[2]["content"] == "recent request"
+
+
+def test_context_manager_no_longer_reduces_sections_by_legacy_budget(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
     agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
@@ -73,32 +89,19 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
         content = "RECENT-CONTEXT " + ("E" * 260) if minute == 7 else f"recent-{minute} " + ("E" * 180)
         agent.record({"role": role, "content": content, "created_at": f"2026-04-07T10:0{minute}:00+00:00"})
 
-    manager = ContextManager(
-        agent,
-        total_budget=700,
-        section_budgets={
-            "prefix": 120,
-            "skills": 80,
-            "memory": 120,
-            "relevant_memory": 120,
-            "history": 400,
-        },
-    )
+    manager = ContextManager(agent)
 
     prompt, metadata = manager.build("keep this request verbatim")
 
     for section in ("prefix", "skills", "memory", "relevant_memory", "history"):
-        assert metadata["sections"][section]["rendered_chars"] <= metadata["sections"][section]["budget_chars"]
+        assert metadata["sections"][section]["budget_chars"] is None
 
-    reduction_sections = [entry["section"] for entry in metadata["budget_reductions"]]
-    assert reduction_sections[0] == "relevant_memory"
-    assert reduction_sections
     assert "RECENT-CONTEXT" in prompt
-    assert "OLD-CONTEXT" not in prompt
+    assert "OLD-CONTEXT" in prompt
     assert "keep this request verbatim" in prompt
 
 
-def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(tmp_path):
+def test_context_manager_renders_top_three_durable_notes(tmp_path):
     agent = build_agent(tmp_path, [])
     add_durable_notes(
         agent,
@@ -111,17 +114,7 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
         ],
     )
 
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=700,
-        section_budgets={
-            "prefix": 80,
-            "skills": 80,
-            "memory": 160,
-            "relevant_memory": 360,
-            "history": 80,
-        },
-    ).build("recall")
+    prompt, metadata = ContextManager(agent).build("recall")
 
     assert metadata["relevant_memory"]["selected_count"] == 3
     assert metadata["relevant_memory"]["limit"] == 3
@@ -139,22 +132,12 @@ def test_context_manager_renders_top_three_durable_notes_per_note_under_budget(t
     assert "older unmatched note" not in relevant_section
 
 
-def test_context_manager_renders_and_reduces_available_skills_by_entry(tmp_path):
+def test_context_manager_renders_available_skills(tmp_path):
     write_skill(tmp_path, "backend", "Backend workflow " + ("A" * 300))
     write_skill(tmp_path, "paper", "Paper summary workflow " + ("B" * 120))
     agent = build_agent(tmp_path, [])
 
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=800,
-        section_budgets={
-            "prefix": 120,
-            "skills": 90,
-            "memory": 120,
-            "relevant_memory": 120,
-            "history": 120,
-        },
-    ).build("inspect skills")
+    prompt, metadata = ContextManager(agent).build("inspect skills")
 
     skills_section = prompt.split("Available skills:\n", 1)[1].split("\n\nWorking memory:", 1)[0]
     assert "- backend:" in skills_section or "- backend" in skills_section
@@ -177,7 +160,7 @@ def test_available_skills_require_frontmatter_name_matching_directory(tmp_path):
     assert agent.available_skills_text() == "Available skills:\n- none"
 
 
-def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
+def test_context_manager_preserves_current_request_in_text_prompt(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
     agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
@@ -189,16 +172,7 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     agent.history_text = lambda: "Transcript:\n" + "\n".join(f"[user] {i} " + ("D" * 220) for i in range(5))
 
     request = "please preserve this request exactly"
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=250,
-        section_budgets={
-            "prefix": 80,
-            "memory": 80,
-            "relevant_memory": 80,
-            "history": 80,
-        },
-    ).build(request)
+    prompt, metadata = ContextManager(agent).build(request)
 
     assert prompt.split("Current user request:\n", 1)[1] == request
     assert metadata["current_request"]["text"] == request
@@ -382,23 +356,56 @@ def test_context_manager_collapses_duplicate_grep_calls(tmp_path):
     assert metadata["history"]["collapsed_duplicate_tool_results"] == 1
 
 
+def test_context_manager_collapses_duplicate_web_search_calls(tmp_path):
+    agent = build_agent(tmp_path, [])
+    args = {"query": "Python 3.13 release notes", "max_results": 5}
+
+    for index in range(2):
+        call_id = f"call_web_search_{index}"
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "web_search", "args": args}],
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "web_search",
+                "content": f"web-result-{index}",
+                "created_at": f"2026-04-07T09:0{index}:00+00:00",
+            }
+        )
+
+    prompt, metadata = ContextManager(agent).build("check web results")
+    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
+
+    assert transcript.count("[tool:web_search]") == 1
+    assert "web-result-1" in transcript
+    assert "web-result-0" not in transcript
+    assert metadata["history"]["collapsed_duplicate_tool_results"] == 1
+
+
 def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
     agent = build_agent(tmp_path, [])
-    shell_call_id = "call_shell_old"
+    web_call_id = "call_web_old"
     agent.record(
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"id": shell_call_id, "name": "run_shell", "args": {"command": "ls codemate"}}],
+            "tool_calls": [{"id": web_call_id, "name": "web_search", "args": {"query": "old context search"}}],
             "created_at": "2026-04-07T08:59:00+00:00",
         }
     )
     agent.record(
         {
             "role": "tool",
-            "tool_call_id": shell_call_id,
-            "name": "run_shell",
-            "content": "exit_code: 0\nstdout:\nOLD-SHELL-OBSERVATION\nstderr:\n(empty)",
+            "tool_call_id": web_call_id,
+            "name": "web_search",
+            "content": "OLD-WEB-OBSERVATION\nhttps://example.com/old",
             "created_at": "2026-04-07T08:59:00+00:00",
         }
     )
@@ -429,12 +436,12 @@ def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
 
     assert "OBSERVATION-20" in transcript
     assert "OBSERVATION-0" not in transcript
-    assert "OLD-SHELL-OBSERVATION" not in transcript
+    assert "OLD-WEB-OBSERVATION" not in transcript
     assert transcript.count("Old tool result content cleared.") == 2
     assert metadata["history"]["cleared_old_tool_results"] == 2
 
 
-def test_context_manager_clips_tool_output_without_breaking_tool_structure(tmp_path):
+def test_context_manager_keeps_tool_output_structure_without_budget_clipping(tmp_path):
     agent = build_agent(tmp_path, [])
     call_id = "call_shell"
     agent.record(
@@ -455,17 +462,13 @@ def test_context_manager_clips_tool_output_without_breaking_tool_structure(tmp_p
         }
     )
 
-    prompt, metadata = ContextManager(
-        agent,
-        total_budget=900,
-        section_budgets={"prefix": 120, "memory": 120, "relevant_memory": 120, "history": 360},
-    ).build("check failures")
+    prompt, metadata = ContextManager(agent).build("check failures")
     transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
 
     assert "[assistant:tool_calls]" in transcript
     assert "[tool:run_shell]" in transcript
     assert "very long output" in transcript
-    assert transcript.count("very long output") < 80
+    assert transcript.count("very long output") == 80
 
 
 def test_context_manager_renders_selected_long_term_memory(tmp_path):

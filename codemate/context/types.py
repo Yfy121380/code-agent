@@ -1,43 +1,29 @@
 # 上下文管理共享类型与配置。
-# 本文件集中定义上下文预算、分层顺序、裁剪占位文本等常量。
-# 同时提供承载分层渲染结果和 messages 构建结果的数据结构。
-# 这些结构被上下文主流程和历史处理逻辑共同使用。
+# 本文件只保留上下文组装和 history compact 需要的稳定常量。
+# 旧的“按总字符预算逐层裁剪”逻辑已经移除；其他上下文层依靠自身规则控制大小，
+# history 则通过 recent 原文保留和旧消息摘要来控制规模。
 
 from dataclasses import dataclass
 
 
-DEFAULT_TOTAL_BUDGET = 128000
-DEFAULT_SECTION_BUDGETS = {
-    "prefix": 10000,
-    "skills": 6000,
-    "memory": 16000,
-    "relevant_memory": 14000,
-    "history": 82000,
-}
-DEFAULT_SECTION_FLOORS = {
-    "prefix": 5000,
-    "skills": 1000,
-    "memory": 3000,
-    "relevant_memory": 3000,
-    "history": 20000,
-}
-DEFAULT_REDUCTION_ORDER = ("relevant_memory", "history", "skills", "memory", "prefix")
-SECTION_ORDER = ("prefix", "skills", "memory", "relevant_memory", "history", "current_request")
+SECTION_ORDER = ("prefix", "skills", "memory", "relevant_memory", "history_summary", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
+HISTORY_SUMMARY_SECTION = "history_summary"
+LONG_TERM_MEMORY_SOURCES = ("user_profile", "feedback_workflow", "project_context")
 RELEVANT_MEMORY_LIMIT = 3
-OMITTED_TOOL_RESULT = "[tool result omitted due to context budget]"
 OLD_TOOL_RESULT_CLEARED = "Old tool result content cleared."
 MAX_RECENT_OBSERVATION_TOOL_RESULTS = 20
-
-def _tail_clip(text, limit):
-    text = str(text)
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    if limit <= 3:
-        return text[:limit]
-    return text[: limit - 3] + "..."
+RECENT_HISTORY_MIN_MESSAGES = 20
+RECENT_HISTORY_MIN_CHARS = 20_000
+MAX_COMPACT_RETRIES = 3
+HISTORY_SUMMARY_SECTIONS = (
+    "Working Directory",
+    "User Preferences And Constraints",
+    "Current State",
+    "Key Decisions",
+    "Changed Files",
+    "Validation And Issues",
+)
 
 @dataclass
 class SectionRender:

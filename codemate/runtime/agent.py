@@ -20,11 +20,19 @@ from zoneinfo import ZoneInfo
 from .. import memory as memorylib
 from ..config import ensure_codemate_layout, load_codemate_settings
 from ..context import ContextManager
+from ..context.token_budget import (
+    TokenUsageState,
+    budget_status,
+    format_budget_report,
+    rough_token_estimate,
+    usage_from_metadata,
+)
 from ..storage import RunStore
 from ..ui import NullUI
 from .. import tools as toolkit
 from ..workspace import MAX_HISTORY, WorkspaceContext, clip, now
 from .approvals import ApprovalMixin
+from .compaction import HistoryCompactionMixin
 from .dream import DreamMixin
 from .loop import RuntimeLoopMixin
 from .tool_execution import ToolExecutionMixin
@@ -41,7 +49,6 @@ DEFAULT_FEATURE_FLAGS = {
     "relevant_memory": True,
     "long_term_memory": True,
     "memory_dream": True,
-    "context_reduction": True,
     "prompt_cache": True,
 }
 @dataclass
@@ -55,7 +62,7 @@ class PromptPrefix:
     built_at: str
 
 
-class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
+class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin):
     def __init__(
         self,
         model_client,
@@ -122,6 +129,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
             "created_at": now(),
             "workspace_root": workspace.repo_root,
             "history": [],
+            "history_summary": "",
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
             "todos": [],
             "active_skills": [],
@@ -151,6 +159,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
         self.current_run_dir = None
         # 最近一次 prompt 组装元数据，供实验指标读取。
         self.last_prompt_metadata = {}
+        # 最近一次模型 usage 加上后续工具结果估算，用于请求前判断是否接近上下文上限。
+        self.last_token_usage = TokenUsageState()
         # 当前请求召回的长期记忆，后续工具循环复用，避免重复召回。
         self.relevant_long_term_memory = []
         # 长期记忆召回状态，会写入 prompt metadata，便于排查上下文来源。
@@ -181,6 +191,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
 
     def _ensure_session_shape(self):
         self.session.setdefault("history", [])
+        self.session.setdefault("history_summary", "")
         self.session.setdefault("memory", memorylib.default_memory_state())
         self.session.setdefault("todos", [])
         self.session.setdefault("active_skills", [])
@@ -621,10 +632,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
 
-    def prompt(self, user_message):
-        prompt, _ = self._build_prompt_and_metadata(user_message)
-        return prompt
-
     def record(self, item):
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
@@ -704,43 +711,40 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
             env["PATH"] = os.environ["PATH"]
         return env
 
-    def prompt_metadata(self, user_message, prompt):
-        _, metadata = self._build_prompt_and_metadata(user_message)
-        return metadata
+    def update_token_usage_from_model(self, metadata):
+        # provider 返回的 usage 是当前请求最可靠的 token 基准。
+        # 后续工具结果会在这个基准上做增量估算，供下一次模型请求前判断。
+        usage = usage_from_metadata(metadata)
+        if usage.estimated_total_context_tokens > 0:
+            self.last_token_usage = usage
+        return self.last_token_usage.to_dict()
 
-    def _build_prompt_and_metadata(self, user_message):
-        refresh = self.refresh_prefix()
-        self.invalidate_stale_memory()
-        prompt, metadata = self.context_manager.build(user_message)
-        # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
-        # 后面 trace 和实验指标才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
-        sections = metadata.get("sections", {})
-        metadata.update(
-            {
-                "prefix_chars": sections.get("prefix", {}).get("rendered_chars", len(self.prefix)),
-                "workspace_chars": len(self.workspace.text()),
-                "skills_chars": sections.get("skills", {}).get("rendered_chars", 0),
-                "memory_chars": sections.get("memory", {}).get("rendered_chars", 0),
-                "runtime_context_chars": (
-                    sections.get("skills", {}).get("rendered_chars", 0)
-                    + sections.get("memory", {}).get("rendered_chars", 0)
-                    + sections.get("relevant_memory", {}).get("rendered_chars", 0)
-                ),
-                "history_chars": sections.get("history", {}).get("rendered_chars", 0),
-                "request_chars": len(user_message),
-                "tool_count": len(self.tools),
-                "recent_commits": len(self.workspace.recent_commits),
-                "prefix_hash": self.prefix_state.hash,
-                "prompt_cache_key": self.prefix_state.hash,
-                "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
-                "tool_signature": self.prefix_state.tool_signature,
-                "workspace_facts_changed": refresh["workspace_facts_changed"],
-                "prefix_changed": refresh["prefix_changed"],
-                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
-            }
+    def reset_token_usage(self):
+        self.last_token_usage = TokenUsageState()
+        return self.last_token_usage.to_dict()
+
+    def add_tool_result_token_estimate(self, result):
+        tokens = rough_token_estimate(result)
+        self.last_token_usage.tool_result_tokens_added += tokens
+        self.last_token_usage.estimated_total_context_tokens += tokens
+        return tokens
+
+    def context_budget_status(self):
+        return budget_status(getattr(self.model_client, "model", ""), self.last_token_usage)
+
+    def budget_report(self, provider=""):
+        _system, _messages, metadata = self._build_messages_and_metadata("")
+        self.last_prompt_metadata = metadata
+        tool_schemas = self.model_tools()
+        tool_schema_text = json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return format_budget_report(
+            provider=provider,
+            model=getattr(self.model_client, "model", ""),
+            prompt_metadata=self.last_prompt_metadata,
+            usage_state=self.last_token_usage,
+            tool_schema_count=len(tool_schemas),
+            tool_schema_chars=len(tool_schema_text),
         )
-        metadata.update(self.detected_secret_env_summary())
-        return prompt, metadata
 
     def _build_messages_and_metadata(self, user_message):
         refresh = self.refresh_prefix()
@@ -759,6 +763,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
                     + sections.get("memory", {}).get("rendered_chars", 0)
                     + sections.get("relevant_memory", {}).get("rendered_chars", 0)
                 ),
+                "history_summary_chars": sections.get("history_summary", {}).get("rendered_chars", 0),
                 "history_chars": sections.get("history", {}).get("rendered_chars", 0),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
@@ -772,6 +777,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin):
                 "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
             }
         )
+        metadata["context_budget"] = self.context_budget_status()
         metadata.update(self.detected_secret_env_summary())
         return message_build.system, message_build.messages, metadata
 

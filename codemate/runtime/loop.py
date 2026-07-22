@@ -59,9 +59,32 @@ class RuntimeLoopMixin:
             task_state.record_attempt()
             self.run_store.write_task_state(task_state)
             system, messages, prompt_metadata = self._build_messages_and_metadata(user_message)
+            prompt_metadata["context_budget"] = self.context_budget_status()
+            if prompt_metadata["context_budget"].get("compact_needed"):
+                compact_result = self.compact_history(reason="auto", task_state=task_state)
+                if compact_result.get("status") == "error":
+                    final = f"History compaction failed: {compact_result.get('reason', 'unknown error')}"
+                    task_state.stop_retry_limit(final)
+                    self.record({"role": "assistant", "content": final, "created_at": now()})
+                    self.run_store.write_task_state(task_state)
+                    self.emit_trace(
+                        task_state,
+                        "run_finished",
+                        {
+                            "status": task_state.status,
+                            "stop_reason": task_state.stop_reason,
+                            "final_answer": final,
+                            "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+                        },
+                    )
+                    self.ui.final_answer(final)
+                    return final
+                if compact_result.get("status") == "ok":
+                    system, messages, prompt_metadata = self._build_messages_and_metadata(user_message)
+                    prompt_metadata["context_budget"] = self.context_budget_status()
             self.emit_trace(
                 task_state,
-                "prompt_built",
+                "prompt_build",
                 {
                     "prompt_metadata": prompt_metadata,
                     "system": system,
@@ -86,8 +109,11 @@ class RuntimeLoopMixin:
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
             response_metadata = dict(getattr(response, "metadata", {}) or {})
             completion_metadata.update(response_metadata)
+            token_usage = self.update_token_usage_from_model(completion_metadata)
             if completion_metadata:
                 prompt_metadata.update(completion_metadata)
+            prompt_metadata["token_usage"] = token_usage
+            prompt_metadata["context_budget"] = self.context_budget_status()
             self.last_prompt_metadata = prompt_metadata
             kind = getattr(response, "kind", "final")
             self.emit_trace(
@@ -131,6 +157,7 @@ class RuntimeLoopMixin:
                     task_state.record_tool(name)
                     tool_started_at = time.monotonic()
                     result = self.run_tool(name, args, current_tool_call_id=call.id)
+                    tool_result_tokens_added = self.add_tool_result_token_estimate(result)
                     self.ui.tool_result(name, args, result, metadata=dict(self._last_tool_result_metadata or {}))
                     self.record(
                         {
@@ -151,6 +178,8 @@ class RuntimeLoopMixin:
                             "tool_call_id": call.id,
                             "result": clip(result, 4000),
                             "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
+                            "tool_result_tokens_added": tool_result_tokens_added,
+                            "token_usage": self.last_token_usage.to_dict(),
                             **dict(self._last_tool_result_metadata or {}),
                         },
                     )

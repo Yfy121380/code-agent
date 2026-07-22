@@ -1,18 +1,20 @@
 # 历史上下文处理。
-# 本文件负责将会话历史组织成可发送给模型的结构化消息。
-# 在预算受限时优先保留最新对话和有效工具观察结果。
-# 同时处理重复只读工具结果折叠、旧工具结果清理和 transcript 渲染。
+# 本文件负责把 session history 组织成稳定的消息组，保证 tool_call/tool_result
+# 不会被拆散；同时提供 prompt 渲染、只读工具观察结果清理，以及 history compact
+# 所需的 recent/older 切分能力。
+
+from __future__ import annotations
 
 import copy
 import json
 
-from .. import tools as toolkit
+from ..tools.constants import WEB_TOOL_NAMES
 from .types import (
     MAX_RECENT_OBSERVATION_TOOL_RESULTS,
     OLD_TOOL_RESULT_CLEARED,
-    OMITTED_TOOL_RESULT,
+    RECENT_HISTORY_MIN_CHARS,
+    RECENT_HISTORY_MIN_MESSAGES,
     SectionRender,
-    _tail_clip,
 )
 
 
@@ -20,132 +22,80 @@ class HistoryContextRenderer:
     def __init__(self, agent):
         self.agent = agent
 
-    def render(self, budget, user_message=""):
-        # 按预算渲染历史上下文。
-        # 历史以 group 为单位从新到旧选择，避免 assistant tool_call 和对应 tool result 被拆散。
-        # 对可重复的只读工具结果做去重，并把过旧的大段观察结果替换为清理占位符。
-        history = self.history_for_request(user_message)
+    def render(self, user_message=""):
+        # 渲染当前保留的 recent history。
+        # 渲染前会对重复只读工具调用做折叠，并清理过旧的只读工具结果。
+        del user_message
+        history = self.history_for_request()
         raw = self.raw_text(history)
-        if not history:
-            rendered = "Transcript:\n- empty"
-            return SectionRender(
-                raw=raw,
-                budget=budget,
-                rendered=rendered,
-                details={
-                    "messages": [],
-                    "rendered_entries": [],
-                    "older_entries_count": 0,
-                    "collapsed_duplicate_tool_results": 0,
-                    "cleared_old_tool_results": 0,
-                },
-            )
-
-        groups = self.history_groups(history)
-        selected_groups = []
-        selected_body_len = 0
-        seen_dedupe_keys = set()
-        kept_observation_results = 0
-        details = {
-            "older_entries_count": 0,
-            "collapsed_duplicate_tool_results": 0,
-            "cleared_old_tool_results": 0,
-        }
-        transcript_header = "Transcript:\n"
-
-        for group in reversed(groups):
-            dedupe_keys, group_can_be_collapsed = self.dedupe_keys_for_group(group)
-            if group_can_be_collapsed and all(key in seen_dedupe_keys for key in dedupe_keys):
-                details["collapsed_duplicate_tool_results"] += 1
-                continue
-
-            group = copy.deepcopy(group)
-            cleared_in_group = 0
-            observation_results_in_group = 0
-            if group.get("type") == "tool_interaction":
-                assistant = group.get("messages", [{}])[0]
-                calls_by_id = {str(call.get("id", "")): call for call in assistant.get("tool_calls", []) or []}
-                for message in reversed(group.get("messages", [])[1:]):
-                    if message.get("role") != "tool":
-                        continue
-                    call = calls_by_id.get(str(message.get("tool_call_id", "")), {})
-                    name = str(message.get("name", "") or call.get("name", ""))
-                    content = str(message.get("content", ""))
-                    lowered = content.lstrip().lower()
-                    ok_result = not (lowered.startswith("error:") or lowered.startswith("rejected:"))
-                    compactable = ok_result and name in {"list_files", "read_file", "grep"}
-                    if ok_result and name == "run_shell" and content.lstrip().startswith("exit_code: 0"):
-                        try:
-                            analysis = toolkit.analyze_shell_command(self.agent, (call.get("args") or {}).get("command", ""))
-                            compactable = not analysis.blocked and analysis.kind == "read"
-                        except Exception:
-                            compactable = False
-                    if not compactable:
-                        continue
-                    observation_results_in_group += 1
-                    if kept_observation_results + observation_results_in_group > MAX_RECENT_OBSERVATION_TOOL_RESULTS:
-                        message["content"] = OLD_TOOL_RESULT_CLEARED
-                        cleared_in_group += 1
-
-            group_messages = self.group_messages(group)
-            group_rendered = self.render_messages(group_messages)
-            group_body = group_rendered[len(transcript_header):] if group_rendered.startswith(transcript_header) else group_rendered
-            candidate_body_len = len(group_body) if selected_body_len == 0 else len(group_body) + 1 + selected_body_len
-            if len(transcript_header) + candidate_body_len <= budget:
-                selected_groups.append(group)
-                selected_body_len = candidate_body_len
-                seen_dedupe_keys.update(dedupe_keys)
-                kept_observation_results += observation_results_in_group
-                details["cleared_old_tool_results"] += cleared_in_group
-                continue
-
-            if group.get("type") == "tool_interaction":
-                separator = 1 if selected_body_len else 0
-                available = max(0, budget - len(transcript_header) - selected_body_len - separator)
-                clipped = self.clip_tool_group(group, available)
-                clipped_messages = self.group_messages(clipped)
-                clipped_rendered = self.render_messages(clipped_messages)
-                clipped_body = clipped_rendered[len(transcript_header):] if clipped_rendered.startswith(transcript_header) else clipped_rendered
-                candidate_body_len = len(clipped_body) if selected_body_len == 0 else len(clipped_body) + 1 + selected_body_len
-                if len(transcript_header) + candidate_body_len <= budget or not selected_groups:
-                    selected_groups.append(clipped)
-                    selected_body_len = candidate_body_len
-                    seen_dedupe_keys.update(dedupe_keys)
-                    kept_observation_results += observation_results_in_group
-                    details["cleared_old_tool_results"] += cleared_in_group
-                break
-
-            if not selected_groups:
-                clipped = self.clip_text_group(group, max(20, budget - len("Transcript:\n")))
-                selected_groups.append(clipped)
-            break
-
-        selected_messages = []
-        for group in reversed(selected_groups):
-            selected_messages.extend(self.group_messages(group))
-        rendered = self.render_messages(selected_messages)
+        prepared_groups, details = self.prepare_groups(self.history_groups(history))
+        messages = []
+        for group in prepared_groups:
+            messages.extend(self.group_messages(group))
+        rendered = self.render_messages(messages)
         return SectionRender(
             raw=raw,
-            budget=budget,
+            budget=len(rendered),
             rendered=rendered,
             details={
-                "messages": selected_messages,
+                "messages": messages,
                 "rendered_entries": rendered.splitlines()[1:] if rendered.startswith("Transcript:") else rendered.splitlines(),
                 **details,
             },
         )
 
-    def history_for_request(self, user_message):
-        # 读取当前 session 中已经记录的历史消息。
-        # 当前请求本身应当已经作为 user message 存在于 history 中，这里不再额外追加。
-        # 返回深拷贝，保证后续裁剪和清理不会改写原始 session history。
-        del user_message
+    def split_for_compaction(self, min_messages=RECENT_HISTORY_MIN_MESSAGES, min_chars=RECENT_HISTORY_MIN_CHARS):
+        """把历史切成待压缩旧消息和需要原样保留的新消息。
+
+        recent 选择以 group 为单位从新到旧推进，满足最小消息数或最小字符数后停止。
+        这样既保留足够近的上下文，又不会留下孤立 tool result。
+        """
+        groups = self.history_groups(self.history_for_request())
+        if not groups:
+            return {
+                "history_to_compact": [],
+                "recent_history": [],
+                "history_to_compact_groups": [],
+                "recent_groups": [],
+            }
+
+        recent_reversed = []
+        message_count = 0
+        char_count = 0
+        for group in reversed(groups):
+            recent_reversed.append(group)
+            group_messages = self.group_messages(group)
+            message_count += len(group_messages)
+            char_count += len(self.render_messages(group_messages))
+            if message_count >= int(min_messages) or char_count >= int(min_chars):
+                break
+
+        recent_groups = list(reversed(recent_reversed))
+        older_groups = groups[: max(0, len(groups) - len(recent_groups))]
+        recent_dedupe_keys = set()
+        for group in recent_groups:
+            keys, group_can_be_collapsed = self.dedupe_keys_for_group(group)
+            if group_can_be_collapsed:
+                recent_dedupe_keys.update(keys)
+        filtered_older_groups = []
+        for group in older_groups:
+            keys, group_can_be_collapsed = self.dedupe_keys_for_group(group)
+            if group_can_be_collapsed and keys and all(key in recent_dedupe_keys for key in keys):
+                continue
+            filtered_older_groups.append(group)
+        return {
+            "history_to_compact": self.groups_to_messages(filtered_older_groups, prepare=True),
+            "recent_history": self.groups_to_messages(recent_groups, prepare=False),
+            "history_to_compact_groups": filtered_older_groups,
+            "recent_groups": recent_groups,
+        }
+
+    def history_for_request(self):
         return [copy.deepcopy(item) for item in getattr(self.agent, "session", {}).get("history", [])]
 
     def history_groups(self, history):
-        # 将扁平 history 切分为裁剪单元。
-        # 普通 user/assistant 消息单独成组；assistant tool_calls 与后续对应 tool result 绑定成组。
-        # 这样预算裁剪时不会留下孤立的 tool result 或缺少结果的 tool_call。
+        # 将扁平 history 切成裁剪/压缩单元。
+        # assistant tool_calls 会和后续同 id 的 tool results 绑定成一个 group。
         groups = []
         index = 0
         while index < len(history):
@@ -171,13 +121,73 @@ class HistoryContextRenderer:
             index += 1
         return groups
 
+    def prepare_groups(self, groups):
+        # 对历史 group 做上下文级清理：重复只读工具只保留最新一次；
+        # 成功的本地读取工具和网络读取工具结果只保留最新若干条。
+        selected_reversed = []
+        seen_dedupe_keys = set()
+        kept_observation_results = 0
+        details = {
+            "older_entries_count": 0,
+            "collapsed_duplicate_tool_results": 0,
+            "cleared_old_tool_results": 0,
+        }
+        for group in reversed(groups):
+            dedupe_keys, group_can_be_collapsed = self.dedupe_keys_for_group(group)
+            if group_can_be_collapsed and all(key in seen_dedupe_keys for key in dedupe_keys):
+                details["collapsed_duplicate_tool_results"] += 1
+                continue
+
+            group = copy.deepcopy(group)
+            cleared_in_group = 0
+            observation_results_in_group = 0
+            if group.get("type") == "tool_interaction":
+                assistant = group.get("messages", [{}])[0]
+                calls_by_id = {str(call.get("id", "")): call for call in assistant.get("tool_calls", []) or []}
+                for message in reversed(group.get("messages", [])[1:]):
+                    if message.get("role") != "tool":
+                        continue
+                    call = calls_by_id.get(str(message.get("tool_call_id", "")), {})
+                    name = str(message.get("name", "") or call.get("name", ""))
+                    if not self.is_compactable_observation(name, call, message):
+                        continue
+                    observation_results_in_group += 1
+                    if kept_observation_results + observation_results_in_group > MAX_RECENT_OBSERVATION_TOOL_RESULTS:
+                        message["content"] = OLD_TOOL_RESULT_CLEARED
+                        cleared_in_group += 1
+
+            selected_reversed.append(group)
+            seen_dedupe_keys.update(dedupe_keys)
+            kept_observation_results += observation_results_in_group
+            details["cleared_old_tool_results"] += cleared_in_group
+
+        return list(reversed(selected_reversed)), details
+
+    def is_compactable_observation(self, name, call, message):
+        content = str(message.get("content", ""))
+        lowered = content.lstrip().lower()
+        ok_result = not (lowered.startswith("error:") or lowered.startswith("rejected:"))
+        if not ok_result:
+            return False
+        if name in {"list_files", "read_file", "grep"} or name in WEB_TOOL_NAMES:
+            return True
+        return False
+
+    def groups_to_messages(self, groups, prepare=False):
+        selected_groups = groups
+        if prepare:
+            selected_groups, _details = self.prepare_groups(groups)
+        messages = []
+        for group in selected_groups:
+            messages.extend(self.group_messages(group))
+        return messages
+
     def group_messages(self, group):
         return [copy.deepcopy(message) for message in group.get("messages", [])]
 
     def dedupe_keys_for_group(self, group):
-        # 计算只读工具交互的去重键。
-        # read_file 和 grep 只有在路径、范围、模式和上下文参数完全一致时才视为重复。
-        # 其他工具不参与折叠，避免把有副作用或语义不明的调用误删。
+        # 只读工具去重要求工具名和关键参数完全一致。
+        # 任何有副作用或语义不明的工具都不参与折叠。
         keys = []
         if group.get("type") != "tool_interaction":
             return keys, False
@@ -201,35 +211,11 @@ class HistoryContextRenderer:
                         int(args.get("context", 0)),
                     )
                 )
+            elif name in WEB_TOOL_NAMES:
+                keys.append((name, json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))))
             else:
                 return keys, False
         return keys, bool(keys) and len(keys) == len(calls)
-
-    def clip_text_group(self, group, budget):
-        clipped = copy.deepcopy(group)
-        for message in clipped.get("messages", []):
-            if message.get("role") in {"user", "assistant"} and not message.get("tool_calls"):
-                message["content"] = _tail_clip(message.get("content", ""), budget)
-        return clipped
-
-    def clip_tool_group(self, group, budget):
-        # 在单个工具交互 group 超出剩余预算时裁剪 tool result。
-        # assistant tool_call 结构保持完整，只缩短对应 tool 消息内容。
-        # 如果预算过小，则用固定占位文本表示结果因上下文预算被省略。
-        clipped = copy.deepcopy(group)
-        messages = clipped.get("messages", [])
-        if len(messages) < 2:
-            return clipped
-        tool_messages = [message for message in messages[1:] if message.get("role") == "tool"]
-        per_tool_budget = max(1, budget // max(1, len(tool_messages)))
-        for tool_message in tool_messages:
-            content = str(tool_message.get("content", ""))
-            if per_tool_budget <= len(OMITTED_TOOL_RESULT) + 8:
-                content = OMITTED_TOOL_RESULT
-            else:
-                content = _tail_clip(content, per_tool_budget)
-            tool_message["content"] = content
-        return clipped
 
     def raw_text(self, history):
         if not history:
@@ -237,9 +223,8 @@ class HistoryContextRenderer:
         return self.render_messages(history)
 
     def render_messages(self, messages):
-        # 将结构化历史消息渲染为 transcript 文本。
-        # 这个文本用于 prompt 视图、预算估算和 metadata 调试，不替代真正发送给模型的 messages。
-        # tool_call 和 tool result 使用明确标记，便于观察裁剪后结构是否仍然完整。
+        # 文本 transcript 只用于调试、预算展示和 prompt 视图。
+        # 真实模型请求仍使用结构化 messages，避免丢失 tool_call 关系。
         if not messages:
             return "Transcript:\n- empty"
         lines = ["Transcript:"]
@@ -253,5 +238,3 @@ class HistoryContextRenderer:
             else:
                 lines.append(f"[{role}] {item.get('content', '')}")
         return "\n".join(lines)
-
-

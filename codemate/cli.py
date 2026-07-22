@@ -335,6 +335,7 @@ def run_cli(args, ui, agent):
             current_provider = provider
             current_model = PROVIDER_MODELS[provider][0]
             agent.model_client = _build_switched_model_client(args, current_provider, current_model)
+            agent.reset_token_usage()
             agent.refresh_prefix(force=True)
             print(f"provider: {old_provider} -> {current_provider}")
             print(f"model: {old_model} -> {current_model}")
@@ -362,9 +363,20 @@ def run_cli(args, ui, agent):
             old_model = current_model
             current_model = model
             agent.model_client = _build_switched_model_client(args, current_provider, current_model)
+            agent.reset_token_usage()
             agent.refresh_prefix(force=True)
             print(f"model: {old_model} -> {current_model}")
             print_status()
+            continue
+        if user_input == "/budget":
+            print(agent.budget_report(provider=current_provider))
+            continue
+        if user_input == "/compact":
+            result = agent.compact_history(reason="manual")
+            if result.get("status") == "skipped":
+                print(f"compact skipped: {result.get('reason', '')}")
+            elif result.get("status") == "error":
+                print(f"compact failed: {result.get('reason', '')}")
             continue
         if user_input == "/memory":
             print(agent.memory_text())

@@ -8,7 +8,7 @@ from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
 
-from .common import _normalize_messages, _normalize_versioned_base_url
+from .common import _extract_usage_cache_details, _normalize_messages, _normalize_versioned_base_url
 from .schemas import _tool_specs_to_anthropic
 from .types import ModelResponse, ModelToolCall
 
@@ -67,9 +67,10 @@ def _extract_anthropic_response(data):
                 )
             )
     text = "".join(text_parts)
+    metadata = _extract_usage_cache_details(data)
     if calls:
-        return ModelResponse.from_tool_calls(calls, text=text, raw=data)
-    return ModelResponse.final(text, raw=data)
+        return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
+    return ModelResponse.final(text, metadata=metadata, raw=data)
 
 class AnthropicCompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
@@ -147,4 +148,6 @@ class AnthropicCompatibleModelClient:
             ) from exc
         if data.get("error"):
             raise RuntimeError(f"Anthropic-compatible error: {data['error']}")
-        return _extract_anthropic_response(data)
+        response = _extract_anthropic_response(data)
+        self.last_completion_metadata = dict(response.metadata or {})
+        return response
