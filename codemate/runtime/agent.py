@@ -337,24 +337,32 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         progress_rules = textwrap.dedent(
             """\
             Progress updates:
-            - You may output commentary before meaningful tool work, when switching to a new work phase, or after collecting enough evidence to summarize an interim finding.
-            - Commentary should help the user understand what is happening: what you are about to inspect, what you just learned, or why the next step is needed.
+            - Use visible commentary to make substantial work understandable while it is happening.
+            - Commentary is not a private reasoning trace. It should report useful working context: what you are inspecting, what you have just learned, why it matters, or why the next step follows.
             - A response may contain commentary and tool calls together.
+            - For broad investigation, debugging, review, or design work, work in logical phases. After each meaningful phase, output commentary that records key findings before starting the next phase.
+            - A phase-end commentary should usually include the important thing you just learned, the concrete evidence or location such as files, functions, commands, URLs, or observed outputs, and what this means for the next step.
+            - Parallel tool calls are encouraged within one logical phase, but do not chain several unrelated phases into one large batch without first recording the findings from the previous phase.
+            - Old observation-heavy tool results, such as read_file, grep, list_files, web_search, web_extract, and web_research results, may be cleared from context later. During large investigations, preserve important findings in commentary as you go.
+            - Commentary should include enough concrete context for the user to understand the finding or next step.
             - Do not output commentary before every trivial tool call.
-            - For simple tool chains, keep commentary to one short sentence.
-            - For non-trivial investigation, debugging, review, or design work, commentary may be a short paragraph with concrete observations, but should not become a final answer.
+            - Do not summarize every trivial tool result. Record only findings that affect the task, a decision, a planned edit, or later verification.
             - Use final_answer only when the user's request is complete, blocked, or can be answered without more tool calls.
 
             Good commentary:
-            - "我先检查模型适配层和 runtime 工具调用链路。"
-            - "我已经确认工具注册和执行入口分开在 runtime 与 tools 两层，接下来检查权限判断如何串起来。"
-            - "目前看报错不是来自 schema，而是 Anthropic 格式转换时 tool_result 没有按同一轮 tool_use 合并；我再看转换函数确认。"
+            - "我先读一下你贴的回复，再结合当前 prompt 规则判断它说的问题是否成立。"
+            - "目前看到两个不同路径：`microCompact.ts` 负责本地 time-based/cached microcompact，`apiMicrocompact.ts` 负责 API 原生 context edit。前者有具体 keepRecent，后者不是按固定条数，而是按 input token 阈值清理。"
+            - "这里有个容易混淆的点：大工具结果会先经过 `toolResultStorage.ts` 持久化成 preview，这和 microcompact 清理旧 tool_result 是两层机制。接下来我看 auto compact，确认它和 microcompact 的触发关系。"
+            - "`codemate/context/history.py` 负责旧工具结果清理，`codemate/runtime/loop.py` 负责把 commentary 和 tool calls 写入 history。接下来我继续读取 storage、models、ui、memory 和 context 剩余关键文件。"
+            - "现在可以判断问题不在 grep schema，而在 Anthropic 消息转换：同一轮多个 tool_use 对应的 tool_result 必须合并成一个 user message。接下来我检查转换函数和测试覆盖。"
             - "测试已经覆盖 OpenAI commentary-only 和 Anthropic 多工具结果合并，接下来跑全量测试确认没有回归。"
 
             Bad commentary:
+            - "我继续检查一下。"
             - "我需要思考所有可能原因，然后逐个排除。"
             - "也许是 A，也许是 B，我先猜一下。"
             - "第一步我会读文件，第二步我会分析，第三步我会修改。"
+            - "这个文件有一些代码，接下来我看另一个文件。"
             """
         ).strip()
         workflow_rules = textwrap.dedent(
