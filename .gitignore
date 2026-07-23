@@ -40,9 +40,6 @@ readme_intro_locked/
 .env.*
 !.env.example
 
-# Local docs not intended for publication
-docs/
-
 # OS files
 .DS_Store
 
