@@ -4,6 +4,7 @@ import re
 
 GREP_MODES = {"files_with_matches", "count", "content"}
 MAX_GREP_CONTEXT_LINES = 50
+MAX_READ_ALL_LINES = 1000
 TODO_STATUSES = {"pending", "in_progress", "completed"}
 WEB_TOOL_NAMES = {"web_search", "web_extract", "web_research"}
 WEB_SEARCH_DEPTHS = {"basic", "advanced", "fast", "ultra-fast"}
@@ -66,6 +67,18 @@ SHELL_DANGEROUS_SUBJECTS = {
     "git reset",
     "git clean",
     "git push",
+}
+SHELL_HARD_BLOCKED_SUBJECTS = {
+    "reboot",
+    "shutdown",
+    "sudo",
+    "su",
+    "kill",
+    "pkill",
+    "dd",
+    "mkfs",
+    "mount",
+    "umount",
 }
 SHELL_DANGEROUS_PATH_SUBJECTS = {
     "rm",

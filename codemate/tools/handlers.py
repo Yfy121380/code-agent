@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .. import memory as memorylib
 from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
-from .constants import TODO_STATUSES
+from .constants import MAX_READ_ALL_LINES, TODO_STATUSES
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .validators import _normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
@@ -74,12 +74,35 @@ def tool_read_file(agent, args):
     path = agent.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError("invalid line range")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    read_all = args.get("read_all", False)
+    if not isinstance(read_all, bool):
+        raise ValueError("read_all must be a boolean")
+
+    if read_all:
+        # 全文模式在权限审批后才读取文件。扫描完整文件得到准确行数，
+        # 但内存中最多保留 1000 行，避免超长文件撑大进程和模型上下文。
+        lines = []
+        line_count = 0
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_count, line in enumerate(handle, start=1):
+                if line_count <= MAX_READ_ALL_LINES:
+                    lines.append(line.rstrip("\r\n"))
+        if line_count > MAX_READ_ALL_LINES:
+            raise ValueError(
+                f"file has {line_count} lines, which exceeds the "
+                f"{MAX_READ_ALL_LINES}-line limit for full-file reads"
+            )
+        start = 1
+        selected_lines = lines
+    else:
+        start = int(args.get("start", 1))
+        end = int(args.get("end", 200))
+        if start < 1 or end < start:
+            raise ValueError("invalid line range")
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        selected_lines = lines[start - 1:end]
+
+    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(selected_lines, start=start))
     return f"# {_display_path(agent, path)}\n{body}"
 
 
@@ -234,7 +257,8 @@ def tool_grep(agent, args):
 def tool_run_shell(agent, args):
     # shell 命令实际执行入口。
     # 风险识别和审批在 runtime/validators 中已经完成，这里只负责在受控环境中运行命令。
-    # sandbox.enabled 为 true 时，命令会在 bwrap 中执行，作为路径校验之外的第二层防线。
+    # sandbox.enabled 为 true 时，非 full 模式会在 bwrap 中执行，作为路径校验之外的第二层防线。
+    # full 用于本地测试和完全信任场景，审批和沙箱都不拦截命令。
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
@@ -243,7 +267,7 @@ def tool_run_shell(agent, args):
         raise ValueError("timeout must be in [1, 120]")
     run_args = command
     shell = True
-    if sandbox_enabled(agent):
+    if sandbox_enabled(agent) and str(getattr(agent, "approval_policy", "")) != "full":
         preflight_error = sandbox_preflight_error()
         if preflight_error:
             return textwrap.dedent(
