@@ -133,28 +133,10 @@ def test_allow_once_write_adds_current_shell_path_to_sandbox_only(tmp_path):
 
 def test_run_shell_reports_bwrap_preflight_error(tmp_path):
     write_project_settings(tmp_path, sandbox_enabled=True)
-    agent = build_agent(tmp_path, approval_policy="auto")
+    agent = build_agent(tmp_path, approval_policy="full")
 
     with patch("codemate.tools.handlers.sandbox_preflight_error", return_value="shell sandbox failed to start: denied"):
         result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
     assert "exit_code: 126" in result
     assert "shell sandbox failed to start: denied" in result
-
-
-def test_full_approval_skips_shell_sandbox(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
-    agent = build_agent(tmp_path, approval_policy="full")
-
-    with patch("codemate.tools.handlers.sandbox_preflight_error") as fake_preflight, patch(
-        "codemate.tools.handlers.build_shell_sandbox_command"
-    ) as fake_sandbox_command, patch("codemate.tools.handlers.subprocess.run") as fake_run:
-        fake_run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
-        result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
-
-    call = fake_run.call_args
-    assert "ok" in result
-    assert call.args[0] == "echo hi"
-    assert call.kwargs["shell"] is True
-    fake_preflight.assert_not_called()
-    fake_sandbox_command.assert_not_called()

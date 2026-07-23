@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codemate"
 version = "0.1.0"
-description = "Small local coding agent for OpenAI-compatible, Anthropic-compatible, and DeepSeek models"
+description = "Small local coding agent for Ollama, OpenAI-compatible, Anthropic-compatible, and DeepSeek models"
 requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.0.0",

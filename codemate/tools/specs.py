@@ -30,11 +30,6 @@ Some paths may require approval or be blocked by permission rules.
                 "path": {"type": "string", "description": "File path to read."},
                 "start": {"type": "integer", "description": "1-based starting line number.", "default": 1},
                 "end": {"type": "integer", "description": "1-based ending line number, inclusive.", "default": 200},
-                "read_all": {
-                    "type": "boolean",
-                    "description": "When true, read the entire file if it contains at most 1000 lines. Files over 1000 lines return an error with the actual line count and no partial content. When true, start and end are ignored.",
-                    "default": False,
-                },
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -44,7 +39,6 @@ Some paths may require approval or be blocked by permission rules.
 Read a UTF-8 text file by line range before reasoning about or editing it.
 
 Some paths may require approval or be blocked by permission rules.
-Set read_all=true to read the complete file when its length is unknown. Full-file reads are limited to 1000 lines; longer files return an error with the actual line count and no partial content. When read_all=true, start and end are ignored.
 
 Output format:
 - The first line is a tool header like "# path/to/file" and is not file content.

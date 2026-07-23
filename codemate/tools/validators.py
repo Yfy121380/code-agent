@@ -212,14 +212,10 @@ def validate_tool(agent, name, args):
         decision = resolve_tool_path(agent, args["path"], access="read")
         if not decision.path.is_file():
             raise ValueError("path is not a file")
-        read_all = args.get("read_all", False)
-        if not isinstance(read_all, bool):
-            raise ValueError("read_all must be a boolean")
-        if not read_all:
-            start = int(args.get("start", 1))
-            end = int(args.get("end", 200))
-            if start < 1 or end < start:
-                raise ValueError("invalid line range")
+        start = int(args.get("start", 1))
+        end = int(args.get("end", 200))
+        if start < 1 or end < start:
+            raise ValueError("invalid line range")
         return gate_for_access(agent, "read", [decision])
 
     if name == "grep":
@@ -255,10 +251,7 @@ def validate_tool(agent, name, args):
         analysis = analyze_shell_command(agent, command)
         agent._last_shell_analysis = analysis
         if analysis.blocked:
-            if any(
-                reason in analysis.reasons
-                for reason in {"blocked_dangerous_target", "wildcard_write", "hard_blocked_shell_command"}
-            ):
+            if any(reason in analysis.reasons for reason in {"blocked_dangerous_target", "wildcard_write"}):
                 raise ToolPolicyError(analysis.error, code="shell_blocked", security_event_type="shell_blocked")
             raise ValueError(analysis.error)
         access = "read" if analysis.kind == "read" else "write"

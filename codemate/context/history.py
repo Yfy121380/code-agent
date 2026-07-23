@@ -204,10 +204,7 @@ class HistoryContextRenderer:
             args = call.get("args") or {}
             if name == "read_file":
                 path = str(args.get("path", "")).strip()
-                if args.get("read_all", False):
-                    keys.append(("read_file", path, "all"))
-                else:
-                    keys.append(("read_file", path, int(args.get("start", 1)), int(args.get("end", 200))))
+                keys.append(("read_file", path, int(args.get("start", 1)), int(args.get("end", 200))))
             elif name == "grep":
                 keys.append(
                     (

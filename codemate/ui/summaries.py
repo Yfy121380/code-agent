@@ -84,9 +84,7 @@ def summarize_tool_call(name, args):
         return f"run_shell\n  $ {args.get('command', '')}"
     if name == "read_file":
         bits = [f"read_file {args.get('path', '')}"]
-        if args.get("read_all", False):
-            bits.append("  mode: full file (max 1000 lines)")
-        elif "start" in args or "end" in args:
+        if "start" in args or "end" in args:
             bits.append(f"  lines: {args.get('start', '')}-{args.get('end', '')}")
         return "\n".join(bits)
     if name == "grep":

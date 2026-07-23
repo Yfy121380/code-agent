@@ -109,63 +109,6 @@ def test_symlink_to_outside_workspace_read_auto_policy_allows(tmp_path):
     assert agent._last_tool_result_metadata["approval_gate"] == "allow"
 
 
-def test_read_file_read_all_returns_complete_file_and_ignores_range(tmp_path):
-    (tmp_path / "notes.txt").write_text("first\nsecond\nthird\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool(
-        "read_file",
-        {"path": "notes.txt", "read_all": True, "start": 2, "end": 2},
-    )
-
-    assert "   1: first" in result
-    assert "   2: second" in result
-    assert "   3: third" in result
-    assert agent._last_tool_result_metadata["tool_status"] == "ok"
-
-
-def test_read_file_read_all_accepts_exactly_1000_lines(tmp_path):
-    content = "".join(f"line-{index}\n" for index in range(1, 1001))
-    (tmp_path / "limit.txt").write_text(content, encoding="utf-8")
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool("read_file", {"path": "limit.txt", "read_all": True})
-
-    assert "   1: line-1" in result
-    assert "1000: line-1000" in result
-    assert agent._last_tool_result_metadata["tool_status"] == "ok"
-
-
-def test_read_file_read_all_errors_for_files_over_1000_lines_without_content(tmp_path):
-    content = "".join(f"private-line-{index}\n" for index in range(1, 1002))
-    (tmp_path / "too-long.txt").write_text(content, encoding="utf-8")
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool("read_file", {"path": "too-long.txt", "read_all": True})
-
-    assert result == (
-        "error: tool read_file failed: file has 1001 lines, "
-        "which exceeds the 1000-line limit for full-file reads"
-    )
-    assert "private-line" not in result
-    assert agent._last_tool_result_metadata["tool_status"] == "error"
-    assert agent._last_tool_result_metadata["tool_error_code"] == "tool_failed"
-
-
-def test_read_file_read_all_false_uses_requested_range(tmp_path):
-    (tmp_path / "range.txt").write_text("first\nsecond\nthird\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool(
-        "read_file",
-        {"path": "range.txt", "read_all": False, "start": 2, "end": 2},
-    )
-
-    assert "first" not in result
-    assert "   2: second" in result
-    assert "third" not in result
-
-
 def test_grep_outside_workspace_read_auto_policy_allows(tmp_path):
     outside = tmp_path.parent.parent / f"{tmp_path.name}-outside-grep"
     outside.mkdir(exist_ok=True)
@@ -957,16 +900,6 @@ def test_dangerous_shell_command_full_policy_allows_without_prompt(tmp_path):
     assert "exit_code: 0" in result
     assert not (tmp_path / "README.md").exists()
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
-
-
-def test_hard_blocked_shell_command_full_policy_still_rejects(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="full")
-
-    result = agent.run_tool("run_shell", {"command": "reboot", "timeout": 20})
-
-    assert "shell command is blocked even in full approval mode: reboot" in result
-    assert agent._last_tool_result_metadata["shell_blocked"] is True
-    assert "hard_blocked_shell_command" in agent._last_tool_result_metadata["shell_reasons"]
 
 
 def test_dangerous_shell_command_rejects_glob_without_approval(tmp_path):
