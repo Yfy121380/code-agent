@@ -56,6 +56,29 @@ class ToolExecutionMixin:
             )
         return metadata
 
+    def truncate_tool_result(self, result):
+        """统一限制工具返回规模，防止单次工具调用把模型上下文撑爆。"""
+        text = str(result)
+        limit = toolkit.MAX_TOOL_RESULT_CHARS
+        if len(text) <= limit:
+            return text, {"tool_result_truncated": False, "tool_result_original_chars": len(text), "tool_result_returned_chars": len(text)}
+
+        header = (
+            f"Tool result truncated from {len(text)} chars to {limit} chars.\n"
+            "Use narrower parameters, smaller ranges, or a more specific query if more detail is needed.\n\n"
+        )
+        marker = "\n\n... omitted middle content ...\n\n"
+        available = max(0, limit - len(header) - len(marker))
+        head_chars = available // 2
+        tail_chars = available - head_chars
+        truncated = f"{header}{text[:head_chars]}{marker}{text[-tail_chars:] if tail_chars else ''}"
+        return truncated[:limit], {
+            "tool_result_truncated": True,
+            "tool_result_original_chars": len(text),
+            "tool_result_returned_chars": len(truncated[:limit]),
+            "tool_result_max_chars": limit,
+        }
+
     def run_tool(self, name, args, current_tool_call_id=None):
         """执行一次工具调用，并在执行前后套上完整护栏。
 
@@ -148,7 +171,8 @@ class ToolExecutionMixin:
         if not asked_for_approval:
             self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
         try:
-            result = str(tool["run"](args))
+            raw_result = str(tool["run"](args))
+            result, truncation_metadata = self.truncate_tool_result(raw_result)
             tool_status = "ok"
             tool_error_code = ""
             if name == "run_shell":
@@ -174,6 +198,7 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
                 **delegate_metadata,
+                **truncation_metadata,
             }
             if tool_status == "ok":
                 self.resolve_process_notes_after_success(name, args)

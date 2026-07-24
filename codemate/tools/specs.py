@@ -18,7 +18,12 @@ BASE_TOOL_SPECS = {
         "description": """
 List direct children of a directory.
 
-Output format: one entry per line, with [D] path for directories and [F] path for files.
+Output format: one entry per line.
+- Directories are shown as "[D] path".
+- Text files up to 10MB are shown as "[F] path  N lines".
+- Larger text files are shown as "[F] path  large file".
+- Binary files are shown as "[F] path  binary file".
+
 The output is not recursive. Use this to inspect directory structure before reading specific files.
 Some paths may require approval or be blocked by permission rules.
 """.strip(),
@@ -30,6 +35,11 @@ Some paths may require approval or be blocked by permission rules.
                 "path": {"type": "string", "description": "File path to read."},
                 "start": {"type": "integer", "description": "1-based starting line number.", "default": 1},
                 "end": {"type": "integer", "description": "1-based ending line number, inclusive.", "default": 200},
+                "read_all": {
+                    "type": "boolean",
+                    "description": "Read the whole file. When true, start and end are ignored. Very large results may be truncated.",
+                    "default": False,
+                },
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -45,6 +55,10 @@ Output format:
 - File content lines follow as "<line_number>: <content>".
 - For example, a one-line file returns "# README.md\n   1: hello".
 - An empty file returns only the "# path" header, meaning there is no file content to patch.
+
+Use read_all=true for small files after list_files shows a manageable line count. For larger files,
+read specific line ranges with start/end. Tool results may be truncated if they exceed the global
+tool result size limit.
 """.strip(),
     },
     "grep": {

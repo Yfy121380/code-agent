@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .. import memory as memorylib
 from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
-from .constants import TODO_STATUSES
+from .constants import BINARY_SNIFF_BYTES, LIST_FILE_LINE_COUNT_MAX_BYTES, TODO_STATUSES
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .validators import _normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
@@ -53,6 +53,42 @@ def _allow_internal_tree(agent, path):
     return _allow_memory_tree(agent, path) or _allow_skill_tree(agent, path)
 
 
+def _file_listing_detail(path):
+    """为 list_files 生成轻量文件规模提示，帮助模型决定是否分段读取。"""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "unreadable file"
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(BINARY_SNIFF_BYTES)
+    except OSError:
+        return "unreadable file"
+    if b"\x00" in sample:
+        return "binary file"
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return "binary file"
+    if size > LIST_FILE_LINE_COUNT_MAX_BYTES:
+        return "large file"
+
+    line_count = 0
+    saw_bytes = False
+    ends_with_newline = False
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                saw_bytes = True
+                line_count += chunk.count(b"\n")
+                ends_with_newline = chunk.endswith(b"\n")
+    except OSError:
+        return "unreadable file"
+    if saw_bytes and not ends_with_newline:
+        line_count += 1
+    return f"{line_count} lines"
+
+
 def tool_list_files(agent, args):
     path = agent.path(args.get("path", "."))
     if not path.is_dir():
@@ -66,7 +102,8 @@ def tool_list_files(agent, args):
     lines = []
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {_display_path(agent, entry)}")
+        detail = f"  {_file_listing_detail(entry)}" if entry.is_file() else ""
+        lines.append(f"{kind} {_display_path(agent, entry)}{detail}")
     return "\n".join(lines) or "(empty)"
 
 
@@ -74,12 +111,17 @@ def tool_read_file(agent, args):
     path = agent.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError("invalid line range")
+    read_all = bool(args.get("read_all", False))
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    if read_all:
+        selected = enumerate(lines, start=1)
+    else:
+        start = int(args.get("start", 1))
+        end = int(args.get("end", 200))
+        if start < 1 or end < start:
+            raise ValueError("invalid line range")
+        selected = enumerate(lines[start - 1:end], start=start)
+    body = "\n".join(f"{number:>4}: {line}" for number, line in selected)
     return f"# {_display_path(agent, path)}\n{body}"
 
 
@@ -234,7 +276,8 @@ def tool_grep(agent, args):
 def tool_run_shell(agent, args):
     # shell 命令实际执行入口。
     # 风险识别和审批在 runtime/validators 中已经完成，这里只负责在受控环境中运行命令。
-    # sandbox.enabled 为 true 时，命令会在 bwrap 中执行，作为路径校验之外的第二层防线。
+    # sandbox.enabled 为 true 时，非 full 模式会在 bwrap 中执行，作为路径校验之外的第二层防线。
+    # full 用于本地测试和完全信任场景，审批和沙箱都不拦截命令。
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
@@ -243,7 +286,7 @@ def tool_run_shell(agent, args):
         raise ValueError("timeout must be in [1, 120]")
     run_args = command
     shell = True
-    if sandbox_enabled(agent):
+    if sandbox_enabled(agent) and str(getattr(agent, "approval_policy", "")) != "full":
         preflight_error = sandbox_preflight_error()
         if preflight_error:
             return textwrap.dedent(

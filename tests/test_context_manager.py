@@ -323,6 +323,39 @@ def test_context_manager_keeps_read_file_calls_with_different_ranges(tmp_path):
     assert metadata["history"]["collapsed_duplicate_tool_results"] == 0
 
 
+def test_context_manager_keeps_read_all_separate_from_ranged_read(tmp_path):
+    (tmp_path / "sample.txt").write_text("\n".join(str(i) for i in range(20)), encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    for index, args in enumerate(({"path": "sample.txt", "read_all": True}, {"path": "sample.txt", "start": 1, "end": 20})):
+        call_id = f"call_read_all_{index}"
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "read_file", "args": args}],
+                "created_at": f"2026-04-07T09:1{index}:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": f"# sample.txt\nREAD-{index}",
+                "created_at": f"2026-04-07T09:1{index}:00+00:00",
+            }
+        )
+
+    prompt, metadata = ContextManager(agent).build("check reads")
+    transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
+
+    assert transcript.count("[tool:read_file]") == 2
+    assert "READ-0" in transcript
+    assert "READ-1" in transcript
+    assert metadata["history"]["collapsed_duplicate_tool_results"] == 0
+
+
 def test_context_manager_collapses_duplicate_grep_calls(tmp_path):
     agent = build_agent(tmp_path, [])
     args = {"pattern": "run_shell", "path": "codemate", "mode": "content", "before": 1, "after": 1, "context": 0}

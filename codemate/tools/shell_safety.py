@@ -10,6 +10,7 @@ from .constants import (
     SHELL_DANGEROUS_SUBJECTS,
     SHELL_DYNAMIC_RE,
     SHELL_GLOB_CHARS,
+    SHELL_HARD_BLOCKED_SUBJECTS,
     SHELL_KIND_ORDER,
     SHELL_PATH_COMMANDS,
     SHELL_READ_SUBJECTS,
@@ -274,6 +275,12 @@ def analyze_shell_command(agent, command):
         analysis.kind = _bump_shell_kind(analysis.kind, kind)
         analysis.subjects.append(subject)
         analysis.reasons.append(reason)
+        if subject in SHELL_HARD_BLOCKED_SUBJECTS:
+            return _raise_shell_error(
+                analysis,
+                f"shell command is blocked even in full approval mode: {subject}",
+                "hard_blocked_shell_command",
+            )
         analysis.paths.extend(_extract_shell_paths_for_segment(tokens))
 
     analysis.subjects = _dedupe(analysis.subjects)

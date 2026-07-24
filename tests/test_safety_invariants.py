@@ -11,6 +11,7 @@ from rich.console import Console
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli as mini_cli
 from codemate.storage import TaskState
+from codemate.tools.constants import LIST_FILE_LINE_COUNT_MAX_BYTES, MAX_TOOL_RESULT_CHARS
 from codemate.ui import TerminalUI
 
 
@@ -753,6 +754,42 @@ def test_repeated_call_process_note_clears_after_any_successful_tool(tmp_path):
     assert agent.session["memory"]["process_notes"] == []
 
 
+def test_list_files_shows_text_line_count_binary_and_large_file(tmp_path):
+    (tmp_path / "small.txt").write_text("one\ntwo\nthree", encoding="utf-8")
+    (tmp_path / "binary.bin").write_bytes(b"abc\x00def")
+    (tmp_path / "large.txt").write_bytes(b"a" * (LIST_FILE_LINE_COUNT_MAX_BYTES + 1))
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("list_files", {"path": "."})
+
+    assert "[F] small.txt  3 lines" in result
+    assert "[F] binary.bin  binary file" in result
+    assert "[F] large.txt  large file" in result
+
+
+def test_read_file_read_all_ignores_range(tmp_path):
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("read_file", {"path": "notes.txt", "start": 2, "end": 2, "read_all": True})
+
+    assert "   1: one" in result
+    assert "   2: two" in result
+    assert "   3: three" in result
+
+
+def test_tool_result_is_truncated_before_history_and_trace_use(tmp_path):
+    (tmp_path / "huge.txt").write_text("x" * (MAX_TOOL_RESULT_CHARS + 10_000), encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("read_file", {"path": "huge.txt", "read_all": True})
+
+    assert len(result) <= MAX_TOOL_RESULT_CHARS
+    assert result.startswith("Tool result truncated from ")
+    assert agent._last_tool_result_metadata["tool_result_truncated"] is True
+    assert agent._last_tool_result_metadata["tool_result_max_chars"] == MAX_TOOL_RESULT_CHARS
+
+
 def test_invalid_argument_process_note_clears_after_same_tool_success(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
@@ -900,6 +937,16 @@ def test_dangerous_shell_command_full_policy_allows_without_prompt(tmp_path):
     assert "exit_code: 0" in result
     assert not (tmp_path / "README.md").exists()
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+
+
+def test_hard_blocked_shell_command_full_policy_still_rejects(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="full")
+
+    result = agent.run_tool("run_shell", {"command": "reboot", "timeout": 20})
+
+    assert "shell command is blocked even in full approval mode: reboot" in result
+    assert agent._last_tool_result_metadata["shell_blocked"] is True
+    assert "hard_blocked_shell_command" in agent._last_tool_result_metadata["shell_reasons"]
 
 
 def test_dangerous_shell_command_rejects_glob_without_approval(tmp_path):

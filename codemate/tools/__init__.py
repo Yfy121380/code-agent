@@ -2,7 +2,7 @@
 
 import subprocess
 
-from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, TODO_STATUSES, WEB_TOOL_NAMES
+from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, MAX_TOOL_RESULT_CHARS, TODO_STATUSES, WEB_TOOL_NAMES
 from .handlers import (
     tool_delegate,
     tool_grep,
@@ -31,6 +31,7 @@ __all__ = [
     "DELEGATE_TOOL_SPEC",
     "GREP_MODES",
     "MAX_GREP_CONTEXT_LINES",
+    "MAX_TOOL_RESULT_CHARS",
     "TODO_STATUSES",
     "WEB_TOOL_NAMES",
     "ShellCommandAnalysis",

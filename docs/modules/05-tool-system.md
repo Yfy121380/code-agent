@@ -111,7 +111,9 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 
 ```text
 [D] codemate/tools
-[F] README.md
+[F] README.md  12 lines
+[F] uv.lock  large file
+[F] image.png  binary file
 ```
 
 限制和校验：
@@ -120,6 +122,9 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 - 目标必须是目录。
 - 默认忽略 `.codemate` 等内部/忽略目录，但 memory 和 skills 目录可以显式访问。
 - 最多展示前 200 个直接子项。
+- 小于等于 10MB 的 UTF-8 文本文件会显示准确行数，帮助模型判断是否适合全文读取。
+- 大于 10MB 的文本文件显示 `large file`，不会为了统计行数扫描整个文件。
+- 二进制文件通过前 8192 bytes 中是否包含空字节或 UTF-8 解码是否失败做简单判断，并显示 `binary file`。
 - 读路径需要通过 read 权限 gate。
 
 ### read_file
@@ -138,8 +143,9 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 全文读取规则：
 
 - `read_all=true` 时读取整个文件。
-- 文件最多允许全文读取 1000 行。
-- 如果文件超过 1000 行，返回执行错误，错误信息包含实际行数，不返回部分内容。
+- `read_all=true` 时 `start/end` 被忽略。
+- 所有工具结果都会经过统一大小限制；如果读取结果超过全局工具结果上限，会保留开头和结尾并提示已截断。
+- 因此大文件仍建议先通过 `list_files` 查看行数，再使用 `start/end` 分段读取。
 
 输出格式：
 
@@ -154,6 +160,7 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 - `path` 必须存在且是文件。
 - `read_all` 必须是 boolean。
 - 非全文模式下 `start >= 1` 且 `end >= start`。
+- 工具成功结果最终最多保留 30000 字符，超出时会加截断提示。
 - 读路径需要通过 read 权限 gate。
 - 工具结果会进入 history；最近读过的文件和短摘要会沉淀进 working memory。
 

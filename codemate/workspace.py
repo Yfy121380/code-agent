@@ -8,16 +8,24 @@ import subprocess
 import textwrap
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 MAX_TOOL_OUTPUT = 20000
 MAX_HISTORY = 48000
 IGNORED_PATH_NAMES = {".git", ".codemate", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+TRACE_TIMEZONE = "Asia/Shanghai"
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat()
+    # trace、history、memory 都复用这个时间入口。
+    # 使用中国时区能让本地调试时 trace.jsonl 与终端时间一致。
+    try:
+        timezone_info = ZoneInfo(TRACE_TIMEZONE)
+    except Exception:
+        timezone_info = timezone(timedelta(hours=8))
+    return datetime.now(timezone_info).isoformat()
 
 
 def clip(text, limit=MAX_TOOL_OUTPUT):
