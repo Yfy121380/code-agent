@@ -32,6 +32,7 @@ class RuntimeLoopMixin:
         """
         # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
         run_started_at = time.monotonic()
+        self._current_conversation_id = self.new_conversation_id()
         self.memory.set_task_summary(user_message)
         self.record({"role": "user", "content": user_message, "created_at": now()})
         self.expire_process_notes()
@@ -50,6 +51,7 @@ class RuntimeLoopMixin:
 
         tool_steps = 0
         attempts = 0
+        candidate_extracted_this_run = False
         limit_steps = not (self.runtime_mode == "agent" and self.depth == 0)
         max_attempts = max(self.max_steps * 3, self.max_steps + 4) if limit_steps else None
 
@@ -63,6 +65,7 @@ class RuntimeLoopMixin:
             prompt_metadata["context_budget"] = self.context_budget_status()
             if prompt_metadata["context_budget"].get("compact_needed"):
                 compact_result = self.compact_history(reason="auto", task_state=task_state)
+                candidate_extracted_this_run = bool(compact_result.get("candidate_extraction"))
                 if compact_result.get("status") == "error":
                     final = f"History compaction failed: {compact_result.get('reason', 'unknown error')}"
                     task_state.stop_retry_limit(final)
@@ -233,6 +236,8 @@ class RuntimeLoopMixin:
                         "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
                     },
                 )
+                if not candidate_extracted_this_run:
+                    self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
                 self.schedule_dream_if_needed(task_state)
                 self.ui.final_answer(final)
                 self.maybe_generate_session_title(user_message, final)
@@ -265,6 +270,8 @@ class RuntimeLoopMixin:
                 "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
             },
         )
+        if not candidate_extracted_this_run:
+            self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
         self.schedule_dream_if_needed(task_state)
         self.ui.final_answer(final)
         return final

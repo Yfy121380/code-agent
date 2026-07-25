@@ -49,6 +49,7 @@ DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
     "long_term_memory": True,
+    "memory_candidates": True,
     "memory_dream": True,
     "session_title": True,
     "prompt_cache": True,
@@ -137,6 +138,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "history": [],
             "history_summary": "",
             "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
+            "memory_candidate_extract": memorylib.default_candidate_extract_state(),
             "todos": [],
             "active_skills": [],
             "temporary_permissions": default_temporary_permissions(),
@@ -144,6 +146,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
         # 让 session.json 和该会话产生的 runs 保持在同一个文件夹中。
         self.run_store = run_store or RunStore(self.session_store.runs_dir(self.session["id"]))
+        # 当前 ask() 写入 history 时使用的对话轮次 id。
+        # 同一轮里的 user、assistant、tool 消息共享该 id，候选记忆按这个边界提取。
+        self._current_conversation_id = None
         # 补齐字段
         self._ensure_session_shape()
         # 本会话内临时加入的权限规则，不写回 settings.json。
@@ -192,6 +197,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._last_tool_gate = None
         # 最近一次 delegate 子任务摘要，供 UI 和 trace 展示并发调查结果。
         self._last_delegate_metadata = {}
+        # 后台候选记忆提取运行标记，避免用户快速连续输入时重复启动同一类维护任务。
+        self._memory_candidate_extract_running = False
         # 最近一次 prefix 刷新结果，说明仓库信息或工具签名是否变化。
         self._last_prefix_refresh = {
             "workspace_facts_changed": False,
@@ -215,6 +222,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("title_slug", "")
         self.session.setdefault("updated_at", self.session.get("created_at", now()))
         self.session.setdefault("memory", memorylib.default_memory_state())
+        self.session["memory_candidate_extract"] = memorylib.normalize_candidate_extract_state(
+            self.session.get("memory_candidate_extract", {})
+        )
         self.session.setdefault("todos", [])
         self.session.setdefault("active_skills", [])
         temporary_permissions = self.session.setdefault("temporary_permissions", default_temporary_permissions())
@@ -223,6 +233,17 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             section = permissions.setdefault(access, {})
             section.setdefault("allow", [])
             section.setdefault("deny", [])
+        self._ensure_history_message_ids()
+
+    def _ensure_history_message_ids(self):
+        # 旧 session 可能没有 message id 和 conversation_id。
+        # 这里按 user 消息切分历史对话，补齐后候选提取和 compact 都能稳定定位。
+        current_conversation_id = ""
+        for item in self.session.get("history", []) or []:
+            item.setdefault("id", f"msg_{uuid.uuid4().hex[:12]}")
+            if item.get("role") == "user" or not current_conversation_id:
+                current_conversation_id = str(item.get("conversation_id", "") or f"turn_{uuid.uuid4().hex[:12]}")
+            item.setdefault("conversation_id", current_conversation_id)
 
     def invalidate_stale_memory(self):
         invalidated = self.memory.invalidate_stale_file_summaries()
@@ -718,9 +739,19 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return bool(self.feature_flags.get(str(name), False))
 
     def record(self, item):
+        item = dict(item or {})
+        item.setdefault("id", f"msg_{uuid.uuid4().hex[:12]}")
+        if not item.get("conversation_id"):
+            if not self._current_conversation_id:
+                self._current_conversation_id = f"turn_{uuid.uuid4().hex[:12]}"
+            item["conversation_id"] = self._current_conversation_id
         self.session["history"].append(item)
         self.session["updated_at"] = now()
         self.session_path = self.session_store.save(self.session)
+
+    @staticmethod
+    def new_conversation_id():
+        return f"turn_{uuid.uuid4().hex[:12]}"
 
     def maybe_generate_session_title(self, user_message, final_answer):
         """首轮完成后为会话生成一个短标题。

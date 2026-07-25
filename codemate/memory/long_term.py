@@ -46,9 +46,18 @@ def daily_logs_dir(workspace_root):
     return memory_root(workspace_root) / "daily_logs"
 
 
+def candidates_dir(workspace_root):
+    return memory_root(workspace_root) / "candidates"
+
+
 def daily_log_path(workspace_root, date=None):
     date = date or datetime.now().strftime("%Y-%m-%d")
     return daily_logs_dir(workspace_root) / f"{date}.md"
+
+
+def candidate_log_path(workspace_root, date=None):
+    date = date or datetime.now().strftime("%Y-%m-%d")
+    return candidates_dir(workspace_root) / f"{date}.jsonl"
 
 
 def long_term_file_path(workspace_root, source):
@@ -60,6 +69,7 @@ def ensure_long_term_memory(workspace_root):
     root = memory_root(workspace_root)
     root.mkdir(parents=True, exist_ok=True)
     daily_logs_dir(workspace_root).mkdir(parents=True, exist_ok=True)
+    candidates_dir(workspace_root).mkdir(parents=True, exist_ok=True)
     for spec in LONG_TERM_MEMORY_FILES.values():
         path = root / spec["filename"]
         if spec["filename"] == "user_profile.md":

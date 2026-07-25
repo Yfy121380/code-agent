@@ -31,7 +31,7 @@ def build_agent(tmp_path, outputs=None):
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
-        feature_flags={"memory_dream": False},
+        feature_flags={"memory_dream": False, "memory_candidates": False},
     )
 
 

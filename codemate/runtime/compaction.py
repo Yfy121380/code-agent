@@ -145,6 +145,15 @@ class HistoryCompactionMixin:
             self._emit_compact_trace(task_state, "history_compact", result)
             return result
 
+        candidate_result = {}
+        if hasattr(self, "maybe_extract_memory_candidates"):
+            candidate_result = self.maybe_extract_memory_candidates(
+                task_state=task_state,
+                reason="before_compact",
+                background=False,
+                force=True,
+            )
+
         self.ui.compact_start(reason=reason)
         original_history = list(self.session.get("history", []))
         original_summary = str(self.session.get("history_summary", "") or "")
@@ -161,6 +170,7 @@ class HistoryCompactionMixin:
                 result = {
                     "status": "ok",
                     "reason": reason,
+                    "candidate_extraction": candidate_result,
                     "history_before_messages": before_messages,
                     "history_after_messages": len(recent_history),
                     "history_compacted_messages": len(history_to_compact),
@@ -180,6 +190,7 @@ class HistoryCompactionMixin:
         result = {
             "status": "error",
             "reason": last_error or "compact_failed",
+            "candidate_extraction": candidate_result,
             "history_messages": before_messages,
             "attempts": attempts,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
