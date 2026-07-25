@@ -194,8 +194,12 @@ def test_long_term_memory_migrates_legacy_user_preferences_file(tmp_path):
 
 def test_retrieve_long_term_memory_keeps_created_at_and_limits_results(tmp_path):
     longterm.ensure_long_term_memory(tmp_path)
+    memory_lines = [
+        f"- [2026-07-25T09:{index:02d}:00+08:00] existing memory {index}"
+        for index in range(21)
+    ]
     longterm.long_term_file_path(tmp_path, "feedback_workflow").write_text(
-        "# Feedback Workflow\n\n- [2026-07-25T10:12:00+08:00] 用户希望代码修改前先讨论方案。\n",
+        "# Feedback Workflow\n\n" + "\n".join(memory_lines) + "\n",
         encoding="utf-8",
     )
     selected = [
@@ -222,6 +226,29 @@ def test_retrieve_long_term_memory_keeps_created_at_and_limits_results(tmp_path)
     assert result["selected"][0]["text"] == "用户希望代码修改前先讨论方案。"
     assert "上一轮讨论了实现方案。" in client.prompts[0]
     assert client.tool_specs[0] == []
+
+
+def test_retrieve_long_term_memory_directly_uses_small_memory_without_model(tmp_path):
+    longterm.ensure_long_term_memory(tmp_path)
+    longterm.long_term_file_path(tmp_path, "user_profile").write_text(
+        "# User Profile\n\n- [2026-07-25T10:12:00+08:00] 用户正在学习 agent 工程化设计。\n",
+        encoding="utf-8",
+    )
+    client = FakeModelClient([])
+
+    result = memorylib.retrieve_long_term_memory(client, tmp_path, "继续讨论长期记忆召回")
+
+    assert result["status"] == "direct_small"
+    assert result["selected"] == [
+        {
+            "source": "user_profile",
+            "created_at": "2026-07-25T10:12:00+08:00",
+            "text": "用户正在学习 agent 工程化设计。",
+            "reason": "direct small-memory load",
+            "kind": "long_term",
+        }
+    ]
+    assert client.prompts == []
 
 
 def test_remember_long_term_appends_candidate_memory(tmp_path):

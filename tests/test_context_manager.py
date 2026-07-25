@@ -564,7 +564,6 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
     agent = build_agent(
         tmp_path,
         [
-            '{"selected": [{"source": "feedback_workflow", "created_at": "2026-07-25T10:12:00+08:00", "text": "回答时使用中文。", "reason": "用户偏好"}]}',
             "完成。",
         ],
     )
@@ -575,22 +574,18 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
     result = agent.ask("介绍一下项目")
 
     assert result == "完成。"
-    assert agent.long_term_memory_status == "ok"
-    assert len(agent.model_client.prompts) == 2
-    assert "上一轮讨论了文档。" in agent.model_client.prompts[0]
-    assert "[2026-07-25T10:12:00+08:00] 回答时使用中文。" in agent.model_client.prompts[1]
-    assert "用户偏好" not in agent.model_client.prompts[1]
-    assert agent.model_client.prompts[1].count("Relevant memory:") == 1
-    assert "user_profile:" in agent.model_client.prompts[1]
-    assert "feedback_workflow:" in agent.model_client.prompts[1]
-    assert "project_context:" in agent.model_client.prompts[1]
-    assert "Runtime context:" in agent.model_client.prompts[1]
-    assert "current_local_datetime:" in agent.model_client.prompts[1]
-    assert "memory_root:" in agent.model_client.prompts[1]
-    assert agent.model_client.structured_outputs[0]["name"] == "long_term_memory_retrieval"
-    schema = agent.model_client.structured_outputs[0]["schema"]
-    assert "created_at" in schema["properties"]["selected"]["items"]["properties"]
-    assert agent.model_client.structured_outputs[1] is None
+    assert agent.long_term_memory_status == "direct_small"
+    assert len(agent.model_client.prompts) == 1
+    assert "[2026-07-25T10:12:00+08:00] 回答时使用中文。" in agent.model_client.prompts[0]
+    assert "direct small-memory load" not in agent.model_client.prompts[0]
+    assert agent.model_client.prompts[0].count("Relevant memory:") == 1
+    assert "user_profile:" in agent.model_client.prompts[0]
+    assert "feedback_workflow:" in agent.model_client.prompts[0]
+    assert "project_context:" in agent.model_client.prompts[0]
+    assert "Runtime context:" in agent.model_client.prompts[0]
+    assert "current_local_datetime:" in agent.model_client.prompts[0]
+    assert "memory_root:" in agent.model_client.prompts[0]
+    assert agent.model_client.structured_outputs[0] is None
 
 
 def test_history_recent_messages_for_retrieval_keeps_tool_group_and_truncates_result(tmp_path):

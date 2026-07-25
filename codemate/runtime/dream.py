@@ -24,9 +24,10 @@ from ..workspace import now
 
 class DreamMixin:
     def retrieve_long_term_memory_for_request(self, user_message, task_state):
-        """为当前 ask 执行一次长期记忆模型召回。
+        """为当前 ask 准备一次相关长期记忆。
 
-        召回只发生在用户请求开始时，后续工具循环复用 `relevant_long_term_memory`，
+        长期记忆只在用户请求开始时处理，后续工具循环复用 `relevant_long_term_memory`，
+        记忆为空会跳过，小规模记忆直接使用，较大规模记忆才通过模型筛选。
         避免每次重新组 prompt 都额外调用模型。失败不会中断主任务，只会降级为空召回。
         """
         self.relevant_long_term_memory = []
@@ -54,7 +55,13 @@ class DreamMixin:
 
         self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key, "recent_messages": len(recent_messages)})
         try:
-            result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message, recent_messages=recent_messages)
+            result = memorylib.retrieve_long_term_memory(
+                self.model_client,
+                self.root,
+                user_message,
+                recent_messages=recent_messages,
+                memory_files=memory_files,
+            )
         except Exception as exc:
             self.relevant_long_term_memory = []
             self.long_term_memory_status = "failed"

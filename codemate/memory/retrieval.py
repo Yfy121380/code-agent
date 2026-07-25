@@ -14,6 +14,7 @@ RETRIEVAL_MAX_ITEMS = 20
 RETRIEVAL_MAX_TEXT_CHARS = 300
 RETRIEVAL_MAX_REASON_CHARS = 300
 RETRIEVAL_MAX_TOKENS = 1200
+DIRECT_USE_MAX_ITEMS = RETRIEVAL_MAX_ITEMS
 
 RETRIEVAL_SYSTEM_PROMPT = """You are Codemate's long-term memory retrieval module.
 
@@ -118,18 +119,59 @@ def _normalize_selected(raw_items):
     return selected
 
 
-def retrieve_long_term_memory(model_client, workspace_root, user_message, recent_messages=None):
+def _entries_from_memory_files(memory_files):
+    """从三类长期记忆文件中提取可直接渲染的单行记忆。
+
+    长期记忆文件目前以 Markdown 单行列表为主。小规模记忆不需要再请求模型筛选，
+    这里把明确的 bullet/正文行转成和模型召回一致的结构，交给 ContextManager 渲染。
+    """
+    entries = []
+    for source, text in (memory_files or {}).items():
+        if source not in LONG_TERM_MEMORY_FILES:
+            continue
+        spec = LONG_TERM_MEMORY_FILES[source]
+        ignored = {f"# {spec.get('title', '')}".strip(), ""}
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            if stripped in ignored:
+                continue
+            entries.extend(
+                _normalize_selected(
+                    [
+                        {
+                            "source": source,
+                            "created_at": "",
+                            "text": stripped,
+                            "reason": "direct small-memory load",
+                        }
+                    ]
+                )
+            )
+    return entries
+
+
+def retrieve_long_term_memory(model_client, workspace_root, user_message, recent_messages=None, memory_files=None):
     """使用一次独立模型请求筛选当前请求相关的长期记忆。
 
+    记忆为空时跳过；记忆条数很少时直接全部使用；超过阈值才用模型筛选。
     recent_messages 只提供当前对话方向；真正可选的记忆只来自三类长期记忆文件。
     函数返回结构化条目，ContextManager 再决定如何渲染给主 agent。
     """
     started_at = time.monotonic()
-    memory_files = read_long_term_memory(workspace_root)
+    memory_files = memory_files if memory_files is not None else read_long_term_memory(workspace_root)
     if not has_long_term_content(memory_files):
         return {
             "status": "skipped_empty",
             "selected": [],
+            "memory_files": memory_files,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        }
+
+    direct_entries = _entries_from_memory_files(memory_files)
+    if len(direct_entries) <= DIRECT_USE_MAX_ITEMS:
+        return {
+            "status": "direct_small",
+            "selected": direct_entries,
             "memory_files": memory_files,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
         }
