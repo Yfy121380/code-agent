@@ -1,7 +1,9 @@
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codemate.memory import LayeredMemory
+from codemate import memory as memorylib
 from codemate.memory import dream as dreamlib
 from codemate.memory import long_term as longterm
 from codemate.models import FakeModelClient
@@ -174,7 +176,7 @@ def test_long_term_memory_files_are_initialized(tmp_path):
     assert (memory_root / "user_profile.md").is_file()
     assert (memory_root / "feedback_workflow.md").is_file()
     assert (memory_root / "project_context.md").is_file()
-    assert (memory_root / "daily_logs").is_dir()
+    assert (memory_root / "candidates").is_dir()
     assert set(memory.read_long_term_memory()) == {"user_profile", "feedback_workflow", "project_context"}
 
 
@@ -190,7 +192,39 @@ def test_long_term_memory_migrates_legacy_user_preferences_file(tmp_path):
     assert "user_profile" in memory.read_long_term_memory()
 
 
-def test_remember_long_term_appends_today_daily_log(tmp_path):
+def test_retrieve_long_term_memory_keeps_created_at_and_limits_results(tmp_path):
+    longterm.ensure_long_term_memory(tmp_path)
+    longterm.long_term_file_path(tmp_path, "feedback_workflow").write_text(
+        "# Feedback Workflow\n\n- [2026-07-25T10:12:00+08:00] 用户希望代码修改前先讨论方案。\n",
+        encoding="utf-8",
+    )
+    selected = [
+        {
+            "source": "feedback_workflow",
+            "created_at": "" if index == 0 else f"2026-07-25T10:{index:02d}:00+08:00",
+            "text": "- [2026-07-25T10:12:00+08:00] 用户希望代码修改前先讨论方案。" if index == 0 else f"memory {index}",
+            "reason": f"reason {index}",
+        }
+        for index in range(25)
+    ]
+    client = FakeModelClient([json.dumps({"selected": selected}, ensure_ascii=False)])
+
+    result = memorylib.retrieve_long_term_memory(
+        client,
+        tmp_path,
+        "现在开始修改代码",
+        recent_messages=[{"role": "user", "content": "上一轮讨论了实现方案。"}],
+    )
+
+    assert result["status"] == "ok"
+    assert len(result["selected"]) == 20
+    assert result["selected"][0]["created_at"] == "2026-07-25T10:12:00+08:00"
+    assert result["selected"][0]["text"] == "用户希望代码修改前先讨论方案。"
+    assert "上一轮讨论了实现方案。" in client.prompts[0]
+    assert client.tool_specs[0] == []
+
+
+def test_remember_long_term_appends_candidate_memory(tmp_path):
     workspace = WorkspaceContext.build(tmp_path)
     store = SessionStore(tmp_path / ".codemate" / "sessions")
     agent = CodeMate(
@@ -203,37 +237,59 @@ def test_remember_long_term_appends_today_daily_log(tmp_path):
     result = agent.remember_long_term("用户希望以后先说明修改范围")
 
     log_path = Path(result["path"])
-    text = log_path.read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert "/.codemate/projects/" in result["path"]
-    assert "/memory/daily_logs/" in result["path"]
-    assert "- [" in result["entry"]
-    assert "用户希望以后先说明修改范围" in text
+    assert "/memory/candidates/" in result["path"]
+    assert result["entry"] == "用户希望以后先说明修改范围"
+    assert entries[-1]["type"] == "unspecified"
+    assert entries[-1]["memory"] == "用户希望以后先说明修改范围"
+    assert entries[-1]["evidence"] == "用户通过 /remember 要求记住这条信息。"
+    assert entries[-1]["confidence"] == "high"
 
 
-def test_dream_trigger_requires_time_and_new_sessions(tmp_path):
+def test_dream_trigger_uses_unprocessed_candidate_count_and_time(tmp_path):
+    log_path = longterm.candidate_log_path(tmp_path, date="2026-07-09")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate = {
+        "created_at": "2026-07-09T10:00:00+08:00",
+        "type": "feedback_workflow",
+        "memory": "用户希望回答先给结论。",
+        "evidence": "用户明确说明。",
+        "confidence": "high",
+    }
+    log_path.write_text("\n".join(json.dumps(candidate, ensure_ascii=False) for _ in range(9)) + "\n", encoding="utf-8")
+
+    assert dreamlib.should_run_dream(tmp_path) == (False, "not_enough_candidates")
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(candidate, ensure_ascii=False) + "\n")
+
+    assert dreamlib.should_run_dream(tmp_path) == (True, "candidate_threshold")
+
+    longterm.save_dream_state(tmp_path, {"last_processed_candidate": {"file": "2026-07-09.jsonl", "line": 10}})
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(candidate, ensure_ascii=False) + "\n")
     old_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
     longterm.save_dream_state(
         tmp_path,
         {
             "last_dream_at": old_at,
-            "last_dream_session_count": 3,
+            "last_processed_candidate": {"file": "2026-07-09.jsonl", "line": 10},
             "last_status": "ok",
         },
     )
 
-    assert dreamlib.should_run_dream(tmp_path, session_count=7) == (False, "not_enough_sessions")
-    assert dreamlib.should_run_dream(tmp_path, session_count=8) == (True, "time_and_session_interval")
+    assert dreamlib.should_run_dream(tmp_path) == (True, "time_and_candidate_interval")
 
 
-def test_dream_prompt_describes_daily_log_cursor():
-    state = {"last_processed_daily_log": {"file": "2026-07-09.md", "line": 12}}
-    cursor_text = dreamlib.render_daily_log_cursor(state)
-    prompt = dreamlib.dream_prompt(cursor_text)
+def test_dream_prompt_contains_candidate_batch():
+    batch = "Source: candidates/2026-07-09.jsonl\n\n1. line: 12\n   type: unspecified\n   memory: 以后先说结论"
+    prompt = dreamlib.dream_prompt(batch)
 
-    assert "file: 2026-07-09.md" in prompt
-    assert "line: 12" in prompt
-    assert "start from line 13" in prompt
-    assert "Only consolidate daily log entries after this cursor" in prompt
+    assert "Consolidate the candidate memories below" in prompt
+    assert "Candidate memories to process:" in prompt
+    assert "Source: candidates/2026-07-09.jsonl" in prompt
+    assert "type: unspecified" in prompt
 
 
 def test_run_dream_once_updates_cursor_without_counting_dream_session(tmp_path):
@@ -246,16 +302,26 @@ def test_run_dream_once_updates_cursor_without_counting_dream_session(tmp_path):
         session_store=store,
         approval_policy="auto",
     )
-    log_dir = longterm.daily_logs_dir(tmp_path)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "2026-07-09.md").write_text("- [t1] first\n- [t2] second\n", encoding="utf-8")
+    log_path = longterm.candidate_log_path(tmp_path, date="2026-07-09")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    first = {
+        "created_at": "2026-07-09T10:00:00+08:00",
+        "type": "feedback_workflow",
+        "memory": "first",
+        "evidence": "test",
+        "confidence": "high",
+    }
+    second = {**first, "memory": "second"}
+    log_path.write_text(
+        json.dumps(first, ensure_ascii=False) + "\n" + json.dumps(second, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     result = agent.run_dream_once(reason="manual", foreground=False)
     state = longterm.load_dream_state(tmp_path)
 
-    assert result == "dream completed: processed through 2026-07-09.md line 2"
-    assert state["last_processed_daily_log"] == {"file": "2026-07-09.md", "line": 2}
-    assert state["last_dream_session_count"] == 2
+    assert result == "dream completed: processed through 2026-07-09.jsonl line 2"
+    assert state["last_processed_candidate"] == {"file": "2026-07-09.jsonl", "line": 2}
     assert store.count() == 2
     assert any(path.name.startswith("dream-") for path in store.root.iterdir() if path.is_dir())
 
@@ -269,9 +335,16 @@ def test_run_dream_once_returns_error_message_without_raising(tmp_path):
         session_store=store,
         approval_policy="auto",
     )
-    log_dir = longterm.daily_logs_dir(tmp_path)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "2026-07-09.md").write_text("- [t1] should stay pending\n", encoding="utf-8")
+    log_path = longterm.candidate_log_path(tmp_path, date="2026-07-09")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate = {
+        "created_at": "2026-07-09T10:00:00+08:00",
+        "type": "feedback_workflow",
+        "memory": "should stay pending",
+        "evidence": "test",
+        "confidence": "high",
+    }
+    log_path.write_text(json.dumps(candidate, ensure_ascii=False) + "\n", encoding="utf-8")
 
     result = agent.run_dream_once(reason="manual", foreground=True)
     state = longterm.load_dream_state(tmp_path)
@@ -279,4 +352,4 @@ def test_run_dream_once_returns_error_message_without_raising(tmp_path):
     assert result.startswith("dream failed: ")
     assert "fake model ran out of outputs" in result
     assert state["last_status"] == "error"
-    assert state.get("last_processed_daily_log", {}) == {}
+    assert state.get("last_processed_candidate", {}) == {}

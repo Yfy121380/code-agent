@@ -297,26 +297,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
     def build_prefix(self):
         if self.runtime_mode == "dream":
-            tool_use_rules = textwrap.dedent(
-                """\
-                Tool use:
-                - Use tools only for memory consolidation under the memory root shown in Runtime context.
-                - Use todo_write if it helps plan the consolidation.
-                - Read existing memory files before patching or overwriting them.
-                - Do not rewrite daily logs; daily logs are append-only raw records.
-                - Use Runtime context for current_local_datetime, current_local_date, timezone, and today_daily_log_path.
-                - Return a final answer once memory files are consolidated and checked.
-                """
-            ).strip()
-            text = textwrap.dedent(
-                f"""\
-                You are codemate's background dream process for long-term memory consolidation.
-
-                {tool_use_rules}
-
-                Your scope is the memory root shown in Runtime context only. Do not inspect or edit project files outside that directory.
-                """
-            ).strip()
+            text = memorylib.dream_system_prompt(memorylib.memory_root(self.root))
             return PromptPrefix(
                 text=text,
                 hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -397,6 +378,17 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
             """
         ).strip()
+        memory_rules = textwrap.dedent(
+            """\
+            Memory:
+            - Relevant memory contains long-term project-scoped context selected for the current request.
+            - Treat relevant memory as background facts for this request and take it into account when reasoning, planning, editing, testing, and answering.
+            - user_profile: stable user background, goals, knowledge level, and durable preferences.
+            - feedback_workflow: reusable guidance about how Codemate should plan, code, test, report, and use tools with this user.
+            - project_context: durable project goals, architecture decisions, constraints, storage layout, permission model, and feature direction.
+            - Current tool results and file contents override memory when they conflict.
+            """
+        ).strip()
         delegation_rules = textwrap.dedent(
             """\
             Delegation:
@@ -407,21 +399,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - Give each delegated task a concrete question and scope. Vague delegated tasks produce weak reports.
             - Treat delegate results as supporting evidence and navigation hints. You remain responsible for deciding, editing, verifying, and giving the final answer.
             - If you will edit a file based on delegate findings, read that exact file yourself before editing.
-            """
-        ).strip()
-        long_term_rules = textwrap.dedent(
-            """\
-            Long-term memory:
-            - If the current interaction contains information worth remembering across sessions, append it to today's daily log before returning the final answer.
-            - Use current_local_datetime and today_daily_log_path from Runtime context. Use write_file with mode="append".
-            - Daily log entry format: `- [current_local_datetime] memory`.
-            - Daily logs are append-only. Do not rewrite or reorganize daily log files.
-            - Treat explicit phrases like "remember", "from now on", "next time", "以后", "记住", and "下次" as strong signals to append a daily log entry.
-            - What to log: user profile signals, workflow feedback, and project context that is useful across future sessions.
-            - User profile signals include the user's role, goals, knowledge background, skill level, stable preferences, expression style, and collaboration preferences.
-            - Workflow feedback includes how the agent should work, verify, report, ask before acting, and avoid repeating past mistakes.
-            - Project context includes long-lived project background, goals, naming, architecture direction, constraints, and decisions not directly derivable from current code or git state.
-            - Do not save secrets, one-off task progress, current todos, raw tool output, temporary debugging noise, large code snippets, or facts only useful in the current turn.
             """
         ).strip()
         answer_rules = textwrap.dedent(
@@ -454,9 +431,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
             {workflow_rules}
 
-            {delegation_rules}
+            {memory_rules}
 
-            {long_term_rules}
+            {delegation_rules}
 
             {answer_rules}
 
@@ -682,7 +659,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
     def runtime_context_text(self):
         local_now = self.local_now()
         current_date = local_now.date().isoformat()
-        daily_log = memorylib.daily_log_path(self.root, date=current_date)
         return textwrap.dedent(
             f"""\
             Runtime context:
@@ -690,7 +666,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - current_local_date: {current_date}
             - timezone: {self.timezone_name}
             - memory_root: {memorylib.memory_root(self.root)}
-            - today_daily_log_path: {daily_log}
             """
         ).strip()
 
@@ -698,21 +673,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return "\n\n".join([self.runtime_context_text(), self.memory_text()])
 
     def remember_long_term(self, text):
-        text = str(text or "").strip()
-        if not text:
-            raise ValueError("memory text must not be empty")
-        memorylib.ensure_long_term_memory(self.root)
-        local_now = self.local_now()
-        timestamp = local_now.isoformat(timespec="seconds")
-        path = memorylib.daily_log_path(self.root, date=local_now.date().isoformat())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        entry = f"- [{timestamp}] {text}"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(entry + "\n")
-        return {
-            "path": str(path),
-            "entry": entry,
-        }
+        return memorylib.append_manual_candidate(self.root, text)
 
     def history_text(self):
         history = self.session["history"]

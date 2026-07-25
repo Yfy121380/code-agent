@@ -21,7 +21,8 @@ from .constants import (
 from .long_term import candidate_log_path, ensure_long_term_memory
 
 
-CANDIDATE_MEMORY_TYPES = ("user_profile", "feedback_workflow", "project_context")
+AUTO_CANDIDATE_MEMORY_TYPES = ("user_profile", "feedback_workflow", "project_context")
+MANUAL_CANDIDATE_MEMORY_TYPE = "unspecified"
 
 CANDIDATE_MEMORY_OUTPUT_SCHEMA = {
     "type": "object",
@@ -31,7 +32,7 @@ CANDIDATE_MEMORY_OUTPUT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": list(CANDIDATE_MEMORY_TYPES)},
+                    "type": {"type": "string", "enum": list(AUTO_CANDIDATE_MEMORY_TYPES)},
                     "memory": {"type": "string"},
                     "evidence": {"type": "string"},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -467,6 +468,33 @@ def append_candidate_memories(workspace_root, candidates):
     return {"path": str(path), "written_count": len(candidates)}
 
 
+def append_manual_candidate(workspace_root, text):
+    """把 /remember 输入写成高置信度候选记忆。
+
+    用户手动要求记住的信息直接进入候选池，type 使用 unspecified，
+    后续由 dream 根据内容分类到三类正式长期记忆。
+    """
+    value = str(text or "").strip()
+    if not value:
+        raise ValueError("memory text must not be empty")
+    result = append_candidate_memories(
+        workspace_root,
+        [
+            {
+                "type": MANUAL_CANDIDATE_MEMORY_TYPE,
+                "memory": clip(value, MEMORY_CANDIDATE_MAX_TEXT_CHARS),
+                "evidence": "用户通过 /remember 要求记住这条信息。",
+                "confidence": "high",
+            }
+        ],
+    )
+    return {
+        "path": result["path"],
+        "entry": value,
+        "type": MANUAL_CANDIDATE_MEMORY_TYPE,
+    }
+
+
 def mark_candidate_extracted(session, conversations):
     state = normalize_candidate_extract_state((session or {}).get("memory_candidate_extract", {}))
     if conversations:
@@ -503,7 +531,7 @@ def _normalize_candidates(raw_items):
         memory = clip(str(item.get("memory", "")).strip(), MEMORY_CANDIDATE_MAX_TEXT_CHARS)
         evidence = clip(str(item.get("evidence", "")).strip(), MEMORY_CANDIDATE_MAX_EVIDENCE_CHARS)
         confidence = str(item.get("confidence", "")).strip()
-        if kind not in CANDIDATE_MEMORY_TYPES or confidence not in {"high", "medium", "low"} or not memory:
+        if kind not in AUTO_CANDIDATE_MEMORY_TYPES or confidence not in {"high", "medium", "low"} or not memory:
             continue
         key = (kind, memory)
         if key in seen:

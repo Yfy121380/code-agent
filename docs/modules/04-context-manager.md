@@ -77,9 +77,8 @@ Runtime context 提供当前运行时事实，例如：
 - 当前日期。
 - 时区。
 - memory root。
-- 当日 daily log 路径。
 
-这些信息主要服务长期记忆和 dream。比如模型要写 daily log 时，不需要猜当前日期和路径，而是直接使用 runtime context 给出的绝对信息。
+这些信息主要服务时间相关判断、长期记忆召回和 dream。模型不需要猜当前时间，也能明确项目对应的 memory root。
 
 ### Task Summary
 

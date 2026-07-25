@@ -29,11 +29,11 @@ Codemate 的记忆分为两层：
   -> 工具失败记录过程笔记
   -> 工具成功清理相关过程笔记
 
-最终回答前
-  -> 如果有跨会话值得记住的信息，追加 daily log
+对话结束后
+  -> runtime 定期从新增对话中提取候选记忆
 
 后台 dream
-  -> 读取未整理 daily logs
+  -> 读取未整理候选记忆
   -> 整理成三类长期记忆文件
 ```
 
@@ -155,9 +155,8 @@ Runtime context 和工作记忆一起进入 prompt，提供运行时事实：
 - 当前日期。
 - 时区。
 - memory root。
-- 当日 daily log 路径。
 
-它主要服务长期记忆写入和 dream 整理。模型不需要猜日期，也不需要拼路径，可以直接根据 runtime context 找到当日日志文件。
+它主要服务时间相关判断、长期记忆召回和 dream 整理。模型不需要猜当前时间，也能明确项目对应的 memory root。
 
 ## 4. 长期记忆
 
@@ -202,39 +201,49 @@ project_context.md
 - Codemate 是一个本地 coding agent。
 - 目录结构迁移到了用户级项目状态目录。
 - 权限系统包含审批和 bwrap 沙箱两层。
-- 记忆系统采用 daily log + dream 整理。
+- 记忆系统采用候选记忆 + dream 整理。
 - MCP 支持 stdio、streamable http 和 sse。
 
 这些信息可能无法从当前代码快速看出来，或者属于用户和 agent 讨论后确定的设计方向，因此适合长期保存。
 
-## 5. Daily Log
+## 5. 候选记忆
 
-长期记忆不是由主 agent 每轮直接改三类长期文件，而是先追加 daily log。
+长期记忆不是由主 agent 每轮直接改三类长期文件，而是先生成候选记忆。候选记忆是结构化 JSONL，每条都包含类型、内容、证据和置信度。
 
-Daily log 是原始记忆信号，格式固定：
-
-```text
-- [created_at] memory
-```
-
-例如：
+候选记忆保存在：
 
 ```text
-- [2026-07-08T14:23:10+08:00] User prefers code explanations that focus on design intent and execution flow.
+candidates/YYYY-MM-DD.jsonl
 ```
 
-Daily log 的特点是：
+每条 JSONL 记录大致包含：
+
+```json
+{
+  "created_at": "2026-07-25T15:25:00+08:00",
+  "type": "feedback_workflow",
+  "memory": "用户希望回答问题时先说结论，再给解释。",
+  "evidence": "用户通过 /remember 要求记住这条信息。",
+  "confidence": "high"
+}
+```
+
+候选记忆的特点是：
 
 - append-only，只追加，不重写、不整理。
 - 按日期存储。
-- 记录“值得跨会话记住”的信息。
+- 记录“可能值得跨会话记住”的信息。
+- 自动提取时会尽量先分到用户画像、工作流反馈、项目背景三类。
+- `/remember` 写入的候选使用 `unspecified`，后续由 dream 分类。
 - 不作为最终长期记忆直接展示给主 agent。
 
-这样设计的原因是：主 agent 在任务执行过程中判断“这条信息可能值得记住”比较容易，但要判断它该合并到哪一类、是否和旧记忆冲突、是否应该删除旧记忆，则更适合由 dream 统一整理。
+这样设计的原因是：从对话中抽取“可能值得记住的信息”可以较轻量地完成，但判断它是否长期有效、是否和旧记忆冲突、是否应该合并或删除旧记忆，更适合由 dream 统一整理。
 
-## 6. Daily Log 写入规则
+## 6. 候选记忆提取规则
 
-主 agent 的提示词要求：如果当前交互中出现值得跨会话记住的信息，需要在最终回答前追加到当日 daily log。
+候选记忆由 runtime 定期启动一次模型调用提取，而不是要求主 agent 在最终回答前自己写文件。
+
+提取按完整对话为单位进行，并使用 conversation_id 记录 checkpoint。这样即使 history 被 compact，系统仍然能知道上次提取到哪一轮对话。
 
 强信号包括：
 
@@ -261,16 +270,16 @@ Daily log 的特点是：
 - 大段代码。
 - 只在当前 turn 有用的信息。
 
-另外 CLI 提供 `/remember <text>`，用于用户手动把一条信息追加到当日 daily log。这条命令适合记录明确的长期偏好或项目约束。
+另外 CLI 提供 `/remember <text>`，用于用户手动把一条信息写入候选记忆池。它不会直接修改正式长期记忆，而是以 `unspecified` 类型进入 candidates，后续由 dream 判断类别并整理。
 
 ## 7. Dream 整理
 
-Dream 是长期记忆整理流程。它读取 daily logs，把其中真正有长期价值的信息整理进三类长期记忆文件。
+Dream 是长期记忆整理流程。它读取候选记忆 JSONL，把其中真正有长期价值的信息整理进三类长期记忆文件。
 
 Dream 的职责不是继续完成用户任务，而是做 memory consolidation：
 
 ```text
-daily_logs/*.md
+candidates/*.jsonl
   -> dream 整理
   -> user_profile.md
   -> feedback_workflow.md
@@ -280,15 +289,15 @@ daily_logs/*.md
 Dream 的提示词明确规定：
 
 - 只处理 memory root 范围内的文件。
-- 读取三个长期记忆文件和 recent daily logs。
-- 只整理上次 cursor 之后的 daily log 条目。
-- 不重写 daily logs。
+- 读取三个长期记忆文件和未整理候选记忆。
+- 只整理上次 cursor 之后的候选 JSONL 条目。
+- 不重写 candidates。
 - 长期记忆文件保持短 Markdown bullet list。
 - 每条长期记忆必须是单行格式：`- [created_at] memory`。
 - 冲突时按 created_at 保留较新的记忆。
 - 重复或兼容记忆可以合并，使用最新 created_at。
 
-这种设计让 daily log 成为原始缓冲区，dream 成为批处理整理器，长期记忆文件保持干净。
+这种设计让 candidates 成为结构化缓冲区，dream 成为批处理整理器，长期记忆文件保持干净。
 
 ## 8. Dream 触发条件
 
@@ -301,19 +310,18 @@ Dream 支持手动和自动两种触发方式。
 
 自动触发：
 
-- 距离上次 dream 至少新增 5 个 session。
-- 距离上次 dream 至少 24 小时。
+- 未整理候选记忆达到 10 条。
+- 或距离上次 dream 至少 24 小时，且存在未整理候选记忆。
 
-这两个条件同时满足时，主 agent 会启动后台 dream。这样可以避免 dream 太频繁，影响正常对话；也避免长期日志一直不整理。
+满足任一条件时，主 agent 会启动后台 dream。这样可以避免 dream 太频繁，影响正常对话；也避免候选记忆长期不整理。
 
 Dream 状态记录在 `.dream_state.json` 中，主要包括：
 
 - 上次 dream 时间。
-- 上次 dream 时 session 数。
 - 上次状态。
-- 上次处理到的 daily log 文件和行号。
+- 上次处理到的 candidate JSONL 文件和行号。
 
-行号 cursor 很重要。Daily log 是 append-only 的，所以只需要记住“上次处理到哪个文件哪一行”，下次 dream 就能继续处理后续新增日志，不需要重新整理全部历史。
+行号 cursor 很重要。Candidate JSONL 是 append-only 的，所以只需要记住“上次处理到哪个文件哪一行”，下次 dream 就能继续处理后续新增候选，不需要重新整理全部历史。
 
 ## 9. Dream 子 Agent
 
@@ -337,7 +345,7 @@ Dream 通过独立子 agent 执行，而不是让主 agent 直接改长期记忆
 - `patch_file`
 - `todo_write`
 
-这样做的好处是把记忆整理和主任务隔离开。主 agent 不会被大量 daily log 和整理过程污染上下文；dream 也不会误读项目代码或改动非 memory 文件。
+这样做的好处是把记忆整理和主任务隔离开。主 agent 不会被大量候选记忆和整理过程污染上下文；dream 也不会误读项目代码或改动非 memory 文件。
 
 ## 10. 长期记忆召回
 
@@ -346,6 +354,7 @@ Dream 通过独立子 agent 执行，而不是让主 agent 直接改长期记忆
 召回输入包括：
 
 - 当前用户请求。
+- 最近 10 条普通对话消息，用来判断当前请求方向；工具结果只保留短摘要。
 - 三类长期记忆文件内容。
 - 三类记忆的语义说明。
 - 召回规则和输出 schema。
@@ -357,6 +366,7 @@ Dream 通过独立子 agent 执行，而不是让主 agent 直接改长期记忆
   "selected": [
     {
       "source": "user_profile",
+      "created_at": "2026-07-25T10:12:00+08:00",
       "text": "...",
       "reason": "..."
     }
@@ -366,21 +376,22 @@ Dream 通过独立子 agent 执行，而不是让主 agent 直接改长期记忆
 
 召回结果会被限制：
 
-- 最多 8 条。
+- 最多 20 条。
 - 单条 text 和 reason 都会截断。
 - 只能选择长期记忆文件中明确存在的信息。
 - 不能编造新记忆。
+- 召回结果会保留 `created_at`，便于后续判断记忆新旧和冲突关系。
 
 召回完成后，Context Manager 会按类别渲染：
 
 ```text
 Relevant memory:
 user_profile:
-- ...
+- [2026-07-25T10:12:00+08:00] ...
 feedback_workflow:
-- ...
+- [2026-07-25T11:00:00+08:00] ...
 project_context:
-- ...
+- [2026-07-25T12:30:00+08:00] ...
 ```
 
 这样模型既能看到相关记忆，也能知道记忆来自哪个类别，减少误用。
@@ -468,7 +479,7 @@ History compact 只压缩 history，不压缩 working memory 和 relevant memory
 
 ### 难点二：避免长期记忆变成垃圾桶
 
-长期记忆最容易出的问题是越记越多、越记越杂。Codemate 没有让主 agent 直接频繁修改长期记忆文件，而是引入 daily log 作为缓冲层，再通过 dream 做批量整理、去重和冲突处理。
+长期记忆最容易出的问题是越记越多、越记越杂。Codemate 没有让主 agent 直接频繁修改长期记忆文件，而是引入候选记忆池作为缓冲层，再通过 dream 做批量整理、去重和冲突处理。
 
 这个方案牺牲了一点实时性，但换来了更好的长期质量。
 
@@ -488,7 +499,7 @@ Dream 如果直接复用主 agent history，会污染上下文，也可能误操
 
 Codemate 的记忆系统分成工作记忆和长期记忆。工作记忆是 session 内的短期状态，用来服务当前任务，包含任务摘要、最近文件、文件摘要、过程笔记、todo 和 active skills。它每轮都会进入 prompt，帮助模型减少重复探索、避免重复工具错误，并保持当前任务计划。
 
-长期记忆是项目级跨会话信息，分为用户画像、工作流反馈和项目背景三类。主 agent 不直接频繁改长期记忆文件，而是在发现值得记住的信息时追加 daily log；后台 dream 再读取未处理日志，把稳定信息整理进三类长期记忆文件。这样 daily log 作为原始缓冲，dream 负责去重、分类和冲突处理。
+长期记忆是项目级跨会话信息，分为用户画像、工作流反馈和项目背景三类。主 agent 不直接频繁改长期记忆文件，而是由 runtime 定期从完整对话中提取候选记忆；后台 dream 再读取未处理候选，把稳定信息整理进三类长期记忆文件。这样候选池作为原始缓冲，dream 负责去重、分类和冲突处理。
 
 请求开始时，Codemate 会对长期记忆做一次模型召回，只选和当前请求相关的少量条目，并按类别展示在 Relevant memory 中。召回失败不会阻断主任务。这样既能保留跨会话经验，又不会把所有长期记忆都塞进上下文。
 

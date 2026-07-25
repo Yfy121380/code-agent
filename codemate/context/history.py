@@ -9,6 +9,7 @@ import copy
 import json
 
 from ..tools.constants import WEB_TOOL_NAMES
+from ..workspace import clip
 from .types import (
     MAX_RECENT_OBSERVATION_TOOL_RESULTS,
     OLD_TOOL_RESULT_CLEARED,
@@ -89,6 +90,33 @@ class HistoryContextRenderer:
             "history_to_compact_groups": filtered_older_groups,
             "recent_groups": recent_groups,
         }
+
+    def recent_messages_for_retrieval(self, max_messages=10, tool_result_chars=300):
+        """为长期记忆召回提供轻量 recent history。
+
+        召回只需要理解当前对话方向，不需要完整工具输出。这里按 group 从后往前取，
+        assistant tool_calls 和紧随其后的 tool results 保持在一起，避免后续模型适配时
+        出现孤立 tool_result；工具结果内容只保留短摘要，防止召回请求被观察数据撑大。
+        """
+        selected_reversed = []
+        message_count = 0
+        for group in reversed(self.history_groups(self.history_for_request())):
+            messages = self.group_messages(group)
+            if not messages:
+                continue
+            selected_reversed.append(group)
+            message_count += len(messages)
+            if message_count >= int(max_messages):
+                break
+
+        result = []
+        for group in reversed(selected_reversed):
+            for message in self.group_messages(group):
+                item = copy.deepcopy(message)
+                if item.get("role") == "tool":
+                    item["content"] = clip(item.get("content", ""), int(tool_result_chars))
+                result.append(item)
+        return result
 
     def history_for_request(self):
         return [copy.deepcopy(item) for item in getattr(self.agent, "session", {}).get("history", [])]

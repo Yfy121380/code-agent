@@ -1091,7 +1091,7 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     assert any(str(item.display_text) == "/model claude-opus-4-8" for item in model_items)
     remember = next(item for item in remember_items if str(item.display_text) == "/remember <text>")
     assert remember.text == "/remember "
-    assert str(remember.display_meta_text) == "Append a memory entry to today's daily log."
+    assert str(remember.display_meta_text) == "Add a high-confidence memory candidate."
 
 
 def test_terminal_approval_can_return_session_allow_choice():

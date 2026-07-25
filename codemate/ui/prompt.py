@@ -32,7 +32,7 @@ SLASH_COMMANDS = [
     ("/budget", "/budget", "Show context section sizes and token budget usage."),
     ("/compact", "/compact", "Compact older conversation history now."),
     ("/memory", "/memory", "Show the agent's distilled working memory."),
-    ("/remember ", "/remember <text>", "Append a memory entry to today's daily log."),
+    ("/remember ", "/remember <text>", "Add a high-confidence memory candidate."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
     ("/dream --background", "/dream --background", "Run dream memory consolidation in background."),
     ("/session", "/session", "Show current session information."),
@@ -56,7 +56,7 @@ HELP_DETAILS = textwrap.dedent(
     /budget              Show context section sizes and token budget usage.
     /compact             Compact older conversation history now.
     /memory              Show the agent's distilled working memory.
-    /remember <text>     Append a memory entry to today's daily log.
+    /remember <text>     Add a high-confidence memory candidate.
     /dream               Run dream memory consolidation in foreground.
     /dream --background  Run dream memory consolidation in background.
     /session             Show current session information.

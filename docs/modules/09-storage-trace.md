@@ -43,7 +43,7 @@ Codemate 当前采用项目隔离的用户级状态目录。项目内仍保留 `
         user_profile.md
         feedback_workflow.md
         project_context.md
-        daily_logs/
+        candidates/
         .dream_state.json
 ```
 

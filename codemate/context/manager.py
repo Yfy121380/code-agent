@@ -111,13 +111,15 @@ class ContextManager:
         for note in selected_notes or []:
             source = str(note.get("source", "")).strip()
             text = str(note.get("text", "")).strip()
+            created_at = str(note.get("created_at", "") or "").strip()
+            reason = str(note.get("reason", "") or "").strip()
             if source not in LONG_TERM_MEMORY_SOURCES or not text:
                 continue
-            note_items.append({"source": source, "text": text})
+            note_items.append({"source": source, "created_at": created_at, "text": text, "reason": reason})
 
         grouped = {source: [] for source in LONG_TERM_MEMORY_SOURCES}
         for item in note_items:
-            grouped[item["source"]].append(item["text"])
+            grouped[item["source"]].append(item)
         lines = ["Relevant memory:"]
         rendered_notes = []
         for source in LONG_TERM_MEMORY_SOURCES:
@@ -126,13 +128,18 @@ class ContextManager:
             if not items:
                 lines.append("- none")
                 continue
-            for text in items:
-                lines.append(f"- {text}")
-                rendered_notes.append(text)
+            for item in items:
+                text = item["text"]
+                created_at = item["created_at"]
+                rendered = f"[{created_at}] {text}" if created_at else text
+                lines.append(f"- {rendered}")
+                rendered_notes.append(rendered)
         selected_texts = [item["text"] for item in note_items]
         return "\n".join(lines), {
             "note_items": note_items,
             "selected_notes": selected_texts,
+            "selected_created_at": [item["created_at"] for item in note_items],
+            "selected_reasons": [item["reason"] for item in note_items],
             "rendered_notes": rendered_notes,
             "selected_count": len(selected_texts),
             "rendered_count": len(rendered_notes),
@@ -196,6 +203,8 @@ class ContextManager:
                 "limit": RELEVANT_MEMORY_LIMIT,
                 "selected_count": len(selected_notes),
                 "selected_notes": [note["text"] for note in selected_notes],
+                "selected_created_at": [str(note.get("created_at", "") or "").strip() for note in selected_notes],
+                "selected_reasons": [str(note.get("reason", "") or "").strip() for note in selected_notes],
                 "selected_sources": [str(note.get("source", "")).strip() for note in selected_notes],
                 "selected_kinds": [str(note.get("kind", "long_term")).strip() or "long_term" for note in selected_notes],
                 "retrieval_status": str(getattr(self.agent, "long_term_memory_status", "not_run")),

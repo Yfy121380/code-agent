@@ -101,7 +101,7 @@ def test_context_manager_no_longer_reduces_sections_by_legacy_budget(tmp_path):
     assert "keep this request verbatim" in prompt
 
 
-def test_context_manager_renders_top_three_durable_notes(tmp_path):
+def test_context_manager_renders_up_to_twenty_durable_notes(tmp_path):
     agent = build_agent(tmp_path, [])
     add_durable_notes(
         agent,
@@ -109,27 +109,28 @@ def test_context_manager_renders_top_three_durable_notes(tmp_path):
             "alpha durable recall note " + ("A" * 120),
             "beta durable recall note " + ("B" * 120),
             "gamma durable recall note " + ("C" * 120),
-            "older unmatched note",
-            "Unrelated note",
+            "delta durable recall note",
+            "epsilon durable recall note",
         ],
     )
 
     prompt, metadata = ContextManager(agent).build("recall")
 
-    assert metadata["relevant_memory"]["selected_count"] == 3
-    assert metadata["relevant_memory"]["limit"] == 3
+    assert metadata["relevant_memory"]["selected_count"] == 5
+    assert metadata["relevant_memory"]["limit"] == 20
     assert all("durable recall note" in note for note in metadata["relevant_memory"]["selected_notes"])
-    assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
-    assert metadata["relevant_memory"]["rendered_count"] == 3
+    assert len(metadata["relevant_memory"]["rendered_notes"]) == 5
+    assert metadata["relevant_memory"]["rendered_count"] == 5
     relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
     assert "user_profile:" in relevant_section
     assert "feedback_workflow:" in relevant_section
     assert "project_context:" in relevant_section
-    assert len([line for line in relevant_section.splitlines() if line.startswith("- ") and line != "- none"]) == 3
+    assert len([line for line in relevant_section.splitlines() if line.startswith("- ") and line != "- none"]) == 5
     assert "alpha durab" in relevant_section
     assert "beta durable" in relevant_section
     assert "gamma durab" in relevant_section
-    assert "older unmatched note" not in relevant_section
+    assert "delta durable recall note" in relevant_section
+    assert "epsilon durable recall note" in relevant_section
 
 
 def test_context_manager_renders_available_skills(tmp_path):
@@ -539,7 +540,9 @@ def test_context_manager_renders_selected_long_term_memory(tmp_path):
     agent.relevant_long_term_memory = [
         {
             "source": "project_context",
+            "created_at": "2026-07-25T10:12:00+08:00",
             "text": "Use constrained tools instead of guessing.",
+            "reason": "debug only",
             "kind": "long_term",
         }
     ]
@@ -548,8 +551,11 @@ def test_context_manager_renders_selected_long_term_memory(tmp_path):
     prompt, metadata = ContextManager(agent).build("What conventions should I follow?")
     relevant_section = prompt.split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
-    assert "Use constrained tools instead of guessing." in relevant_section
+    assert "- [2026-07-25T10:12:00+08:00] Use constrained tools instead of guessing." in relevant_section
+    assert "debug only" not in relevant_section
     assert any("Use constrained tools instead of guessing." in item for item in metadata["relevant_memory"]["selected_notes"])
+    assert metadata["relevant_memory"]["selected_created_at"] == ["2026-07-25T10:12:00+08:00"]
+    assert metadata["relevant_memory"]["selected_reasons"] == ["debug only"]
     assert metadata["relevant_memory"]["selected_sources"] == ["project_context"]
     assert metadata["relevant_memory"]["selected_kinds"] == ["long_term"]
     assert metadata["relevant_memory"]["retrieval_status"] == "ok"
@@ -558,26 +564,63 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
     agent = build_agent(
         tmp_path,
         [
-            '{"selected": [{"source": "feedback_workflow", "text": "回答时使用中文。", "reason": "用户偏好"}]}',
+            '{"selected": [{"source": "feedback_workflow", "created_at": "2026-07-25T10:12:00+08:00", "text": "回答时使用中文。", "reason": "用户偏好"}]}',
             "完成。",
         ],
     )
     memory_path = agent.paths.memory_root / "feedback_workflow.md"
-    memory_path.write_text("# Feedback Workflow\n\n- 回答时使用中文。\n", encoding="utf-8")
+    memory_path.write_text("# Feedback Workflow\n\n- [2026-07-25T10:12:00+08:00] 回答时使用中文。\n", encoding="utf-8")
+    agent.record({"role": "user", "content": "上一轮讨论了文档。", "created_at": "2026-07-25T10:00:00+08:00"})
 
     result = agent.ask("介绍一下项目")
 
     assert result == "完成。"
     assert agent.long_term_memory_status == "ok"
     assert len(agent.model_client.prompts) == 2
-    assert "回答时使用中文。" in agent.model_client.prompts[1]
+    assert "上一轮讨论了文档。" in agent.model_client.prompts[0]
+    assert "[2026-07-25T10:12:00+08:00] 回答时使用中文。" in agent.model_client.prompts[1]
+    assert "用户偏好" not in agent.model_client.prompts[1]
     assert agent.model_client.prompts[1].count("Relevant memory:") == 1
     assert "user_profile:" in agent.model_client.prompts[1]
     assert "feedback_workflow:" in agent.model_client.prompts[1]
     assert "project_context:" in agent.model_client.prompts[1]
     assert "Runtime context:" in agent.model_client.prompts[1]
     assert "current_local_datetime:" in agent.model_client.prompts[1]
-    assert "today_daily_log_path: " in agent.model_client.prompts[1]
-    assert "/memory/daily_logs/" in agent.model_client.prompts[1]
+    assert "memory_root:" in agent.model_client.prompts[1]
     assert agent.model_client.structured_outputs[0]["name"] == "long_term_memory_retrieval"
+    schema = agent.model_client.structured_outputs[0]["schema"]
+    assert "created_at" in schema["properties"]["selected"]["items"]["properties"]
     assert agent.model_client.structured_outputs[1] is None
+
+
+def test_history_recent_messages_for_retrieval_keeps_tool_group_and_truncates_result(tmp_path):
+    agent = build_agent(tmp_path, [])
+    call_id = "call_read"
+    agent.record(
+        {
+            "role": "assistant",
+            "kind": "tool_calls",
+            "content": "I will read the file.",
+            "tool_calls": [{"id": call_id, "name": "read_file", "args": {"path": "README.md"}}],
+            "created_at": "2026-07-25T10:00:00+08:00",
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": "read_file",
+            "content": "X" * 500,
+            "created_at": "2026-07-25T10:00:01+08:00",
+        }
+    )
+
+    messages = ContextManager(agent).history_renderer.recent_messages_for_retrieval(max_messages=1, tool_result_chars=300)
+
+    assert len(messages) == 2
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["tool_calls"][0]["id"] == call_id
+    assert messages[1]["role"] == "tool"
+    assert messages[1]["tool_call_id"] == call_id
+    assert len(messages[1]["content"]) < 340
+    assert "truncated" in messages[1]["content"]

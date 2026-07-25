@@ -1,5 +1,5 @@
 # 长期记忆文件管理。
-# 本文件负责项目绑定的长期记忆目录、daily log 目录和 dream 状态文件。
+# 本文件负责项目绑定的长期记忆目录、候选记忆目录和 dream 状态文件。
 # 长期记忆物理位置位于用户级 codemate 状态目录下，并按项目 id 隔离。
 # 它不负责模型召回，也不判断哪些信息值得记忆。
 
@@ -42,17 +42,8 @@ def memory_root(workspace_root):
     return codemate_paths(workspace_root).memory_root
 
 
-def daily_logs_dir(workspace_root):
-    return memory_root(workspace_root) / "daily_logs"
-
-
 def candidates_dir(workspace_root):
     return memory_root(workspace_root) / "candidates"
-
-
-def daily_log_path(workspace_root, date=None):
-    date = date or datetime.now().strftime("%Y-%m-%d")
-    return daily_logs_dir(workspace_root) / f"{date}.md"
 
 
 def candidate_log_path(workspace_root, date=None):
@@ -68,7 +59,6 @@ def long_term_file_path(workspace_root, source):
 def ensure_long_term_memory(workspace_root):
     root = memory_root(workspace_root)
     root.mkdir(parents=True, exist_ok=True)
-    daily_logs_dir(workspace_root).mkdir(parents=True, exist_ok=True)
     candidates_dir(workspace_root).mkdir(parents=True, exist_ok=True)
     for spec in LONG_TERM_MEMORY_FILES.values():
         path = root / spec["filename"]

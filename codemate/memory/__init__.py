@@ -3,6 +3,7 @@
 from .common import canonicalize_path, file_freshness, resolve_workspace_path
 from .candidates import (
     append_candidate_memories,
+    append_manual_candidate,
     default_candidate_extract_state,
     extract_candidate_memories,
     mark_candidate_extracted,
@@ -22,20 +23,23 @@ from .file_memory import (
     summarize_read_result,
 )
 from .process_notes import expire_process_notes, record_process_note, resolve_process_notes_after_success
-from .long_term import candidate_log_path, candidates_dir, daily_log_path, ensure_long_term_memory, memory_root, read_long_term_memory
+from .long_term import candidate_log_path, candidates_dir, ensure_long_term_memory, memory_root, read_long_term_memory
 from .retrieval import retrieve_long_term_memory
+from .dream import dream_prompt, dream_system_prompt
 from .state import default_memory_state, is_effectively_empty, normalize_memory_state, render_memory_text
 
 __all__ = [
     "LayeredMemory",
     "canonicalize_path",
     "append_candidate_memories",
+    "append_manual_candidate",
     "candidate_log_path",
     "candidates_dir",
     "conversations_since_checkpoint",
     "default_memory_state",
     "default_candidate_extract_state",
-    "daily_log_path",
+    "dream_prompt",
+    "dream_system_prompt",
     "ensure_long_term_memory",
     "extract_candidate_memories",
     "expire_process_notes",

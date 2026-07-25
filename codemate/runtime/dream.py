@@ -38,8 +38,13 @@ class DreamMixin:
             return
 
         memory_files = memorylib.read_long_term_memory(self.root)
+        recent_messages = self.context_manager.history_renderer.recent_messages_for_retrieval(max_messages=10, tool_result_chars=300)
         cache_payload = json.dumps(
-            {"user_message": str(user_message), "memory_files": memory_files},
+            {
+                "user_message": str(user_message),
+                "memory_files": memory_files,
+                "recent_messages": recent_messages,
+            },
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -47,9 +52,9 @@ class DreamMixin:
         if self._long_term_memory_cache_key == cache_key:
             return
 
-        self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key})
+        self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key, "recent_messages": len(recent_messages)})
         try:
-            result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message)
+            result = memorylib.retrieve_long_term_memory(self.model_client, self.root, user_message, recent_messages=recent_messages)
         except Exception as exc:
             self.relevant_long_term_memory = []
             self.long_term_memory_status = "failed"
@@ -65,6 +70,8 @@ class DreamMixin:
             "status": self.long_term_memory_status,
             "selected_count": len(selected),
             "selected_sources": [str(item.get("source", "")) for item in selected],
+            "selected_created_at": [str(item.get("created_at", "")) for item in selected],
+            "selected_reasons": [str(item.get("reason", "")) for item in selected],
             "duration_ms": int(result.get("duration_ms", 0) or 0),
             "memory_hash": cache_key,
         }
@@ -188,12 +195,11 @@ class DreamMixin:
         # 自动 dream 只做轻量触发判断；真正整理放到后台线程，避免阻塞当前回答。
         if not self.feature_enabled("memory_dream") or self.runtime_mode != "agent":
             return
-        session_count = self.session_store.count()
-        due, reason = dreamlib.should_run_dream(self.root, session_count)
+        due, reason = dreamlib.should_run_dream(self.root)
         if not due:
             return
         self.start_dream_background(reason=reason)
-        self.emit_trace(task_state, "dream_scheduled", {"reason": reason, "session_count": session_count})
+        self.emit_trace(task_state, "dream_scheduled", {"reason": reason})
 
     def start_dream_background(self, reason="manual"):
         thread = threading.Thread(target=self.run_dream_once, kwargs={"reason": reason, "foreground": False}, daemon=True)
@@ -202,13 +208,15 @@ class DreamMixin:
 
     def run_dream_once(self, reason="manual", foreground=True):
         # Dream 用独立子 agent 执行，权限限制在记忆整理需要的文件工具内。
-        # 只有子 agent 正常 final 退出时才推进 daily log cursor，避免失败后跳过日志。
+        # 只有子 agent 正常 final 退出时才推进 candidate cursor，避免失败后跳过候选记忆。
         with longterm.dream_lock(self.root) as acquired:
             if not acquired:
                 return "dream skipped: another dream process is already running"
             try:
-                state = longterm.load_dream_state(self.root)
-                cursor_text = dreamlib.render_daily_log_cursor(state)
+                candidates = dreamlib.unprocessed_candidates(self.root)
+                if not candidates:
+                    return "dream skipped: no unprocessed candidate memories"
+                candidate_batch = dreamlib.render_candidate_batch(candidates)
                 dream_session = {
                     "id": "dream-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
                     "created_at": now(),
@@ -225,7 +233,7 @@ class DreamMixin:
                     session_store=self.session_store,
                     session=dream_session,
                     approval_policy="auto",
-                    max_steps=12,
+                    max_steps=50,
                     max_new_tokens=self.max_new_tokens,
                     depth=0,
                     max_depth=0,
@@ -243,16 +251,16 @@ class DreamMixin:
                     timezone_name=self.timezone_name,
                     ui=self.ui if foreground else NullUI(),
                 )
-                child.ask(dreamlib.dream_prompt(cursor_text))
+                child.ask(dreamlib.dream_prompt(candidate_batch))
                 if getattr(child.current_task_state, "stop_reason", "") != STOP_REASON_FINAL_ANSWER_RETURNED:
                     reason_text = getattr(child.current_task_state, "stop_reason", "") or "unknown"
                     dreamlib.mark_dream_failed(self.root, status=reason_text)
                     return f"dream failed: child agent stopped with {reason_text}"
-                updated = dreamlib.mark_dream_complete(self.root, self.session_store.count(), status="ok")
-                cursor = updated.get("last_processed_daily_log") or {}
+                updated = dreamlib.mark_dream_complete(self.root, candidates, status="ok")
+                cursor = updated.get("last_processed_candidate") or {}
                 file_name = cursor.get("file") or ""
                 line = cursor.get("line", 0) or 0
-                return f"dream completed: processed through {file_name or 'no daily logs'} line {line}"
+                return f"dream completed: processed through {file_name or 'no candidates'} line {line}"
             except Exception as exc:
                 dreamlib.mark_dream_failed(self.root, status="error")
                 return f"dream failed: {exc}"
