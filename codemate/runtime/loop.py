@@ -10,6 +10,21 @@ from ..workspace import clip, now
 
 
 class RuntimeLoopMixin:
+    def _emit_commentary_trace(self, task_state, commentary, *, source):
+        """把用户可见的中间进展写入 trace，便于事后复盘 agent 决策过程。"""
+        text = str(commentary or "").strip()
+        if not text:
+            return
+        self.emit_trace(
+            task_state,
+            "assistant_commentary",
+            {
+                "source": source,
+                "content": clip(text, 4000),
+                "content_chars": len(text),
+            },
+        )
+
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
@@ -145,6 +160,7 @@ class RuntimeLoopMixin:
                     self.run_store.write_task_state(task_state)
                     continue
                 self.ui.commentary(commentary)
+                self._emit_commentary_trace(task_state, commentary, source="commentary")
                 self.record({"role": "assistant", "kind": "commentary", "content": commentary, "created_at": now()})
                 self.run_store.write_task_state(task_state)
                 continue
@@ -166,7 +182,9 @@ class RuntimeLoopMixin:
                     calls_to_execute = calls[: max(0, self.max_steps - tool_steps)]
                 commentary = str(getattr(response, "text", "") or "")
                 if commentary.strip():
-                    self.ui.commentary(commentary.strip())
+                    commentary = commentary.strip()
+                    self.ui.commentary(commentary)
+                    self._emit_commentary_trace(task_state, commentary, source="tool_calls")
                 self.record(
                     {
                         "role": "assistant",

@@ -11,11 +11,11 @@ from dataclasses import dataclass
 
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = {
-    "gpt-5.4": 128_000,
-    "gpt-5.5": 128_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-opus-4-8": 200_000,
-    "deepseek-v4-pro": 128_000,
+    "gpt-5.4": 258_000,
+    "gpt-5.5": 258_000,
+    "claude-sonnet-4-6": 500_000,
+    "claude-opus-4-8": 500_000,
+    "deepseek-v4-pro": 258_000,
 }
 DEFAULT_COMPACT_TRIGGER_RATIO = 0.90
 CONTEXT_TOKENS_ENV = "CODEMATE_CONTEXT_TOKENS"
@@ -69,7 +69,7 @@ def model_context_tokens(model):
     override = _positive_int_env(CONTEXT_TOKENS_ENV)
     if override is not None:
         return override
-    return int(DEFAULT_CONTEXT_WINDOW_TOKENS.get(str(model or ""), 128_000))
+    return int(DEFAULT_CONTEXT_WINDOW_TOKENS.get(str(model or ""), 258_000))
 
 
 def compact_trigger_ratio():

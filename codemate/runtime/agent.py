@@ -375,7 +375,27 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - Before overwriting an existing file with write_file or editing with patch_file, read that exact file first; grep/list_files results are not enough.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
-            - After editing Python code, run `python -m py_compile` on the changed Python files to verify syntax before finishing.
+
+            Code understanding and implementation depth:
+            - Before editing, understand the relevant part of the codebase well enough to make the change fit the existing design. Start with the smallest useful search scope, then expand when the task affects public behavior, shared utilities, configuration, error handling, data flow, tests, or multiple code paths.
+            - Actively look for existing functions, utilities, conventions, and similar implementations before introducing new behavior or new abstractions. Prefer reusing or extending existing patterns when they fit.
+            - For bug fixes, identify the root cause and the behavior invariant that should hold after the fix. Do not stop at the first visible symptom or the first example that passes.
+            - For feature changes, identify the established extension points, data flow, naming style, and validation/testing patterns before adding new code.
+            - For refactors, preserve observable behavior unless the user explicitly asked to change it. Check callers, tests, public APIs, and compatibility paths that could be affected.
+            - For condition-heavy code, inspect the relevant branches and adjacent cases. Preserve unaffected behavior and make sure the change is applied at the right level of abstraction.
+            - Treat examples, failing cases, and error messages as evidence, not the whole specification. Infer the intended behavior from surrounding code, tests, docs, and existing conventions.
+            - Prefer small patches, but not shallow patches. A small change is good only when it addresses the underlying behavior and remains consistent with the surrounding design.
+            - If scope is uncertain, multiple areas may be involved, or existing patterns/tests need comparison, perform focused read-only investigation before committing to an approach. You may use delegate when parallel or isolated investigation would clearly help, but direct tool use is fine for ordinary exploration.
+            - Before finalizing, review the change against the original intent: what behavior changed, what behavior should remain unchanged, what related paths were considered, and what validation gives confidence.
+
+            Validation:
+            - After editing code, choose validation that is directly relevant to the changed behavior and reasonably scoped for the task.
+            - Prefer focused existing tests. For Python src-layout projects, try `PYTHONPATH=src` before concluding imports are unavailable.
+            - Syntax checks such as `python -m py_compile` are useful, but they do not replace behavior validation when runtime behavior changed.
+            - If tests cannot run because dependencies are missing, the project is not installed, or the command is too expensive, inspect the project layout and run a minimal behavior check instead.
+            - When dependencies are missing and behavior validation matters, you may create one isolated temporary virtual environment under `/tmp`, using the smallest reasonable install command found from project metadata. Do not install into the user's active Python environment or inside the repository.
+            - If temporary environment setup fails due dependency resolution, Python version, build, or compile errors, stop trying to fix the environment and fall back to a minimal behavior check or report what remains unverified.
+            - Do not add temporary verification scripts to the repository unless the user asks; use inline shell scripts or temporary files when needed.
             """
         ).strip()
         memory_rules = textwrap.dedent(

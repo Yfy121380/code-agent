@@ -55,6 +55,15 @@ PROVIDER_MODELS = {
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "CODEMATE_SECRET_ENV_NAMES"
 RESUME_SELECT = "__select__"
+# benchmark 模式只关闭会破坏任务独立性或增加额外模型调用的功能。
+# MCP、skill 和沙箱仍按普通配置工作，避免把实验模式和工具能力混在一起。
+BENCHMARK_DISABLED_FEATURES = {
+    "long_term_memory": False,
+    "relevant_memory": False,
+    "memory_candidates": False,
+    "memory_dream": False,
+    "session_title": False,
+}
 
 
 def _effective_model(args, provider):
@@ -185,6 +194,7 @@ def build_agent(args, ui=None):
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(paths.sessions_root)
     model = _build_model_client(args)
+    feature_flags = dict(BENCHMARK_DISABLED_FEATURES) if getattr(args, "benchmark", False) else None
     session_id = args.resume
     if session_id == RESUME_SELECT:
         selected = ui.session_menu(store.list_sessions()) if ui is not None else None
@@ -207,6 +217,7 @@ def build_agent(args, ui=None):
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            feature_flags=feature_flags,
             ui=ui,
         )
     return CodeMate(
@@ -217,6 +228,7 @@ def build_agent(args, ui=None):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        feature_flags=feature_flags,
         ui=ui,
     )
 
@@ -248,7 +260,12 @@ def build_arg_parser():
         help="Extra environment variable names to treat as secrets for trace and task-state redaction.",
     )
     parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations for bounded child processes such as delegate and dream.")
-    parser.add_argument("--max-new-tokens", type=int, default=4096, help="Maximum model output tokens per step.")
+    parser.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum model output tokens per step.")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Disable cross-session memory maintenance and session title generation for benchmark runs.",
+    )
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
     return parser

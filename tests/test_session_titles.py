@@ -58,6 +58,26 @@ def test_resume_without_value_enters_session_selection_mode():
     assert args.resume == cli.RESUME_SELECT
 
 
+def test_benchmark_flag_disables_cross_session_memory_and_title(tmp_path, monkeypatch):
+    args = cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--benchmark"])
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_build_model_client", lambda _args: FakeModelClient([]))
+
+    agent = cli.build_agent(args)
+
+    assert args.benchmark is True
+    for name in (
+        "long_term_memory",
+        "relevant_memory",
+        "memory_candidates",
+        "memory_dream",
+        "session_title",
+    ):
+        assert agent.feature_enabled(name) is False
+    assert agent.feature_enabled("memory") is True
+    agent.close()
+
+
 def test_session_title_normalization_removes_markers_and_limits_chinese(tmp_path):
     agent = build_agent(tmp_path, [])
 
