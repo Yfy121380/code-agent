@@ -9,14 +9,8 @@ import math
 import os
 from dataclasses import dataclass
 
+from ..models.capabilities import model_context_tokens as configured_model_context_tokens
 
-DEFAULT_CONTEXT_WINDOW_TOKENS = {
-    "gpt-5.4": 258_000,
-    "gpt-5.5": 258_000,
-    "claude-sonnet-4-6": 500_000,
-    "claude-opus-4-8": 500_000,
-    "deepseek-v4-pro": 258_000,
-}
 DEFAULT_COMPACT_TRIGGER_RATIO = 0.90
 CONTEXT_TOKENS_ENV = "CODEMATE_CONTEXT_TOKENS"
 COMPACT_RATIO_ENV = "CODEMATE_COMPACT_TRIGGER_RATIO"
@@ -63,13 +57,13 @@ def _ratio_env(name):
 def model_context_tokens(model):
     """返回当前模型的最大上下文 token 数。
 
-    默认表应维护为真实模型规格；`CODEMATE_CONTEXT_TOKENS` 只作为调试覆盖，
+    默认值来自模型能力表；`CODEMATE_CONTEXT_TOKENS` 只作为调试覆盖，
     方便把上下文窗口临时调小来测试预算判断。
     """
     override = _positive_int_env(CONTEXT_TOKENS_ENV)
     if override is not None:
         return override
-    return int(DEFAULT_CONTEXT_WINDOW_TOKENS.get(str(model or ""), 258_000))
+    return configured_model_context_tokens(model)
 
 
 def compact_trigger_ratio():

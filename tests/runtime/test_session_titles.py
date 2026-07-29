@@ -1,3 +1,9 @@
+"""会话标题与恢复入口测试。
+
+覆盖模块：runtime session title、cli --resume、banner。
+重点边界：首轮标题生成、已有标题不重写、benchmark 关闭标题、标题清理截断、banner 不被长标题撑破。
+"""
+
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli
 from codemate.ui.banner import build_welcome

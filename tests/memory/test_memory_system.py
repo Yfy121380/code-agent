@@ -1,3 +1,9 @@
+"""工作记忆与长期记忆系统测试。
+
+覆盖模块：memory facade/state/file/process/long_term/retrieval/dream。
+重点边界：文件摘要新鲜度、异常工具笔记生命周期、长期记忆初始化/迁移/召回、dream 触发与失败处理。
+"""
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

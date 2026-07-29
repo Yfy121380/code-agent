@@ -113,7 +113,7 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 [D] codemate/tools
 [F] README.md  12 lines
 [F] uv.lock  large file
-[F] image.png  binary file
+[F] image.png  image file
 ```
 
 限制和校验：
@@ -124,12 +124,13 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 - 最多展示前 200 个直接子项。
 - 小于等于 10MB 的 UTF-8 文本文件会显示准确行数，帮助模型判断是否适合全文读取。
 - 大于 10MB 的文本文件显示 `large file`，不会为了统计行数扫描整个文件。
+- 支持的图片文件会显示 `image file`，目前识别 PNG、JPEG、WebP 和 GIF。
 - 二进制文件通过前 8192 bytes 中是否包含空字节或 UTF-8 解码是否失败做简单判断，并显示 `binary file`。
 - 读路径需要通过 read 权限 gate。
 
 ### read_file
 
-`read_file` 用于读取 UTF-8 文本文件。修改已有文件前必须先读目标文件，避免基于未知内容写入。
+`read_file` 用于读取本地文件。对于 UTF-8 文本文件，它按行返回内容；对于支持的图片文件，它返回图片元信息，并把图片内容作为模型可识别的图片输入传递给模型。修改已有文件前必须先读目标文件，避免基于未知内容写入。
 
 参数：
 
@@ -140,14 +141,14 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 | `end` | integer | 否 | `200` | 1-based 结束行，包含该行；必须 `end >= start` |
 | `read_all` | boolean | 否 | `false` | 为 `true` 时读取全文，忽略 `start/end` |
 
-全文读取规则：
+文本读取规则：
 
 - `read_all=true` 时读取整个文件。
 - `read_all=true` 时 `start/end` 被忽略。
 - 所有工具结果都会经过统一大小限制；如果读取结果超过全局工具结果上限，会保留开头和结尾并提示已截断。
 - 因此大文件仍建议先通过 `list_files` 查看行数，再使用 `start/end` 分段读取。
 
-输出格式：
+文本输出格式：
 
 ```text
 # README.md
@@ -155,11 +156,21 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
    2: world
 ```
 
+图片读取规则：
+
+- 支持 PNG、JPEG、WebP 和 GIF。
+- 图片读取不使用行号；`start`、`end` 和 `read_all` 会被忽略。
+- 读取时会校验图片格式、原始大小和解码后的像素数量，避免把过大的图片直接塞进模型上下文。
+- 如果图片尺寸或体积过大，会在传给模型前进行缩放或压缩。
+- history 和 session 文件只保存短文本元信息和图片缓存引用，不保存很长的 base64 内容。
+
+
 限制和校验：
 
 - `path` 必须存在且是文件。
 - `read_all` 必须是 boolean。
-- 非全文模式下 `start >= 1` 且 `end >= start`。
+- 文本文件在非全文模式下要求 `start >= 1` 且 `end >= start`。
+- 图片文件必须是真实有效的支持格式，不能只靠扩展名伪装。
 - 工具成功结果最终最多保留 30000 字符，超出时会加截断提示。
 - 读路径需要通过 read 权限 gate。
 - 工具结果会进入 history；最近读过的文件和短摘要会沉淀进 working memory。
@@ -525,7 +536,7 @@ settings.json
 - `run_shell` 的 stdout/stderr 只展示前后少量行，避免终端被刷屏。
 - `todo_write` 展示当前 plan。
 - `delegate` 展示每个子任务的简要结果和 child run 信息。
-- 详细内容仍进入 history 和 trace，便于模型继续使用和后续复盘。
+- 详细文本内容仍进入 history 和 trace，便于模型继续使用和后续复盘；图片结果只记录元信息和缓存引用，实际图片内容在请求模型时再读取。
 
 这样做是为了让用户能看清 agent 在做什么，而不是被大段工具参数和输出淹没。
 

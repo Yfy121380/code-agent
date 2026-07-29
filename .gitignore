@@ -19,6 +19,7 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+vscode-extension/
 
 # Temporary files
 .mini-coding-agent

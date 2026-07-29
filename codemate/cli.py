@@ -16,6 +16,7 @@ from prompt_toolkit.history import FileHistory
 
 from .config import ensure_codemate_layout, load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from .models.capabilities import PROVIDER_MODELS, default_model_for_provider, models_for_provider
 from .runtime import CodeMate
 from .storage import SessionStore
 from .ui import TerminalUI
@@ -41,17 +42,9 @@ DEFAULT_SECRET_ENV_NAMES = (
 APPROVAL_POLICIES = ("ask", "auto", "read_only", "full")
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
-PROVIDER_MODELS = {
-    "openai": ["gpt-5.4", "gpt-5.5"],
-    "anthropic": ["claude-sonnet-4-6", "claude-opus-4-8"],
-    "deepseek": ["deepseek-v4-pro"],
-}
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "CODEMATE_SECRET_ENV_NAMES"
 RESUME_SELECT = "__select__"
@@ -78,17 +71,17 @@ def _effective_model(args, provider):
         model = provider_env("CODEMATE_OPENAI_MODEL", ("OPENAI_MODEL",))
         if model:
             return model
-        return DEFAULT_OPENAI_MODEL
+        return default_model_for_provider(provider, DEFAULT_OLLAMA_MODEL)
     if provider == "anthropic":
         model = provider_env("CODEMATE_ANTHROPIC_MODEL", ("ANTHROPIC_MODEL",))
         if model:
             return model
-        return DEFAULT_ANTHROPIC_MODEL
+        return default_model_for_provider(provider, DEFAULT_OLLAMA_MODEL)
     if provider == "deepseek":
         model = provider_env("CODEMATE_DEEPSEEK_MODEL", ("DEEPSEEK_MODEL",))
         if model:
             return model
-        return DEFAULT_DEEPSEEK_MODEL
+        return default_model_for_provider(provider, DEFAULT_OLLAMA_MODEL)
     return DEFAULT_OLLAMA_MODEL
 
 
@@ -404,7 +397,7 @@ def run_cli(args, ui, agent_holder):
             old_provider = current_provider
             old_model = current_model
             current_provider = provider
-            current_model = PROVIDER_MODELS[provider][0]
+            current_model = models_for_provider(provider)[0]
             agent.model_client = _build_switched_model_client(args, current_provider, current_model)
             agent.reset_token_usage()
             agent.refresh_prefix(force=True)

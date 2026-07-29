@@ -1,3 +1,9 @@
+"""上下文组装测试。
+
+覆盖模块：context.manager、context.history、长期记忆注入。
+重点边界：section 顺序、history summary 位置、skill/working memory 渲染、旧读类工具结果清理、tool group 保持完整。
+"""
+
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
 from codemate.context import ContextManager
 
@@ -473,6 +479,42 @@ def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
     assert "OLD-WEB-OBSERVATION" not in transcript
     assert transcript.count("Old tool result content cleared.") == 2
     assert metadata["history"]["cleared_old_tool_results"] == 2
+
+
+def test_context_manager_removes_image_blocks_when_old_read_result_is_cleared(tmp_path):
+    agent = build_agent(tmp_path, [])
+    for index in range(25):
+        call_id = f"call_image_{index}"
+        args = {"path": f"shot_{index}.png"}
+        agent.record(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": call_id, "name": "read_file", "args": args}],
+                "created_at": "2026-04-09T00:00:00+00:00",
+            }
+        )
+        agent.record(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": f"Image file: shot_{index}.png",
+                "content_blocks": [{"type": "image", "path": f"/tmp/shot_{index}.png", "media_type": "image/png"}],
+                "created_at": "2026-04-09T00:00:00+00:00",
+            }
+        )
+
+    _system, messages, metadata = agent._build_messages_and_metadata("")
+    cleared = [
+        message
+        for message in messages
+        if message.get("role") == "tool" and message.get("content") == "Old tool result content cleared."
+    ]
+
+    assert metadata["history"]["cleared_old_tool_results"] > 0
+    assert cleared
+    assert all("content_blocks" not in message for message in cleared)
 
 
 def test_context_manager_keeps_tool_output_structure_without_budget_clipping(tmp_path):

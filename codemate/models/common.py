@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import base64
+from pathlib import Path
 
 from .types import ModelResponse, ModelToolCall
 
@@ -41,6 +43,22 @@ def _messages_to_text(messages, system=None):
             continue
         lines.append(f"[{role}] {message.get('content', '')}")
     return "\n".join(lines).strip()
+
+
+def _image_block_base64(block):
+    path = Path(str(block.get("path", ""))).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"image tool result cache file is missing: {path}")
+    media_type = str(block.get("media_type", "") or "").strip()
+    if not media_type.startswith("image/"):
+        raise RuntimeError("image tool result is missing a valid media_type")
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return media_type, data
+
+
+def _image_block_data_uri(block):
+    media_type, data = _image_block_base64(block)
+    return media_type, f"data:{media_type};base64,{data}"
 
 
 def _as_model_response(output):

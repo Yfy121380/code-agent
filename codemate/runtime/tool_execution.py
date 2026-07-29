@@ -104,6 +104,7 @@ class ToolExecutionMixin:
         self._last_shell_analysis = None
         self._last_tool_gate = None
         self._last_delegate_metadata = {}
+        self._last_tool_result_content_blocks = []
         tool = self.tools.get(name)
         if tool is None:
             message = f"error: unknown tool '{name}'"
@@ -171,8 +172,9 @@ class ToolExecutionMixin:
         if not asked_for_approval:
             self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
         try:
-            raw_result = str(tool["run"](args))
-            result, truncation_metadata = self.truncate_tool_result(raw_result)
+            raw_output = toolkit.normalize_tool_output(tool["run"](args))
+            result, truncation_metadata = self.truncate_tool_result(raw_output.content)
+            content_blocks = list(raw_output.content_blocks or [])
             tool_status = "ok"
             tool_error_code = ""
             if name == "run_shell":
@@ -189,6 +191,7 @@ class ToolExecutionMixin:
                     tool_error_code = "delegate_failed"
 
             self.update_memory_after_tool(name, args, result)
+            self._last_tool_result_content_blocks = content_blocks
             self._last_tool_result_metadata = {
                 "tool_status": tool_status,
                 "tool_error_code": tool_error_code,
@@ -198,6 +201,7 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
                 **delegate_metadata,
+                **dict(raw_output.metadata or {}),
                 **truncation_metadata,
             }
             if tool_status == "ok":

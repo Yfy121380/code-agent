@@ -1,3 +1,9 @@
+"""会话与 run 存储测试。
+
+覆盖模块：storage.session_store、storage.run_store。
+重点边界：session/runs 目录布局、会话列表/解析/重命名、trace JSONL 追加、unicode 保留、缺失 final trace 容错。
+"""
+
 import json
 
 from codemate.storage import RunStore, SessionStore

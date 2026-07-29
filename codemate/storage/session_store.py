@@ -29,6 +29,11 @@ class SessionStore:
     def runs_dir(self, session_id):
         return self.session_dir(session_id) / "runs"
 
+    def media_dir(self, session_id):
+        # 多模态工具结果缓存放在 session 目录内，只在请求模型时再读取为 base64。
+        # 这样 session.json 不会保存大块图片数据，恢复会话时引用仍然稳定。
+        return self.session_dir(session_id) / "media"
+
     def save(self, session):
         path = self.path(session["id"])
         path.parent.mkdir(parents=True, exist_ok=True)

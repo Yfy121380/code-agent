@@ -1,3 +1,9 @@
+"""shell 沙箱测试。
+
+覆盖模块：tools.sandbox、run_shell 沙箱接入。
+重点边界：settings 默认开启、bwrap 命令构造、read deny 覆盖、write allow 绑定、preflight 错误、full 跳过沙箱。
+"""
+
 from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext

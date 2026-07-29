@@ -10,10 +10,12 @@ import urllib.request
 
 from .common import (
     _extract_usage_cache_details,
+    _image_block_data_uri,
     _json_args,
     _normalize_messages,
     _normalize_versioned_base_url,
 )
+from .capabilities import model_capability
 from .schemas import _tool_specs_to_openai, _tool_specs_to_openai_chat
 from .types import ModelResponse, ModelToolCall
 
@@ -178,14 +180,57 @@ def _extract_openai_response_from_sse(body_text):
         return "".join(deltas), last_response or {}
     return "", {}
 
-def _to_openai_input(messages, system=None):
+def _openai_response_content(text, content_blocks=None, supports_images=True):
+    content = []
+    if text:
+        content.append({"type": "input_text", "text": str(text)})
+    if supports_images:
+        for block in content_blocks or []:
+            if block.get("type") != "image":
+                continue
+            _media_type, data_uri = _image_block_data_uri(block)
+            content.append({"type": "input_image", "image_url": data_uri, "detail": "auto"})
+    return content or [{"type": "input_text", "text": ""}]
+
+
+def _openai_tool_output(message, supports_images=True):
+    text = str(message.get("content", ""))
+    image_content = _openai_response_content(text, message.get("content_blocks", []), supports_images=supports_images)
+    if len(image_content) == 1 and image_content[0]["type"] == "input_text":
+        return image_content[0]["text"]
+    return image_content
+
+
+def _openai_chat_image_content(text, content_blocks=None, supports_images=True):
+    content = []
+    if text:
+        content.append({"type": "text", "text": str(text)})
+    if supports_images:
+        for block in content_blocks or []:
+            if block.get("type") != "image":
+                continue
+            _media_type, data_uri = _image_block_data_uri(block)
+            content.append({"type": "image_url", "image_url": {"url": data_uri, "detail": "auto"}})
+    return content
+
+
+def _to_openai_input(messages, system=None, supports_images=True):
     items = []
     if system:
         items.append({"role": "system", "content": [{"type": "input_text", "text": str(system)}]})
     for message in messages or []:
         role = message.get("role", "user")
         if role in {"user", "system"}:
-            items.append({"role": role, "content": [{"type": "input_text", "text": str(message.get("content", ""))}]})
+            items.append(
+                {
+                    "role": role,
+                    "content": _openai_response_content(
+                        str(message.get("content", "")),
+                        message.get("content_blocks", []),
+                        supports_images=supports_images,
+                    ),
+                }
+            )
         elif role == "assistant" and message.get("tool_calls"):
             content = str(message.get("content", "") or "")
             if content:
@@ -218,7 +263,7 @@ def _to_openai_input(messages, system=None):
                 {
                     "type": "function_call_output",
                     "call_id": message.get("tool_call_id"),
-                    "output": str(message.get("content", "")),
+                    "output": _openai_tool_output(message, supports_images=supports_images),
                 }
             )
     return items
@@ -252,7 +297,7 @@ def _openai_responses_text_format(structured_output):
     }
 
 
-def _to_openai_chat_messages(messages, system=None):
+def _to_openai_chat_messages(messages, system=None, supports_images=True):
     converted = []
     if system:
         converted.append({"role": "system", "content": str(system)})
@@ -288,6 +333,13 @@ def _to_openai_chat_messages(messages, system=None):
                     "content": str(message.get("content", "")),
                 }
             )
+            image_content = _openai_chat_image_content(
+                f"Image output for tool {message.get('name', '')} ({message.get('tool_call_id', '')}).",
+                message.get("content_blocks", []),
+                supports_images=supports_images,
+            )
+            if len(image_content) > 1:
+                converted.append({"role": "user", "content": image_content})
     return converted
 
 class OpenAICompatibleModelClient:
@@ -297,6 +349,9 @@ class OpenAICompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.capabilities = model_capability(model)
+        self.supports_images = self.capabilities.supports_images
+        self.supports_reasoning = self.capabilities.supports_reasoning
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.supports_tools = True
         self.last_completion_metadata = {}
@@ -308,7 +363,7 @@ class OpenAICompatibleModelClient:
     def _complete_chat_completions(self, messages, max_new_tokens, tools=None, system=None, structured_output=None):
         payload = {
             "model": self.model,
-            "messages": _to_openai_chat_messages(_normalize_messages(messages), system=system),
+            "messages": _to_openai_chat_messages(_normalize_messages(messages), system=system, supports_images=self.supports_images),
             "max_tokens": max_new_tokens,
             "stream": False,
         }
@@ -367,7 +422,7 @@ class OpenAICompatibleModelClient:
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "input": _to_openai_input(_normalize_messages(messages), system=system),
+            "input": _to_openai_input(_normalize_messages(messages), system=system, supports_images=self.supports_images),
             "max_output_tokens": max_new_tokens,
             "stream": False,
         }
@@ -382,6 +437,8 @@ class OpenAICompatibleModelClient:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
             payload["prompt_cache_retention"] = prompt_cache_retention
+        if self.supports_reasoning and self.capabilities.openai_reasoning_effort:
+            payload["reasoning"] = {"effort": self.capabilities.openai_reasoning_effort}
 
         headers = {
             "Content-Type": "application/json",

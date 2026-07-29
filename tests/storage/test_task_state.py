@@ -1,3 +1,9 @@
+"""任务状态测试。
+
+覆盖模块：storage.task_state。
+重点边界：running/success/step_limit/retry_limit 状态记录和 snapshot 输出。
+"""
+
 from codemate.storage import (
     STOP_REASON_FINAL_ANSWER_RETURNED,
     STOP_REASON_RETRY_LIMIT_REACHED,

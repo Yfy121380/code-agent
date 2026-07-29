@@ -24,6 +24,17 @@ CodeMate 是一个本地运行的 coding agent。它面向代码仓库工作，�
   <img src="docs/assets/tool_approval.png" alt="工具权限审批" width="800">
 </p>
 
+### skill + todo规划功能完成项目
+#### 规划
+<p align="center">
+  <img src="docs/assets/design.png" alt="design" width="800">
+</p>
+
+#### 编写
+<p align="center">
+  <img src="docs/assets/design.png" alt="write" width="800">
+</p>
+
 
 ## 功能特性
 

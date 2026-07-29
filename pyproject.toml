@@ -9,6 +9,7 @@ description = "Small local coding agent for Ollama, OpenAI-compatible, Anthropic
 requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.0.0",
+  "pillow>=10.0.0",
   "prompt_toolkit>=3.0.0",
   "rich>=13.0.0",
 ]

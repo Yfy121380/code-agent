@@ -7,6 +7,7 @@ class FakeModelClient:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []
+        self.supports_images = False
         self.supports_prompt_cache = False
         self.supports_tools = True
         self.supports_session_title = False

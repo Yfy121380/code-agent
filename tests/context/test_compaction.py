@@ -1,3 +1,9 @@
+"""history compact 测试。
+
+覆盖模块：runtime.compaction。
+重点边界：summary 更新、recent history 保留、失败三次回滚、tool_call/tool_result 配对、预算超限自动触发。
+"""
+
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate.runtime.compaction import SUMMARY_WRAPPER_PREFIX
 

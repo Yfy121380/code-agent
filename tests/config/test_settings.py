@@ -1,3 +1,9 @@
+"""settings 与权限规则聚合测试。
+
+覆盖模块：config.settings。
+重点边界：父子目录规则合并、同类规则独立合并、临时规则参与聚合、sandbox 配置类型校验。
+"""
+
 from codemate.config.paths import codemate_paths
 from codemate.config.settings import build_permission_rules, load_codemate_settings
 

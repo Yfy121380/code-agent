@@ -191,6 +191,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._long_term_memory_cache_key = None
         # 最近一次工具执行元数据，供 UI、trace 和测试读取。
         self._last_tool_result_metadata = {}
+        # 最近一次工具执行产生的结构化内容块，例如 read_file 图片缓存引用。
+        self._last_tool_result_content_blocks = []
         # 最近一次 bash 静态分析结果，供审批和工具元数据复用。
         self._last_shell_analysis = None
         # 最近一次工具门禁结果，供审批 UI 展示和 trace 记录。
@@ -390,12 +392,25 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
             Validation:
             - After editing code, choose validation that is directly relevant to the changed behavior and reasonably scoped for the task.
-            - Prefer focused existing tests. For Python src-layout projects, try `PYTHONPATH=src` before concluding imports are unavailable.
-            - Syntax checks such as `python -m py_compile` are useful, but they do not replace behavior validation when runtime behavior changed.
-            - If tests cannot run because dependencies are missing, the project is not installed, or the command is too expensive, inspect the project layout and run a minimal behavior check instead.
-            - When dependencies are missing and behavior validation matters, you may create one isolated temporary virtual environment under `/tmp`, using the smallest reasonable install command found from project metadata. Do not install into the user's active Python environment or inside the repository.
-            - If temporary environment setup fails due dependency resolution, Python version, build, or compile errors, stop trying to fix the environment and fall back to a minimal behavior check or report what remains unverified.
-            - Do not add temporary verification scripts to the repository unless the user asks; use inline shell scripts or temporary files when needed.
+            - Prefer focused existing tests. Syntax checks such as `python -m py_compile` are useful, but they do not replace behavior validation when runtime behavior changed.
+            - For Python src-layout projects, try `PYTHONPATH=src` before concluding imports are unavailable. When validating imports, confirm the imported module comes from the current workspace, not from a globally installed package.
+            - If runtime validation fails because dependencies are missing or globally installed dependencies are incompatible, diagnose the environment before falling back:
+              - Read project metadata such as `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements*.txt`, `tox.ini`, or test configuration.
+              - Identify whether the failure is a missing dependency, an incompatible dependency version, an unsupported Python version, or an overly broad test setup.
+            - Prefer a minimal temporary validation environment over installing full test requirements:
+              - Create it under `/tmp` using a unique directory, for example `mktemp -d /tmp/codemate-venv-XXXXXX`.
+              - Do not install into the user's active Python environment and do not create the venv inside the repository.
+              - Install the editable project and only the smallest compatible dependencies needed for the focused behavior check.
+              - For historical projects, respect dependency upper bounds from metadata or infer conservative upper bounds when an error clearly indicates a removed API in a newer dependency.
+            - If full test dependencies fail to install, do not stop immediately. Try one smaller focused environment for the changed behavior before falling back to static checks.
+            - Limit environment setup attempts to a small number of distinct strategies:
+              1. current environment with `PYTHONPATH=src`;
+              2. temporary venv with editable project and minimal runtime dependencies;
+              3. temporary venv with one focused test dependency set when needed.
+              Stop after these strategies fail, and report exactly which strategy failed and why.
+            - In the temporary environment, first run a minimal behavior script that exercises the changed code path. Then run focused tests if they are available and reasonably scoped.
+            - Do not add temporary verification scripts to the repository unless the user asks; use inline shell scripts or files under `/tmp`.
+            - If no meaningful runtime validation is possible, state what was attempted, why it failed, and what remains unverified.
             """
         ).strip()
         memory_rules = textwrap.dedent(

@@ -3,6 +3,7 @@
 import subprocess
 
 from .constants import GREP_MODES, MAX_GREP_CONTEXT_LINES, MAX_TOOL_RESULT_CHARS, TODO_STATUSES, WEB_TOOL_NAMES
+from .images import image_media_type_for_file, is_supported_image_file, sniff_image_media_type
 from .handlers import (
     tool_delegate,
     tool_grep,
@@ -19,6 +20,7 @@ from .handlers import (
     tool_write_file,
 )
 from .registry import build_tool_registry
+from .results import ToolRunOutput, normalize_tool_output
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC
@@ -34,6 +36,7 @@ __all__ = [
     "MAX_TOOL_RESULT_CHARS",
     "TODO_STATUSES",
     "WEB_TOOL_NAMES",
+    "ToolRunOutput",
     "ShellCommandAnalysis",
     "ToolGate",
     "ToolPolicyError",
@@ -44,10 +47,14 @@ __all__ = [
     "gate_for_access",
     "gate_for_mcp",
     "gate_for_web",
+    "image_media_type_for_file",
+    "is_supported_image_file",
     "is_mcp_tool_name",
+    "normalize_tool_output",
     "resolve_tool_path",
     "sandbox_enabled",
     "sandbox_preflight_error",
+    "sniff_image_media_type",
     "validate_tool",
     "tool_delegate",
     "tool_grep",

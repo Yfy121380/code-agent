@@ -201,17 +201,19 @@ class RuntimeLoopMixin:
                     task_state.record_tool(name)
                     tool_started_at = time.monotonic()
                     result = self.run_tool(name, args, current_tool_call_id=call.id)
+                    content_blocks = list(getattr(self, "_last_tool_result_content_blocks", []) or [])
                     tool_result_tokens_added = self.add_tool_result_token_estimate(result)
                     self.ui.tool_result(name, args, result, metadata=dict(self._last_tool_result_metadata or {}))
-                    self.record(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "name": name,
-                            "content": result,
-                            "created_at": now(),
-                        }
-                    )
+                    tool_record = {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": name,
+                        "content": result,
+                        "created_at": now(),
+                    }
+                    if content_blocks:
+                        tool_record["content_blocks"] = content_blocks
+                    self.record(tool_record)
                     self.run_store.write_task_state(task_state)
                     self.emit_trace(
                         task_state,
@@ -221,6 +223,7 @@ class RuntimeLoopMixin:
                             "args": args,
                             "tool_call_id": call.id,
                             "result": clip(result, 4000),
+                            "content_blocks": content_blocks,
                             "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
                             "tool_result_tokens_added": tool_result_tokens_added,
                             "token_usage": self.last_token_usage.to_dict(),

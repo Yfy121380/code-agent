@@ -1,3 +1,9 @@
+"""Web 工具测试。
+
+覆盖模块：tools.web、web_search/web_extract/web_research schema 和 UI 摘要。
+重点边界：Tavily key 缺失、URL 安全校验、参数冲突、research polling、read_only/auto 放行、终端摘要截断。
+"""
+
 from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext

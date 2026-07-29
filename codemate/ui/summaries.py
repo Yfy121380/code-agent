@@ -22,6 +22,18 @@ def _clip_line(line, limit=MAX_LINE_CHARS):
     return line[: limit - 3] + "..."
 
 
+def _format_bytes(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return "0 B"
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value / (1024 * 1024):.1f} MB"
+
+
 def preview_text(text, max_lines=MAX_PREVIEW_LINES):
     """生成带行号的短预览，主要用于 write_file 和 patch_file 的内容展示。"""
     text = str(text or "")
@@ -155,6 +167,12 @@ def summarize_read_tool_result(name, result, metadata=None):
     if name == "grep":
         return f"{status}, {len(lines)} lines, {char_count} chars"
     if name == "read_file":
+        if metadata.get("image_result"):
+            size = _format_bytes(metadata.get("image_size_bytes", 0))
+            width = metadata.get("image_width", "?")
+            height = metadata.get("image_height", "?")
+            media_type = metadata.get("image_media_type", "image")
+            return f"{status}, image, {width}x{height}, {media_type}, {size}"
         return f"{status}, {len(lines)} lines, {char_count} chars"
     if name == "web_search":
         result_count = sum(1 for line in lines if line.lstrip().split(". ", 1)[0].isdigit() and "Title:" in line)

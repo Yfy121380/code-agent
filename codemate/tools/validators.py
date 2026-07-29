@@ -20,6 +20,7 @@ from .constants import (
 from .mcp import is_mcp_tool_name
 from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_web, resolve_tool_path
 from .shell_safety import analyze_shell_command
+from .images import path_has_image_extension
 
 
 def _validate_string_array(args, name, limit=20):
@@ -212,7 +213,7 @@ def validate_tool(agent, name, args):
         decision = resolve_tool_path(agent, args["path"], access="read")
         if not decision.path.is_file():
             raise ValueError("path is not a file")
-        if not bool(args.get("read_all", False)):
+        if not path_has_image_extension(decision.path) and not bool(args.get("read_all", False)):
             start = int(args.get("start", 1))
             end = int(args.get("end", 200))
             if start < 1 or end < start:

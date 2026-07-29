@@ -12,6 +12,7 @@ from .. import memory as memorylib
 from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
 from .constants import BINARY_SNIFF_BYTES, LIST_FILE_LINE_COUNT_MAX_BYTES, TODO_STATUSES
+from .images import image_media_type_for_file, path_has_image_extension, prepare_image_read_result, sniff_image_media_type
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .validators import _normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
@@ -64,6 +65,8 @@ def _file_listing_detail(path):
             sample = handle.read(BINARY_SNIFF_BYTES)
     except OSError:
         return "unreadable file"
+    if sniff_image_media_type(sample):
+        return "image file"
     if b"\x00" in sample:
         return "binary file"
     try:
@@ -111,6 +114,12 @@ def tool_read_file(agent, args):
     path = agent.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
+    if image_media_type_for_file(path):
+        if not bool(getattr(agent.model_client, "supports_images", False)):
+            raise ValueError("current model does not support image input; switch to a model with image support before reading image files")
+        return prepare_image_read_result(agent, path, _display_path(agent, path))
+    if path_has_image_extension(path):
+        raise ValueError("file extension looks like an image, but the file is not a supported or valid image")
     read_all = bool(args.get("read_all", False))
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if read_all:

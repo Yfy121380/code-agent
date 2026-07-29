@@ -1,3 +1,9 @@
+"""上下文预算测试。
+
+覆盖模块：context.token_budget。
+重点边界：模型上下文配置、环境变量覆盖、/budget 展示顺序、模型 usage 和工具结果估算合并。
+"""
+
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate.context.token_budget import compact_trigger_tokens, model_context_tokens
 
@@ -17,8 +23,8 @@ def build_agent(tmp_path, outputs=None):
 
 def test_context_token_budget_uses_model_defaults_and_env_override(monkeypatch):
     monkeypatch.delenv("CODEMATE_CONTEXT_TOKENS", raising=False)
-    assert model_context_tokens("gpt-5.4") == 128000
-    assert compact_trigger_tokens("gpt-5.4") == 115200
+    assert model_context_tokens("gpt-5.4") == 258000
+    assert compact_trigger_tokens("gpt-5.4") == 232200
 
     monkeypatch.setenv("CODEMATE_CONTEXT_TOKENS", "1000")
     assert model_context_tokens("gpt-5.4") == 1000

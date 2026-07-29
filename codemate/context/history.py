@@ -115,6 +115,7 @@ class HistoryContextRenderer:
                 item = copy.deepcopy(message)
                 if item.get("role") == "tool":
                     item["content"] = clip(item.get("content", ""), int(tool_result_chars))
+                    item.pop("content_blocks", None)
                 result.append(item)
         return result
 
@@ -188,6 +189,7 @@ class HistoryContextRenderer:
                     observation_results_in_group += 1
                     if kept_observation_results + observation_results_in_group > MAX_RECENT_OBSERVATION_TOOL_RESULTS:
                         message["content"] = OLD_TOOL_RESULT_CLEARED
+                        message.pop("content_blocks", None)
                         cleared_in_group += 1
 
             selected_reversed.append(group)
@@ -232,7 +234,10 @@ class HistoryContextRenderer:
             args = call.get("args") or {}
             if name == "read_file":
                 path = str(args.get("path", "")).strip()
-                if args.get("read_all", False):
+                tool_message = self._tool_message_for_call(group, call)
+                if self._has_image_content(tool_message):
+                    keys.append(("read_file", path, "image"))
+                elif args.get("read_all", False):
                     keys.append(("read_file", path, "all"))
                 else:
                     keys.append(("read_file", path, int(args.get("start", 1)), int(args.get("end", 200))))
@@ -253,6 +258,17 @@ class HistoryContextRenderer:
             else:
                 return keys, False
         return keys, bool(keys) and len(keys) == len(calls)
+
+    def _tool_message_for_call(self, group, call):
+        call_id = str(call.get("id", ""))
+        for message in group.get("messages", [])[1:]:
+            if str(message.get("tool_call_id", "")) == call_id:
+                return message
+        return {}
+
+    @staticmethod
+    def _has_image_content(message):
+        return any(block.get("type") == "image" for block in (message or {}).get("content_blocks", []) or [])
 
     def raw_text(self, history):
         if not history:

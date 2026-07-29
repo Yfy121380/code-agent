@@ -1,0 +1,282 @@
+"""模型客户端格式转换测试。
+
+覆盖模块：models.openai、models.anthropic、内部 ModelResponse。
+重点边界：commentary-only、commentary+tool_call、OpenAI 输入转换、Anthropic thinking 忽略、多 tool_result 合并。
+"""
+
+import json
+import urllib.request
+
+from PIL import Image
+
+from codemate.models import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
+from codemate.models.anthropic import _extract_anthropic_response, _to_anthropic_messages
+from codemate.models.capabilities import model_capability
+from codemate.models.openai import _extract_openai_model_response, _to_openai_input
+
+
+class FakeHTTPResponse:
+    def __init__(self, data):
+        self._body = json.dumps(data).encode("utf-8")
+        self.headers = {"Content-Type": "application/json"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_openai_responses_commentary_only_is_not_final():
+    response = _extract_openai_model_response(
+        {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "我先检查相关文件。"}],
+                }
+            ]
+        },
+        metadata={"input_tokens": 10},
+    )
+
+    assert response.kind == "commentary"
+    assert response.text == "我先检查相关文件。"
+    assert response.metadata["input_tokens"] == 10
+
+
+def test_openai_responses_commentary_and_tool_call_are_parsed_together():
+    response = _extract_openai_model_response(
+        {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "我先读取 README。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            ]
+        },
+        metadata={},
+    )
+
+    assert response.kind == "tool_calls"
+    assert response.text == "我先读取 README。"
+    assert response.tool_calls[0].id == "call_1"
+    assert response.tool_calls[0].name == "read_file"
+    assert response.tool_calls[0].args == {"path": "README.md"}
+
+
+def test_openai_input_keeps_commentary_before_tool_calls():
+    messages = _to_openai_input(
+        [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "content": "我先读取 README。",
+                "tool_calls": [{"id": "call_1", "name": "read_file", "args": {"path": "README.md"}}],
+            }
+        ]
+    )
+
+    assert messages[0]["phase"] == "commentary"
+    assert messages[0]["content"][0]["text"] == "我先读取 README。"
+    assert messages[1]["type"] == "function_call"
+    assert messages[1]["call_id"] == "call_1"
+
+
+def test_openai_function_call_output_can_include_image_blocks(tmp_path):
+    image_path = tmp_path / "shot.png"
+    Image.new("RGB", (2, 2), color="red").save(image_path)
+
+    messages = _to_openai_input(
+        [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "name": "read_file", "args": {"path": "shot.png"}}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "read_file",
+                "content": "Image file: shot.png",
+                "content_blocks": [{"type": "image", "path": str(image_path), "media_type": "image/png"}],
+            },
+        ]
+    )
+
+    output = messages[1]["output"]
+    assert messages[1]["type"] == "function_call_output"
+    assert [item["type"] for item in output] == ["input_text", "input_image"]
+    assert output[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_anthropic_thinking_blocks_are_ignored_for_tool_roundtrip():
+    response = _extract_anthropic_response(
+        {
+            "content": [
+                {"type": "thinking", "thinking": "Need to inspect the file.", "signature": "sig-123"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}},
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+    )
+
+    messages = _to_anthropic_messages(
+        [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "content": response.text,
+                "tool_calls": [response.tool_calls[0].to_dict()],
+            },
+            {"role": "tool", "tool_call_id": "toolu_1", "content": "# README.md\n   1: demo"},
+        ]
+    )
+
+    assert response.kind == "tool_calls"
+    assert messages[0]["content"] == [
+        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}}
+    ]
+    assert messages[1]["content"][0]["type"] == "tool_result"
+
+
+def test_anthropic_groups_consecutive_tool_results_after_multi_tool_call():
+    messages = _to_anthropic_messages(
+        [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "content": "我先读取项目结构。",
+                "tool_calls": [
+                    {"id": "call_1", "name": "list_files", "args": {"path": "."}},
+                    {"id": "call_2", "name": "read_file", "args": {"path": "README.md"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "name": "list_files", "content": "codemate\nREADME.md"},
+            {"role": "tool", "tool_call_id": "call_2", "name": "read_file", "content": "# README"},
+        ]
+    )
+
+    assert messages[0]["role"] == "assistant"
+    assert [block["type"] for block in messages[0]["content"]] == ["text", "tool_use", "tool_use"]
+    assert messages[1]["role"] == "user"
+    assert [block["tool_use_id"] for block in messages[1]["content"]] == ["call_1", "call_2"]
+    assert [block["type"] for block in messages[1]["content"]] == ["tool_result", "tool_result"]
+
+
+def test_anthropic_tool_result_can_include_image_blocks(tmp_path):
+    image_path = tmp_path / "shot.png"
+    Image.new("RGB", (2, 2), color="red").save(image_path)
+
+    messages = _to_anthropic_messages(
+        [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "name": "read_file", "args": {"path": "shot.png"}}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "read_file",
+                "content": "Image file: shot.png",
+                "content_blocks": [{"type": "image", "path": str(image_path), "media_type": "image/png"}],
+            },
+        ]
+    )
+
+    tool_result_content = messages[1]["content"][0]["content"]
+    assert [item["type"] for item in tool_result_content] == ["text", "image"]
+    assert tool_result_content[1]["source"]["media_type"] == "image/png"
+    assert tool_result_content[1]["source"]["data"]
+
+
+def test_common_model_capabilities_are_configured():
+    assert model_capability("gpt-5.4").supports_images is True
+    assert model_capability("gpt-5.5").openai_reasoning_effort == "high"
+    assert model_capability("claude-sonnet-4-6").supports_images is True
+    assert model_capability("claude-opus-4-8").anthropic_effort == "high"
+    assert model_capability("deepseek-v4-pro").supports_images is False
+    assert model_capability("deepseek-v4-pro").supports_reasoning is False
+
+
+def test_openai_reasoning_effort_is_added_for_reasoning_models(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"output_text": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    response = client.complete("hello", 100)
+
+    assert response.text == "ok"
+    assert client.supports_images is True
+    assert captured["payload"]["reasoning"] == {"effort": "high"}
+
+
+def test_anthropic_effort_is_added_for_claude_but_not_deepseek(monkeypatch):
+    payloads = []
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payloads.append(json.loads(request.data.decode("utf-8")))
+        return FakeHTTPResponse({"content": [{"type": "text", "text": "ok"}], "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    claude = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+    deepseek = AnthropicCompatibleModelClient("deepseek-v4-pro", "https://example.test/v1", "", None, 30)
+    claude.complete("hello", 8192)
+    deepseek.complete("hello", 8192)
+
+    assert claude.supports_images is True
+    assert deepseek.supports_images is False
+    assert payloads[0]["output_config"] == {"effort": "high"}
+    assert "output_config" not in payloads[1]
+    assert "thinking" not in payloads[0]
+    assert "thinking" not in payloads[1]
+
+
+def test_anthropic_effort_and_structured_output_share_output_config(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"content": [{"type": "text", "text": "{}"}], "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+
+    client.complete(
+        "hello",
+        8192,
+        structured_output={
+            "name": "demo",
+            "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    )
+
+    output_config = captured["payload"]["output_config"]
+    assert output_config["effort"] == "high"
+    assert output_config["format"]["type"] == "json_schema"
+    assert output_config["format"]["schema"]["type"] == "object"

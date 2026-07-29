@@ -8,7 +8,8 @@ from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
 
-from .common import _extract_usage_cache_details, _normalize_messages, _normalize_versioned_base_url
+from .capabilities import model_capability
+from .common import _extract_usage_cache_details, _image_block_base64, _normalize_messages, _normalize_versioned_base_url
 from .schemas import _tool_specs_to_anthropic
 from .types import ModelResponse, ModelToolCall
 
@@ -32,7 +33,32 @@ def _assistant_content_blocks(message):
     return content
 
 
-def _to_anthropic_messages(messages):
+def _tool_result_content(message, supports_images=True):
+    text = str(message.get("content", "") or "")
+    blocks = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+    if supports_images:
+        for block in message.get("content_blocks", []) or []:
+            if block.get("type") != "image":
+                continue
+            media_type, data = _image_block_base64(block)
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                }
+            )
+    if len(blocks) == 1 and blocks[0]["type"] == "text":
+        return blocks[0]["text"]
+    return blocks or text
+
+
+def _to_anthropic_messages(messages, supports_images=True):
     converted = []
     index = 0
     messages = list(messages or [])
@@ -49,7 +75,7 @@ def _to_anthropic_messages(messages):
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_message.get("tool_call_id"),
-                        "content": str(tool_message.get("content", "")),
+                        "content": _tool_result_content(tool_message, supports_images=supports_images),
                     }
                 )
                 index += 1
@@ -105,6 +131,9 @@ class AnthropicCompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.capabilities = model_capability(model)
+        self.supports_images = self.capabilities.supports_images
+        self.supports_reasoning = self.capabilities.supports_reasoning
         self.supports_prompt_cache = False
         self.supports_tools = True
         self.last_completion_metadata = {}
@@ -118,7 +147,7 @@ class AnthropicCompatibleModelClient:
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "messages": _to_anthropic_messages(_normalize_messages(messages)),
+            "messages": _to_anthropic_messages(_normalize_messages(messages), supports_images=self.supports_images),
             "max_tokens": max_new_tokens,
             "stream": False,
         }
@@ -126,13 +155,16 @@ class AnthropicCompatibleModelClient:
             payload["system"] = str(system)
         if tools:
             payload["tools"] = _tool_specs_to_anthropic(tools)
+        output_config = {}
+        if self.supports_reasoning and self.capabilities.anthropic_effort:
+            output_config["effort"] = self.capabilities.anthropic_effort
         if structured_output:
-            payload["output_config"] = {
-                "format": {
-                    "type": "json_schema",
-                    "schema": dict(structured_output.get("schema") or {}),
-                }
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": dict(structured_output.get("schema") or {}),
             }
+        if output_config:
+            payload["output_config"] = output_config
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 

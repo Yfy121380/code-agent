@@ -1,3 +1,9 @@
+"""MCP 工具接入测试。
+
+覆盖模块：tools.mcp、tools.registry、validators。
+重点边界：动态工具注册、审批策略、read_only 拒绝、配置发现、session 复用、调用失败后重连。
+"""
+
 from dataclasses import dataclass
 from unittest.mock import patch
 

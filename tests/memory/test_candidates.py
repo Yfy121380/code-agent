@@ -1,3 +1,9 @@
+"""候选记忆提取测试。
+
+覆盖模块：memory.candidates 与 runtime 候选提取触发。
+重点边界：message/conversation id、JSONL 追加、checkpoint 持久化、失败重试、轮数/字符数触发、compact 前提取。
+"""
+
 import json
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
