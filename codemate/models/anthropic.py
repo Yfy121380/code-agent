@@ -9,9 +9,9 @@ import urllib.error
 import urllib.request
 
 from .capabilities import model_capability
-from .common import _extract_usage_cache_details, _image_block_base64, _normalize_messages, _normalize_versioned_base_url
+from .common import _extract_usage_cache_details, _image_block_base64, _iter_sse_json, _json_args, _normalize_messages, _normalize_versioned_base_url
 from .schemas import _tool_specs_to_anthropic
-from .types import ModelResponse, ModelToolCall
+from .types import ModelResponse, ModelStreamEvent, ModelToolCall
 
 
 def _assistant_content_blocks(message):
@@ -124,6 +124,34 @@ def _extract_anthropic_response(data):
     return ModelResponse.final(text, metadata=metadata, raw=data)
 
 
+def _anthropic_stream_response_data(blocks, usage):
+    # Anthropic 流式内容按 content block index 返回。
+    # 结束后重新组装成普通 messages response，复用非流式解析逻辑。
+    content = []
+    for _index, block in sorted(blocks.items(), key=lambda item: item[0]):
+        block_type = block.get("type")
+        if block_type == "text":
+            content.append({"type": "text", "text": block.get("text", "")})
+        elif block_type == "tool_use":
+            input_text = block.get("partial_json", "")
+            input_value = _json_args(input_text) if input_text else dict(block.get("input") or {})
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": block.get("id"),
+                    "name": block.get("name"),
+                    "input": input_value,
+                }
+            )
+    return {"content": content, "usage": dict(usage or {})}
+
+
+def _raise_anthropic_stream_error(event):
+    error = event.get("error") if isinstance(event.get("error"), dict) else event
+    message = error.get("message") or error.get("type") or "unknown streaming error"
+    raise RuntimeError(f"Anthropic-compatible streaming error: {message}")
+
+
 class AnthropicCompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -132,6 +160,7 @@ class AnthropicCompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.capabilities = model_capability(model)
+        self.supports_streaming = self.capabilities.supports_streaming
         self.supports_images = self.capabilities.supports_images
         self.supports_reasoning = self.capabilities.supports_reasoning
         self.supports_prompt_cache = False
@@ -141,6 +170,132 @@ class AnthropicCompatibleModelClient:
     def fork(self):
         """为并发子 agent 创建独立客户端实例，避免 last_completion_metadata 互相覆盖。"""
         return type(self)(self.model, self.base_url, self.api_key, self.temperature, self.timeout)
+
+    def stream_complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
+        """流式调用 Anthropic Messages API，并在结束时返回完整 ModelResponse。
+
+        Anthropic 的文本和工具调用都以 content block 分片返回。这里实时转发
+        text_delta 给 UI，但工具参数必须累积到 message_stop 后再解析。
+        """
+        del prompt_cache_key, prompt_cache_retention
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "messages": _to_anthropic_messages(_normalize_messages(messages), supports_images=self.supports_images),
+            "max_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if system:
+            payload["system"] = str(system)
+        if tools:
+            payload["tools"] = _tool_specs_to_anthropic(tools)
+        output_config = {}
+        if self.supports_reasoning and self.capabilities.anthropic_effort:
+            output_config["effort"] = self.capabilities.anthropic_effort
+        if structured_output:
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": dict(structured_output.get("schema") or {}),
+            }
+        if output_config:
+            payload["output_config"] = output_config
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+        request = urllib.request.Request(
+            self.base_url + "/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                stream = urllib.request.urlopen(request, timeout=self.timeout)
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code >= 500 and attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"Anthropic-compatible streaming request failed with HTTP {exc.code}: {body}") from exc
+            except (urllib.error.URLError, RemoteDisconnected) as exc:
+                if attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    "Could not reach the Anthropic-compatible streaming backend.\n"
+                    f"Base URL: {self.base_url}\n"
+                    f"Model: {self.model}"
+                ) from exc
+
+        blocks = {}
+        usage = {}
+        stop_reason = None
+        try:
+            with stream as response:
+                for _event_name, event in _iter_sse_json(response):
+                    event_type = event.get("type", "")
+                    if event_type == "error" or event.get("error"):
+                        _raise_anthropic_stream_error(event)
+                    if event_type == "message_start":
+                        message = event.get("message", {}) or {}
+                        usage.update(message.get("usage") or {})
+                    elif event_type == "content_block_start":
+                        index = event.get("index")
+                        if index is None:
+                            index = len(blocks)
+                        block = event.get("content_block", {}) or {}
+                        blocks[index] = {
+                            "type": block.get("type"),
+                            "id": block.get("id"),
+                            "name": block.get("name"),
+                            "input": dict(block.get("input") or {}),
+                            "text": str(block.get("text") or ""),
+                            "partial_json": "",
+                        }
+                    elif event_type == "content_block_delta":
+                        index = event.get("index")
+                        if index is None:
+                            index = len(blocks)
+                        block = blocks.setdefault(index, {"text": "", "partial_json": ""})
+                        delta = event.get("delta", {}) or {}
+                        if delta.get("type") == "text_delta":
+                            text = str(delta.get("text") or "")
+                            if text:
+                                block["type"] = block.get("type") or "text"
+                                block["text"] = block.get("text", "") + text
+                                yield ModelStreamEvent.text_delta(text)
+                        elif delta.get("type") == "input_json_delta":
+                            block["type"] = block.get("type") or "tool_use"
+                            block["partial_json"] = block.get("partial_json", "") + str(delta.get("partial_json") or "")
+                    elif event_type == "message_delta":
+                        stop_reason = (event.get("delta", {}) or {}).get("stop_reason")
+                        usage.update(event.get("usage") or {})
+                    elif event_type == "message_stop":
+                        break
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "Anthropic-compatible streaming response was interrupted.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        data = _anthropic_stream_response_data(blocks, usage)
+        response = _extract_anthropic_response(data)
+        metadata = dict(response.metadata or {})
+        if stop_reason:
+            metadata["stop_reason"] = stop_reason
+        response.metadata = metadata
+        self.last_completion_metadata = metadata
+        yield ModelStreamEvent.done(response, metadata=metadata)
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
         del prompt_cache_key, prompt_cache_retention

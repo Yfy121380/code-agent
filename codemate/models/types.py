@@ -1,4 +1,6 @@
 # 模型响应类型：定义 provider 适配层统一返回给 runtime 的结构化结果。
+# 非流式请求返回 ModelResponse；流式请求先返回 ModelStreamEvent，
+# 最后一个 done 事件里仍携带完整 ModelResponse，保证 runtime/history 不保存碎片。
 
 from __future__ import annotations
 
@@ -81,3 +83,26 @@ class ModelResponse:
             metadata=dict(metadata or {}),
             raw=raw,
         )
+
+
+@dataclass
+class ModelStreamEvent:
+    kind: str
+    text: str = ""
+    phase: str | None = None
+    response: ModelResponse | None = None
+    metadata: dict = field(default_factory=dict)
+
+    @classmethod
+    def text_delta(cls, text, phase=None, metadata=None):
+        return cls(kind="text_delta", text=str(text or ""), phase=phase, metadata=dict(metadata or {}))
+
+    @classmethod
+    def done(cls, response, metadata=None):
+        response_metadata = dict(getattr(response, "metadata", {}) or {})
+        response_metadata.update(dict(metadata or {}))
+        return cls(kind="done", response=response, metadata=response_metadata)
+
+    @classmethod
+    def error(cls, message, metadata=None):
+        return cls(kind="error", text=str(message or ""), metadata=dict(metadata or {}))

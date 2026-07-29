@@ -39,6 +39,15 @@ class RememberingApprovalUI:
     def model_end(self, kind="", metadata=None):
         pass
 
+    def stream_start(self, phase=""):
+        pass
+
+    def stream_delta(self, text, phase=""):
+        pass
+
+    def stream_end(self, kind="", metadata=None):
+        pass
+
     def final_answer(self, text):
         pass
 

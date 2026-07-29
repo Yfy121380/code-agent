@@ -9,6 +9,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ModelCapability:
     context_tokens: int
+    supports_streaming: bool = False
     supports_images: bool = False
     supports_reasoning: bool = False
     openai_reasoning_effort: str | None = None
@@ -33,30 +34,35 @@ DEFAULT_MODEL_CAPABILITY = ModelCapability(context_tokens=DEFAULT_CONTEXT_TOKENS
 MODEL_CAPABILITIES = {
     "gpt-5.4": ModelCapability(
         context_tokens=258_000,
+        supports_streaming=True,
         supports_images=True,
         supports_reasoning=True,
         openai_reasoning_effort="high",
     ),
     "gpt-5.5": ModelCapability(
         context_tokens=258_000,
+        supports_streaming=True,
         supports_images=True,
         supports_reasoning=True,
         openai_reasoning_effort="high",
     ),
     "claude-sonnet-4-6": ModelCapability(
         context_tokens=500_000,
+        supports_streaming=True,
         supports_images=True,
         supports_reasoning=True,
         anthropic_effort="high",
     ),
     "claude-opus-4-8": ModelCapability(
         context_tokens=500_000,
+        supports_streaming=True,
         supports_images=True,
         supports_reasoning=True,
         anthropic_effort="high",
     ),
     "deepseek-v4-pro": ModelCapability(
         context_tokens=258_000,
+        supports_streaming=True,
         supports_images=False,
         supports_reasoning=False,
     ),

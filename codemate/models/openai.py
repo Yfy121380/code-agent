@@ -11,13 +11,14 @@ import urllib.request
 from .common import (
     _extract_usage_cache_details,
     _image_block_data_uri,
+    _iter_sse_json,
     _json_args,
     _normalize_messages,
     _normalize_versioned_base_url,
 )
 from .capabilities import model_capability
 from .schemas import _tool_specs_to_openai, _tool_specs_to_openai_chat
-from .types import ModelResponse, ModelToolCall
+from .types import ModelResponse, ModelStreamEvent, ModelToolCall
 
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
 
@@ -342,6 +343,41 @@ def _to_openai_chat_messages(messages, system=None, supports_images=True):
                 converted.append({"role": "user", "content": image_content})
     return converted
 
+
+def _openai_stream_fallback_data(text_parts, tool_calls):
+    # 正常 Responses 流会在 response.completed 中给出完整 response。
+    # 这个兜底只处理连接提前结束但已经收集到可用文本或工具参数的情况。
+    output = []
+    text = "".join(text_parts).strip()
+    if text:
+        output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+    for key, call in tool_calls.items():
+        if not call.get("name"):
+            continue
+        output.append(
+            {
+                "type": "function_call",
+                "id": call.get("id") or key,
+                "call_id": call.get("call_id") or call.get("id") or key,
+                "name": call.get("name"),
+                "arguments": call.get("arguments", "") or "{}",
+            }
+        )
+    return {"output": output, "output_text": text}
+
+
+def _raise_openai_stream_error(event):
+    error = event.get("error") if isinstance(event.get("error"), dict) else event
+    message = error.get("message") or error.get("code") or "unknown streaming error"
+    raise RuntimeError(f"OpenAI-compatible streaming error: {message}")
+
+
 class OpenAICompatibleModelClient:
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -350,6 +386,7 @@ class OpenAICompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.capabilities = model_capability(model)
+        self.supports_streaming = self.capabilities.supports_streaming
         self.supports_images = self.capabilities.supports_images
         self.supports_reasoning = self.capabilities.supports_reasoning
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
@@ -417,6 +454,225 @@ class OpenAICompatibleModelClient:
         if calls:
             return ModelResponse.from_tool_calls(calls, text=text, metadata=metadata, raw=data)
         return ModelResponse.final(text, metadata=metadata, raw=data)
+
+    def _stream_chat_completions(self, messages, max_new_tokens, tools=None, system=None, structured_output=None):
+        # Chat Completions 流式事件只提供 delta，需要按 tool call index 累加参数。
+        payload = {
+            "model": self.model,
+            "messages": _to_openai_chat_messages(_normalize_messages(messages), system=system, supports_images=self.supports_images),
+            "max_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = _tool_specs_to_openai_chat(tools)
+        response_format = _openai_structured_response_format(structured_output)
+        if response_format:
+            payload["response_format"] = response_format
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            stream = urllib.request.urlopen(request, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI-compatible chat streaming fallback failed with HTTP {exc.code}: {body}") from exc
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "Could not reach the OpenAI-compatible chat streaming fallback.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        text_parts = []
+        tool_calls = {}
+        usage = {}
+        try:
+            with stream as response:
+                for _event_name, event in _iter_sse_json(response):
+                    if event.get("error"):
+                        _raise_openai_stream_error(event)
+                    usage.update(event.get("usage") or {})
+                    for choice in event.get("choices", []) or []:
+                        delta = choice.get("delta", {}) or {}
+                        text = delta.get("content")
+                        if isinstance(text, str) and text:
+                            text_parts.append(text)
+                            yield ModelStreamEvent.text_delta(text)
+                        for call_delta in delta.get("tool_calls", []) or []:
+                            index = str(call_delta.get("index", len(tool_calls)))
+                            call = tool_calls.setdefault(index, {"arguments": ""})
+                            if call_delta.get("id"):
+                                call["id"] = call_delta["id"]
+                            function = call_delta.get("function", {}) or {}
+                            if function.get("name"):
+                                call["name"] = function["name"]
+                            if function.get("arguments"):
+                                call["arguments"] = call.get("arguments", "") + function["arguments"]
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "OpenAI-compatible chat streaming fallback was interrupted.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        metadata = {
+            "prompt_cache_supported": False,
+            "prompt_cache_key": None,
+            "prompt_cache_retention": None,
+            **_extract_usage_cache_details({"usage": usage}),
+            "openai_compat_fallback": "chat_completions",
+        }
+        calls = [
+            ModelToolCall.create(call.get("name", ""), args=_json_args(call.get("arguments", "{}")), call_id=call.get("id") or index)
+            for index, call in sorted(tool_calls.items())
+            if call.get("name")
+        ]
+        response = (
+            ModelResponse.from_tool_calls(calls, text="".join(text_parts), metadata=metadata)
+            if calls
+            else ModelResponse.final("".join(text_parts), metadata=metadata)
+        )
+        self.last_completion_metadata = metadata
+        yield ModelStreamEvent.done(response, metadata=metadata)
+
+    def stream_complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
+        """流式调用 Responses API，并在结束时产出完整 ModelResponse。
+
+        runtime 只用 text_delta 做临时展示；真正的 tool_calls/final 仍等
+        done 事件后按完整 response 处理，避免半截 JSON 参数进入工具审批链。
+        """
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "input": _to_openai_input(_normalize_messages(messages), system=system, supports_images=self.supports_images),
+            "max_output_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = _tool_specs_to_openai(tools)
+        text_format = _openai_responses_text_format(structured_output)
+        if text_format:
+            payload["text"] = text_format
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.supports_prompt_cache and prompt_cache_key:
+            payload["prompt_cache_key"] = prompt_cache_key
+        if self.supports_prompt_cache and prompt_cache_retention:
+            payload["prompt_cache_retention"] = prompt_cache_retention
+        if self.supports_reasoning and self.capabilities.openai_reasoning_effort:
+            payload["reasoning"] = {"effort": self.capabilities.openai_reasoning_effort}
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.base_url + "/responses",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                stream = urllib.request.urlopen(request, timeout=self.timeout)
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code >= 500 and attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                if tools and exc.code >= 500:
+                    yield from self._stream_chat_completions(
+                        messages,
+                        max_new_tokens,
+                        tools=tools,
+                        system=system,
+                        structured_output=structured_output,
+                    )
+                    return
+                raise RuntimeError(f"OpenAI-compatible streaming request failed with HTTP {exc.code}: {body}") from exc
+            except (urllib.error.URLError, RemoteDisconnected) as exc:
+                if attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    "Could not reach the OpenAI-compatible streaming backend.\n"
+                    f"Base URL: {self.base_url}\n"
+                    f"Model: {self.model}"
+                ) from exc
+
+        text_parts = []
+        tool_calls = {}
+        item_phases = {}
+        completed_response = None
+        try:
+            with stream as response:
+                for _event_name, event in _iter_sse_json(response):
+                    event_type = event.get("type", "")
+                    if event_type == "error" or event.get("error"):
+                        _raise_openai_stream_error(event)
+                    if event_type == "response.output_item.added":
+                        item = event.get("item", {}) or {}
+                        item_id = item.get("id") or event.get("item_id")
+                        if item_id and item.get("phase"):
+                            item_phases[item_id] = item.get("phase")
+                    elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
+                        delta = event.get("delta")
+                        if isinstance(delta, str) and delta:
+                            text_parts.append(delta)
+                            phase = event.get("phase") or item_phases.get(event.get("item_id"))
+                            yield ModelStreamEvent.text_delta(delta, phase=phase)
+                    elif event_type == "response.function_call_arguments.delta":
+                        key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
+                        call = tool_calls.setdefault(key, {"arguments": ""})
+                        call["arguments"] = call.get("arguments", "") + str(event.get("delta") or "")
+                    elif event_type == "response.function_call_arguments.done":
+                        key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
+                        call = tool_calls.setdefault(key, {"arguments": ""})
+                        call["id"] = event.get("item_id") or key
+                        call["call_id"] = event.get("call_id") or event.get("item_id") or key
+                        call["name"] = event.get("name")
+                        call["arguments"] = event.get("arguments", call.get("arguments", "") or "{}")
+                    elif event_type == "response.completed":
+                        completed_response = event.get("response") or {}
+                        break
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "OpenAI-compatible streaming response was interrupted.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        data = completed_response or _openai_stream_fallback_data(text_parts, tool_calls)
+        if data.get("error"):
+            raise RuntimeError(f"OpenAI-compatible streaming error: {data['error']}")
+        metadata = {
+            "prompt_cache_supported": self.supports_prompt_cache,
+            "prompt_cache_key": prompt_cache_key,
+            "prompt_cache_retention": prompt_cache_retention,
+            **_extract_usage_cache_details(data),
+        }
+        self.last_completion_metadata = metadata
+        yield ModelStreamEvent.done(_extract_openai_model_response(data, metadata), metadata=metadata)
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
         self.last_completion_metadata = {}

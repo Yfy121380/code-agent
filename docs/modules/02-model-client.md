@@ -341,7 +341,23 @@ Anthropic 则通常把进展文本和 `tool_use` 放在同一个 assistant conte
 
 因此，commentary 的协议差异只存在于 Model Client 边界，UI 和 runtime 始终使用同一套语义。
 
-## 9. 工具 Schema 和结构化输出
+## 9. 流式输出适配
+
+Codemate 支持在终端中流式展示模型文本，但内部 history 不保存流式碎片。Model Client 会把 provider 的 SSE 事件转换成统一的 `ModelStreamEvent`：
+
+- `text_delta`：用户可见的文本增量，只用于 UI 临时展示。
+- `done`：一次模型响应结束，携带完整 `ModelResponse`。
+- `error`：流式请求失败。
+
+Runtime 只消费这三个统一事件，不直接读取 OpenAI 或 Anthropic 的原始字段。
+
+OpenAI Responses API 的主要文本事件是 `response.output_text.delta`，工具参数事件是 `response.function_call_arguments.delta/done`，最终以 `response.completed` 中的完整 response 为准。这样可以避免只靠 delta 拼接时漏掉 usage、phase 或完整工具调用信息。
+
+Anthropic Messages API 的主要文本事件是 `content_block_delta` 中的 `text_delta`，工具参数来自 `input_json_delta`。由于工具参数是分片 JSON，Model Client 必须等流结束后再把它组装成完整 `tool_use`，然后返回 `ModelResponse(kind="tool_calls")`。
+
+这个设计保持了一个关键边界：**流式输出只影响终端展示，工具审批、工具执行、history 存储和上下文压缩仍然只处理完整消息**。
+
+## 10. 工具 Schema 和结构化输出
 
 Codemate 内部工具统一使用：
 
@@ -364,7 +380,7 @@ Codemate 内部工具统一使用：
 
 结构化输出也采用相同思路。调用方提供统一 JSON Schema，适配层分别转换成 OpenAI 的 `text.format` / `response_format`，或 Anthropic 的 `output_config.format`。当前主要用于长期记忆召回等需要稳定 JSON 结果的场景，普通对话默认不启用。
 
-## 10. Usage 和请求元数据
+## 11. Usage 和请求元数据
 
 不同接口对 token 使用量的字段命名不一致：
 
@@ -382,7 +398,7 @@ Codemate 内部工具统一使用：
 
 Runtime 可以据此更新上下文预算，而不需要判断当前使用的是哪一种 provider。
 
-## 11. Runtime 如何消费响应
+## 12. Runtime 如何消费响应
 
 Model Client 返回统一响应后，runtime loop 的处理非常直接：
 
@@ -407,7 +423,7 @@ final
 
 模型协议转换与 agent 行为控制由此分离：Model Client 判断“模型返回了什么”，Runtime 决定“接下来做什么”。
 
-## 12. 主要难点与解决方式
+## 13. 主要难点与解决方式
 
 ### 难点一：Anthropic 工具调用配对严格
 
@@ -422,7 +438,7 @@ OpenAI 有显式 phase，Anthropic 只有 text block 与 tool_use 的组合语�
 
 会话可能先使用 OpenAI，恢复后切换到 Anthropic，或者反过来。因此持久化层不能保存只能由某个 provider 理解的原始消息。统一内部 history 使历史可以在每次请求时重新转换成当前 provider 所需格式。
 
-## 13. 面试表达要点
+## 14. 面试表达要点
 
 可以把这一层概括为：
 

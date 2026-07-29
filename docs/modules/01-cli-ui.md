@@ -140,31 +140,42 @@ Codemate 使用 `rich` 主要是为了改善终端输出体验。Agent 会产生
 
 ### Panel
 
-`Panel` 用于把重要输出放进边框中，例如：
+`Panel` 只用于需要打断用户注意力的审批请求。普通工具调用和结果不使用边框，避免连续工具事件形成大块高亮区域，压过模型的分析和最终回答。
 
-- 普通工具调用。
-- 工具结果。
-- 审批请求。
-- 最终回答。
+### Text
 
-不同类型的内容使用不同颜色边框：
+普通工具事件使用 `Text` 渲染成轻量日志：
 
-- 工具调用：通常是 cyan。
-- 工具结果成功：green。
-- 工具结果异常或审批：yellow。
-- 最终回答：green。
+- `◇` 表示工具开始调用。
+- `↳` 表示工具执行结果。
+- 普通调用和成功结果统一使用灰色，避免工具日志与正文争夺注意力。
+- 错误结果使用黄色，只有需要用户处理的异常才提升视觉强度。
 
 ### Syntax
 
-`Syntax` 用于展示等宽文本，例如工具参数、shell 命令、patch 预览、工具结果摘要。它支持自动换行，比直接打印长字符串更适合展示结构化文本。
+`Syntax` 用于审批框中的等宽内容，例如 shell 命令、patch 预览和工具参数摘要。普通工具日志不使用 `Syntax` 的背景块。
 
 ### Markdown
 
-`Markdown` 用于渲染最终回答。这样模型返回的列表、代码块、标题等 Markdown 内容可以在终端中更清楚地展示。
+`Markdown` 用于渲染 commentary 和最终回答。commentary 使用稍弱的正文色，final answer 使用终端默认正文色，使模型输出成为主要视觉内容。
+
+### 流式文本输出
+
+流式文本输出用于展示模型正在生成的内容。Codemate 默认会接收支持流式的 provider 返回的文本 delta，让用户能更早看到 commentary 或最终回答的生成过程。
+
+这里不能简单地把每个 delta 原样打印出来，因为 Markdown 语法经常需要后续文本才能确定。例如代码块要等闭合的 ``` 出现后才能完整渲染。因此 Codemate 使用 Rich `Live` 持续重绘当前尚未完成的 Markdown 块：新 delta 到达后，用户可以立即看到当前段落增长；遇到稳定的 Markdown 块边界后，再把预览固定为普通终端输出。常见的稳定边界包括：
+
+- 段落后的空行。
+- 已闭合的 fenced code block。
+- 长文本中已经完成的一批行。
+
+这里的流式展示是正式的终端输出：如果某次响应已经流式输出过文本，Runtime 在响应结束后不会再重复打印同一段 commentary/final。但 history 和 trace 仍然只保存完整的 `ModelResponse` 原文，不保存每个 delta，也不保存渲染后的终端文本；工具调用也必须等参数完整后才会执行。
+
+启动时可以使用 `--no-stream` 关闭终端流式展示。
 
 ## 4. 工具调用和结果展示方式
 
-CLI/UI 的展示原则是：**终端展示摘要，完整内容保存在 history 和 trace 中**。
+CLI/UI 的展示原则是：**正文优先，工具事件退到第二视觉层级；终端展示摘要，完整内容保存在 history 和 trace 中**。
 
 这样做的原因是工具结果可能很长。比如读取一个大文件、grep 很多匹配、运行 pytest、web research 都可能产生大量内容。如果终端全量展示，用户反而看不到重点。
 
@@ -190,9 +201,9 @@ CLI/UI 的展示原则是：**终端展示摘要，完整内容保存在 history
 成功后只显示结果规模，例如：
 
 ```text
--> ok, 32 lines, 1200 chars
--> ok, 4 dirs, 12 files
--> ok, 5 results, 38 lines, 2400 chars
+  ↳ ok, 32 lines, 1200 chars
+  ↳ ok, 4 dirs, 12 files
+  ↳ ok, 5 results, 38 lines, 2400 chars
 ```
 
 这样用户能知道工具成功了、读到了多少内容，但不会被完整内容刷屏。
@@ -204,8 +215,8 @@ CLI/UI 的展示原则是：**终端展示摘要，完整内容保存在 history
 1. 工具调用时展示命令：
 
 ```text
-run_shell
-  $ pytest -q
+◇ run_shell
+      $ pytest -q
 ```
 
 2. 结果展示时压缩 stdout/stderr：
@@ -275,14 +286,14 @@ Warning: target path is outside the current workspace.
 
 ### final answer
 
-最终回答使用 Markdown + Panel 展示，标题为 `codemate`。这部分是用户真正的任务结果，而不是中间工具日志。
+最终回答直接使用 Markdown 展示，不添加边框。流式和非流式输出采用相同的视觉形式，避免同一种回答因为请求模式不同而突然改变布局。
 
 ## 5. 小结
 
 CLI/UI 模块的重点可以简单概括为：
 
 - `prompt_toolkit` 负责输入体验：历史、补全、按键绑定、选择菜单。
-- `rich` 负责输出体验：面板、Markdown、等宽文本和颜色区分。
+- `rich` 负责输出体验：Markdown、轻量工具日志、审批面板和颜色层级。
 - Slash commands 负责运行期控制：模型切换、审批切换、上下文查看、记忆整理、会话管理。
 - 工具展示默认采用摘要策略：终端只看重点，完整信息交给 history 和 trace。
 

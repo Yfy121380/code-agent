@@ -5,13 +5,14 @@ from .capabilities import ModelCapability, model_capability
 from .fake import FakeModelClient
 from .ollama import OllamaModelClient
 from .openai import OpenAICompatibleModelClient
-from .types import ModelResponse, ModelToolCall
+from .types import ModelResponse, ModelStreamEvent, ModelToolCall
 
 __all__ = [
     "AnthropicCompatibleModelClient",
     "FakeModelClient",
     "ModelCapability",
     "ModelResponse",
+    "ModelStreamEvent",
     "ModelToolCall",
     "OllamaModelClient",
     "OpenAICompatibleModelClient",

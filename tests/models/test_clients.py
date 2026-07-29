@@ -16,9 +16,10 @@ from codemate.models.openai import _extract_openai_model_response, _to_openai_in
 
 
 class FakeHTTPResponse:
-    def __init__(self, data):
-        self._body = json.dumps(data).encode("utf-8")
-        self.headers = {"Content-Type": "application/json"}
+    def __init__(self, data, content_type="application/json"):
+        self._body = data.encode("utf-8") if isinstance(data, str) else json.dumps(data).encode("utf-8")
+        self._lines = iter(self._body.splitlines(keepends=True))
+        self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
         return self
@@ -28,6 +29,9 @@ class FakeHTTPResponse:
 
     def read(self):
         return self._body
+
+    def readline(self):
+        return next(self._lines, b"")
 
 
 def test_openai_responses_commentary_only_is_not_final():
@@ -280,3 +284,74 @@ def test_anthropic_effort_and_structured_output_share_output_config(monkeypatch)
     assert output_config["effort"] == "high"
     assert output_config["format"]["type"] == "json_schema"
     assert output_config["format"]["schema"]["type"] == "object"
+
+
+def test_openai_responses_streaming_yields_text_delta_and_done_response(monkeypatch):
+    captured = {}
+    body = "\n\n".join(
+        [
+            'data: {"type":"response.output_item.added","item":{"id":"msg_1","phase":"commentary"}}',
+            'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"我先读取。"}',
+            'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}',
+            'data: {"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"我先读取。"}]},{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}],"usage":{"input_tokens":2,"output_tokens":3}}}',
+        ]
+    ) + "\n\n"
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(body, content_type="text/event-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    events = list(client.stream_complete("hello", 100, tools=[{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]))
+
+    assert captured["payload"]["stream"] is True
+    assert events[0].kind == "text_delta"
+    assert events[0].text == "我先读取。"
+    assert events[0].phase == "commentary"
+    assert events[-1].kind == "done"
+    assert events[-1].response.kind == "tool_calls"
+    assert events[-1].response.text == "我先读取。"
+    assert events[-1].response.tool_calls[0].name == "read_file"
+    assert events[-1].response.tool_calls[0].args == {"path": "README.md"}
+    assert client.last_completion_metadata["input_tokens"] == 2
+
+
+def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
+    captured = {}
+    body = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":1}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我先读取。"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}',
+            'event: message_stop\ndata: {"type":"message_stop"}',
+        ]
+    ) + "\n\n"
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(body, content_type="text/event-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+
+    events = list(client.stream_complete("hello", 100, tools=[{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]))
+
+    assert captured["payload"]["stream"] is True
+    assert events[0].kind == "text_delta"
+    assert events[0].text == "我先读取。"
+    assert events[-1].kind == "done"
+    assert events[-1].response.kind == "tool_calls"
+    assert events[-1].response.text == "我先读取。"
+    assert events[-1].response.tool_calls[0].id == "toolu_1"
+    assert events[-1].response.tool_calls[0].args == {"path": "README.md"}
+    assert client.last_completion_metadata["output_tokens"] == 8
+    assert client.last_completion_metadata["stop_reason"] == "tool_use"

@@ -1,4 +1,4 @@
-# 模型通用工具函数：处理消息归一化、文本视图、参数 JSON 和 usage/cache 元数据。
+# 模型通用工具函数：处理消息归一化、文本视图、参数 JSON、SSE 流和 usage/cache 元数据。
 
 from __future__ import annotations
 
@@ -59,6 +59,62 @@ def _image_block_base64(block):
 def _image_block_data_uri(block):
     media_type, data = _image_block_base64(block)
     return media_type, f"data:{media_type};base64,{data}"
+
+
+def _decode_stream_line(raw_line):
+    if isinstance(raw_line, bytes):
+        return raw_line.decode("utf-8", errors="replace")
+    return str(raw_line)
+
+
+def _iter_sse_json(response):
+    """逐条解析 SSE data JSON。
+
+    OpenAI 和 Anthropic 的流式接口都基于 SSE，但事件名和 data 结构不同。
+    这个函数只负责 HTTP/SSE 层：合并多行 data、跳过注释和 [DONE]，
+    业务字段由各 provider 适配器继续解析。
+    """
+    event_name = None
+    data_lines = []
+
+    def flush_event():
+        if not data_lines:
+            return None
+        payload = "\n".join(data_lines).strip()
+        if not payload or payload == "[DONE]":
+            return None
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return event_name, data
+
+    while True:
+        raw_line = response.readline()
+        if not raw_line:
+            event = flush_event()
+            if event is not None:
+                yield event
+            return
+        line = _decode_stream_line(raw_line).rstrip("\r\n")
+        if not line:
+            event = flush_event()
+            if event is not None:
+                yield event
+            event_name = None
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if not separator:
+            continue
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event_name = value
+        elif field == "data":
+            data_lines.append(value)
 
 
 def _as_model_response(output):

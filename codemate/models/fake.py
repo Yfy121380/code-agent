@@ -1,12 +1,15 @@
 # 测试模型后端：按预设输出返回 ModelResponse，用于单元测试和 benchmark harness。
+# 它也实现 stream_complete，让 runtime 的流式分支可以在本地稳定测试。
 
 from .common import _as_model_response, _messages_to_text, _normalize_messages
+from .types import ModelStreamEvent
 
 
 class FakeModelClient:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []
+        self.supports_streaming = True
         self.supports_images = False
         self.supports_prompt_cache = False
         self.supports_tools = True
@@ -27,3 +30,9 @@ class FakeModelClient:
         response = _as_model_response(self.outputs.pop(0))
         self.last_completion_metadata = dict(response.metadata or {})
         return response
+
+    def stream_complete(self, messages, max_new_tokens, tools=None, system=None, **kwargs):
+        response = self.complete(messages, max_new_tokens, tools=tools, system=system, **kwargs)
+        if response.text:
+            yield ModelStreamEvent.text_delta(response.text)
+        yield ModelStreamEvent.done(response, metadata=response.metadata)

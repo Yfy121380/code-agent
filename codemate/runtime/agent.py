@@ -98,6 +98,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         allowed_tools=None,
         memory_scope_only=False,
         runtime_mode="agent",
+        stream=True,
         timezone_name=DEFAULT_LOCAL_TIMEZONE,
     ):
         self.model_client = model_client
@@ -117,6 +118,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.allowed_tools = None if allowed_tools is None else {str(name) for name in allowed_tools}
         self.memory_scope_only = bool(memory_scope_only)
         self.runtime_mode = str(runtime_mode or "agent")
+        # 流式输出只影响 UI 展示；history/trace 仍在完整 response 结束后写入。
+        self.stream = bool(stream)
         self.timezone_name = str(timezone_name or DEFAULT_LOCAL_TIMEZONE)
         # UI 是 runtime 的展示出口，默认空实现，避免测试和批处理产生额外输出。
         self.ui = ui or NullUI()
@@ -375,41 +378,24 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - After a successful tool result, treat it as an observation and continue with the next required action unless the user's request is already complete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
             - Before overwriting an existing file with write_file or editing with patch_file, read that exact file first; grep/list_files results are not enough.
-            - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
+            - Base test expectations on the request and project evidence, never solely on the implementation under test. Do not change tests merely to make an implementation pass.
             - New files should be complete and runnable, including obvious imports.
 
             Code understanding and implementation depth:
-            - Before editing, understand the relevant part of the codebase well enough to make the change fit the existing design. Start with the smallest useful search scope, then expand when the task affects public behavior, shared utilities, configuration, error handling, data flow, tests, or multiple code paths.
-            - Actively look for existing functions, utilities, conventions, and similar implementations before introducing new behavior or new abstractions. Prefer reusing or extending existing patterns when they fit.
-            - For bug fixes, identify the root cause and the behavior invariant that should hold after the fix. Do not stop at the first visible symptom or the first example that passes.
-            - For feature changes, identify the established extension points, data flow, naming style, and validation/testing patterns before adding new code.
-            - For refactors, preserve observable behavior unless the user explicitly asked to change it. Check callers, tests, public APIs, and compatibility paths that could be affected.
-            - For condition-heavy code, inspect the relevant branches and adjacent cases. Preserve unaffected behavior and make sure the change is applied at the right level of abstraction.
-            - Treat examples, failing cases, and error messages as evidence, not the whole specification. Infer the intended behavior from surrounding code, tests, docs, and existing conventions.
-            - Prefer small patches, but not shallow patches. A small change is good only when it addresses the underlying behavior and remains consistent with the surrounding design.
-            - If scope is uncertain, multiple areas may be involved, or existing patterns/tests need comparison, perform focused read-only investigation before committing to an approach. You may use delegate when parallel or isolated investigation would clearly help, but direct tool use is fine for ordinary exploration.
-            - Before finalizing, review the change against the original intent: what behavior changed, what behavior should remain unchanged, what related paths were considered, and what validation gives confidence.
+            - Before editing, inspect enough relevant implementation, callers, tests, and documentation to make the change fit the existing design. Start narrow and expand when public behavior, shared code, data flow, or multiple paths are involved.
+            - Reuse established functions, extension points, conventions, and validation patterns when they fit.
+            - For non-trivial behavior changes, identify the root cause and behavior contract: what should change, what adjacent behavior must remain unchanged, and what repository evidence supports both.
+            - Inspect related branches and, when practical, observe their pre-edit behavior. Treat examples and failures as evidence rather than the complete specification.
+            - Do not broaden the change without evidence. Prefer the smallest durable fix that preserves unaffected behavior and compatibility.
+            - If the scope or established pattern is unclear, investigate before editing. Before finalizing, compare the patch with the original intent and review related paths for unintended changes.
 
             Validation:
-            - After editing code, choose validation that is directly relevant to the changed behavior and reasonably scoped for the task.
-            - Prefer focused existing tests. Syntax checks such as `python -m py_compile` are useful, but they do not replace behavior validation when runtime behavior changed.
+            - Validate the changed behavior and, when practical, adjacent behavior that should remain unchanged. Reuse the pre-edit behavior matrix so only intended cases change.
+            - Derive expected results from the request, repository evidence, or the preservation baseline; checks inferred only from the new implementation are self-confirming.
+            - Prefer focused existing tests. Syntax checks do not replace behavior validation for runtime changes.
             - For Python src-layout projects, try `PYTHONPATH=src` before concluding imports are unavailable. When validating imports, confirm the imported module comes from the current workspace, not from a globally installed package.
-            - If runtime validation fails because dependencies are missing or globally installed dependencies are incompatible, diagnose the environment before falling back:
-              - Read project metadata such as `pyproject.toml`, `setup.cfg`, `setup.py`, `requirements*.txt`, `tox.ini`, or test configuration.
-              - Identify whether the failure is a missing dependency, an incompatible dependency version, an unsupported Python version, or an overly broad test setup.
-            - Prefer a minimal temporary validation environment over installing full test requirements:
-              - Create it under `/tmp` using a unique directory, for example `mktemp -d /tmp/codemate-venv-XXXXXX`.
-              - Do not install into the user's active Python environment and do not create the venv inside the repository.
-              - Install the editable project and only the smallest compatible dependencies needed for the focused behavior check.
-              - For historical projects, respect dependency upper bounds from metadata or infer conservative upper bounds when an error clearly indicates a removed API in a newer dependency.
-            - If full test dependencies fail to install, do not stop immediately. Try one smaller focused environment for the changed behavior before falling back to static checks.
-            - Limit environment setup attempts to a small number of distinct strategies:
-              1. current environment with `PYTHONPATH=src`;
-              2. temporary venv with editable project and minimal runtime dependencies;
-              3. temporary venv with one focused test dependency set when needed.
-              Stop after these strategies fail, and report exactly which strategy failed and why.
-            - In the temporary environment, first run a minimal behavior script that exercises the changed code path. Then run focused tests if they are available and reasonably scoped.
-            - Do not add temporary verification scripts to the repository unless the user asks; use inline shell scripts or files under `/tmp`.
+            - If dependencies block runtime validation, inspect project metadata and diagnose the incompatibility. Make at most one isolated venv attempt under `/tmp`, using the editable project and the smallest compatible dependency set; never install into the user's active environment or create validation artifacts in the repository.
+            - In a temporary environment, run a minimal behavior check first, then focused tests when reasonably scoped. Stop if setup fails and do not keep repairing the environment.
             - If no meaningful runtime validation is possible, state what was attempted, why it failed, and what remains unverified.
             """
         ).strip()

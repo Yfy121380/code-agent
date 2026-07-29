@@ -10,6 +10,41 @@ from codemate import ModelResponse
 from tests.helpers import build_agent
 
 
+class RecordingUI:
+    def __init__(self):
+        self.streamed = []
+        self.commentary_messages = []
+        self.final_messages = []
+        self.tool_results = []
+
+    def model_start(self):
+        pass
+
+    def model_end(self, kind="", metadata=None):
+        pass
+
+    def stream_start(self, phase=""):
+        pass
+
+    def stream_delta(self, text, phase=""):
+        self.streamed.append({"text": text, "phase": phase})
+
+    def stream_end(self, kind="", metadata=None):
+        pass
+
+    def commentary(self, text):
+        self.commentary_messages.append(text)
+
+    def final_answer(self, text):
+        self.final_messages.append(text)
+
+    def tool_start(self, name, args, risk_level=""):
+        pass
+
+    def tool_result(self, name, args, result, metadata=None):
+        self.tool_results.append({"name": name, "result": result})
+
+
 def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(tmp_path):
     agent = build_agent(tmp_path, [])
     args = {"path": "README.md", "start": 1, "end": 1}
@@ -75,6 +110,47 @@ def test_runtime_records_commentary_response_and_continues(tmp_path):
         item.get("role") == "assistant" and item.get("kind") == "commentary" and item.get("content") == "我先确认当前任务。"
         for item in agent.session["history"]
     )
+
+
+def test_runtime_streams_text_but_records_complete_final_message(tmp_path):
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [ModelResponse.final("done")], ui=ui)
+
+    result = agent.ask("say hello")
+
+    assert result == "done"
+    assert [item["text"] for item in ui.streamed] == ["done"]
+    assert ui.final_messages == []
+    assistant_messages = [item for item in agent.session["history"] if item.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["kind"] == "final"
+    assert assistant_messages[0]["content"] == "done"
+
+
+def test_runtime_streams_tool_commentary_before_executing_complete_tool_call(tmp_path):
+    ui = RecordingUI()
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call(
+                "read_file",
+                {"path": "README.md", "start": 1, "end": 1},
+                call_id="call_read",
+                text="我先读取 README。",
+            ),
+            ModelResponse.final("done"),
+        ],
+        ui=ui,
+    )
+
+    result = agent.ask("inspect README")
+
+    assert result == "done"
+    assert ui.streamed[0]["text"] == "我先读取 README。"
+    assert ui.commentary_messages == []
+    assert ui.tool_results[0]["name"] == "read_file"
+    tool_call_messages = [item for item in agent.session["history"] if item.get("tool_calls")]
+    assert tool_call_messages[0]["tool_calls"][0]["args"] == {"path": "README.md", "start": 1, "end": 1}
 
 def test_main_agent_does_not_stop_at_max_steps(tmp_path):
     agent = build_agent(

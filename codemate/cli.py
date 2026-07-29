@@ -211,6 +211,7 @@ def build_agent(args, ui=None):
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
             feature_flags=feature_flags,
+            stream=args.stream,
             ui=ui,
         )
     return CodeMate(
@@ -222,6 +223,7 @@ def build_agent(args, ui=None):
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
         feature_flags=feature_flags,
+        stream=args.stream,
         ui=ui,
     )
 
@@ -254,6 +256,8 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations for bounded child processes such as delegate and dream.")
     parser.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum model output tokens per step.")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming model output in the terminal.")
+    parser.set_defaults(stream=True)
     parser.add_argument(
         "--benchmark",
         action="store_true",
@@ -320,6 +324,7 @@ def run_cli(args, ui, agent_holder):
             max_steps=old_agent.max_steps,
             max_new_tokens=old_agent.max_new_tokens,
             secret_env_names=old_agent.secret_env_names,
+            stream=old_agent.stream,
             ui=ui,
         )
         old_agent.close()

@@ -16,8 +16,16 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.text import Text
 
+from .markdown_stream import COMMENTARY_STYLE, MarkdownStreamRenderer
 from .summaries import COMPACT_RESULT_TOOLS, summarize_read_tool_result, summarize_tool_call, summarize_tool_result
+
+
+TOOL_CALL_STYLE = "#b0b0b0"
+TOOL_RESULT_STYLE = "#b0b0b0"
+TOOL_DETAIL_STYLE = "#999999"
+TOOL_ERROR_STYLE = "#d6a85f"
 
 
 class NullUI:
@@ -27,6 +35,15 @@ class NullUI:
         pass
 
     def model_end(self, kind="", metadata=None):
+        pass
+
+    def stream_start(self, phase=""):
+        pass
+
+    def stream_delta(self, text, phase=""):
+        pass
+
+    def stream_end(self, kind="", metadata=None):
         pass
 
     def tool_start(self, name, args, risk_level=""):
@@ -59,6 +76,8 @@ class TerminalUI(NullUI):
 
     def __init__(self, console=None):
         self.console = console or Console()
+        self._stream_phase = ""
+        self._stream_renderer = MarkdownStreamRenderer(self.console)
 
     def approval_menu(self, choices):
         # 审批菜单使用 prompt_toolkit 接管按键：
@@ -137,6 +156,27 @@ class TerminalUI(NullUI):
     def model_end(self, kind="", metadata=None):
         pass
 
+    def stream_start(self, phase=""):
+        # 流式文本是正式输出，但 Markdown 需要分块渲染：
+        # renderer 会先缓冲未完成语法块，history/trace 仍保存完整原文。
+        self._stream_phase = str(phase or "")
+        self._stream_renderer.reset()
+
+    def stream_delta(self, text, phase=""):
+        text = str(text or "")
+        if not text:
+            return
+        if phase:
+            if self._stream_phase and phase != self._stream_phase:
+                self._stream_renderer.finish(phase=self._stream_phase)
+            self._stream_phase = str(phase)
+        self._stream_renderer.write(text, phase=self._stream_phase)
+
+    def stream_end(self, kind="", metadata=None):
+        del kind, metadata
+        self._stream_renderer.finish(phase=self._stream_phase)
+        self._stream_phase = ""
+
     def compact_start(self, reason=""):
         suffix = f" ({reason})" if reason else ""
         self.console.print(f"[dim]Compacting history{suffix}...[/dim]")
@@ -155,28 +195,35 @@ class TerminalUI(NullUI):
     def commentary(self, text):
         text = str(text or "").strip()
         if text:
-            self.console.print(f"[dim]{text}[/dim]")
+            self.console.print(Markdown(text, style=COMMENTARY_STYLE))
 
     def tool_start(self, name, args, risk_level=""):
         summary = summarize_tool_call(name, args)
-        if name in COMPACT_RESULT_TOOLS:
-            first_line = summary.splitlines()[0] if summary else name
-            self.console.print(f"[cyan]◇ {first_line}[/cyan]")
-            return
-        title = f"tool: {name}"
-        if risk_level:
-            title += f" ({risk_level})"
-        self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=title, border_style="cyan"))
+        lines = summary.splitlines() or [name]
+        title = f"◇ {lines[0]}"
+        if risk_level and risk_level != "low":
+            title += f"  [{risk_level}]"
+        self.console.print(Text(title, style=TOOL_CALL_STYLE))
+        for line in lines[1:]:
+            self.console.print(Text(f"    {line}", style=TOOL_DETAIL_STYLE))
 
     def tool_result(self, name, args, result, metadata=None):
+        del args
         metadata = dict(metadata or {})
         status = metadata.get("tool_status", "ok")
         if name in COMPACT_RESULT_TOOLS and status == "ok":
-            self.console.print(f"[green]  -> {summarize_read_tool_result(name, result, metadata)}[/green]")
+            summary = summarize_read_tool_result(name, result, metadata)
+            self.console.print(Text(f"  ↳ {summary}", style=TOOL_RESULT_STYLE))
             return
-        border_style = "green" if status == "ok" else "yellow"
         summary = summarize_tool_result(name, result, metadata)
-        self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=f"result: {name}", border_style=border_style))
+        lines = summary.splitlines()
+        if lines and lines[0].startswith("status:"):
+            lines = lines[1:]
+        style = TOOL_RESULT_STYLE if status == "ok" else TOOL_ERROR_STYLE
+        self.console.print(Text(f"  ↳ {status} · {name}", style=style))
+        for line in lines:
+            detail_style = TOOL_DETAIL_STYLE if status == "ok" else style
+            self.console.print(Text(f"    {line}", style=detail_style))
 
     def approval_request(self, name, args, metadata=None):
         metadata = dict(metadata or {})
@@ -211,4 +258,4 @@ class TerminalUI(NullUI):
         text = str(text or "").strip()
         if not text:
             return
-        self.console.print(Panel(Markdown(text), title="codemate", border_style="green"))
+        self.console.print(Markdown(text))

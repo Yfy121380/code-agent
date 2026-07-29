@@ -25,6 +25,77 @@ class RuntimeLoopMixin:
             },
         )
 
+    def _complete_model_response(self, messages, system, prompt_cache_key=None, prompt_cache_retention=None):
+        """调用模型并返回完整 response，同时按需把文本 delta 流式展示到 UI。
+
+        流式输出只是一层展示优化：工具调用必须等完整响应结束后才解析、
+        校验和执行，history/trace 也只保存完整 assistant 消息。
+        """
+        model_started_at = time.monotonic()
+        self.ui.model_start()
+        use_stream = (
+            bool(getattr(self, "stream", False))
+            and bool(getattr(self.model_client, "supports_streaming", False))
+            and hasattr(self.model_client, "stream_complete")
+        )
+        if not use_stream:
+            response = self.model_client.complete(
+                messages,
+                self.max_new_tokens,
+                tools=self.model_tools(),
+                system=system,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_retention=prompt_cache_retention,
+            )
+            completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
+            completion_metadata.update(dict(getattr(response, "metadata", {}) or {}))
+            kind = getattr(response, "kind", "final")
+            self.ui.model_end(kind=kind, metadata=completion_metadata)
+            return response, completion_metadata, int((time.monotonic() - model_started_at) * 1000), 0
+
+        response = None
+        stream_metadata = {}
+        streamed_text_chars = 0
+        self.ui.stream_start()
+        try:
+            for event in self.model_client.stream_complete(
+                messages,
+                self.max_new_tokens,
+                tools=self.model_tools(),
+                system=system,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_retention=prompt_cache_retention,
+            ):
+                kind = getattr(event, "kind", "")
+                if kind == "text_delta":
+                    delta = str(getattr(event, "text", "") or "")
+                    streamed_text_chars += len(delta)
+                    self.ui.stream_delta(delta, phase=getattr(event, "phase", ""))
+                elif kind == "done":
+                    response = getattr(event, "response", None)
+                    stream_metadata.update(dict(getattr(event, "metadata", {}) or {}))
+                    break
+                elif kind == "error":
+                    raise RuntimeError(str(getattr(event, "text", "") or "model streaming error"))
+        except Exception:
+            self.ui.stream_end(kind="error")
+            self.ui.model_end(kind="error", metadata={})
+            raise
+
+        if response is None:
+            self.ui.stream_end(kind="error")
+            self.ui.model_end(kind="error", metadata={})
+            raise RuntimeError("model stream ended without a completed response")
+
+        completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
+        completion_metadata.update(stream_metadata)
+        completion_metadata.update(dict(getattr(response, "metadata", {}) or {}))
+        completion_metadata["streamed_text_chars"] = streamed_text_chars
+        kind = getattr(response, "kind", "final")
+        self.ui.stream_end(kind=kind, metadata=completion_metadata)
+        self.ui.model_end(kind=kind, metadata=completion_metadata)
+        return response, completion_metadata, int((time.monotonic() - model_started_at) * 1000), streamed_text_chars
+
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
@@ -115,19 +186,12 @@ class RuntimeLoopMixin:
             if getattr(self.model_client, "supports_prompt_cache", False):
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
                 prompt_cache_retention = "in_memory"
-            model_started_at = time.monotonic()
-            self.ui.model_start()
-            response = self.model_client.complete(
+            response, completion_metadata, model_duration_ms, streamed_text_chars = self._complete_model_response(
                 messages,
-                self.max_new_tokens,
-                tools=self.model_tools(),
-                system=system,
+                system,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
             )
-            completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
-            response_metadata = dict(getattr(response, "metadata", {}) or {})
-            completion_metadata.update(response_metadata)
             token_usage = self.update_token_usage_from_model(completion_metadata)
             if completion_metadata:
                 prompt_metadata.update(completion_metadata)
@@ -142,10 +206,9 @@ class RuntimeLoopMixin:
                     "kind": kind,
                     "tool_call_count": len(getattr(response, "tool_calls", []) or []),
                     "completion_metadata": completion_metadata,
-                    "duration_ms": int((time.monotonic() - model_started_at) * 1000),
+                    "duration_ms": model_duration_ms,
                 },
             )
-            self.ui.model_end(kind=kind, metadata=completion_metadata)
 
             if kind == "commentary":
                 commentary = str(getattr(response, "text", "") or "").strip()
@@ -159,7 +222,8 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
-                self.ui.commentary(commentary)
+                if not streamed_text_chars:
+                    self.ui.commentary(commentary)
                 self._emit_commentary_trace(task_state, commentary, source="commentary")
                 self.record({"role": "assistant", "kind": "commentary", "content": commentary, "created_at": now()})
                 self.run_store.write_task_state(task_state)
@@ -183,7 +247,8 @@ class RuntimeLoopMixin:
                 commentary = str(getattr(response, "text", "") or "")
                 if commentary.strip():
                     commentary = commentary.strip()
-                    self.ui.commentary(commentary)
+                    if not streamed_text_chars:
+                        self.ui.commentary(commentary)
                     self._emit_commentary_trace(task_state, commentary, source="tool_calls")
                 self.record(
                     {
@@ -260,7 +325,8 @@ class RuntimeLoopMixin:
                 if not candidate_extracted_this_run:
                     self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
                 self.schedule_dream_if_needed(task_state)
-                self.ui.final_answer(final)
+                if not streamed_text_chars:
+                    self.ui.final_answer(final)
                 self.maybe_generate_session_title(user_message, final)
                 return final
 

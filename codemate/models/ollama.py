@@ -46,6 +46,7 @@ class OllamaModelClient:
         self.temperature = temperature
         self.top_p = top_p
         self.timeout = timeout
+        self.supports_streaming = False
         self.supports_prompt_cache = False
         self.supports_tools = True
         self.last_completion_metadata = {}
