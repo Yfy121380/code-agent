@@ -181,7 +181,6 @@ CodeMate 会自动创建项目级和用户级目录。
 /model <name>        Set model from the current provider's allowed model list.
 /budget              Show context section sizes and token budget usage.
 /compact             Compact older conversation history now.
-/memory              Show distilled working memory.
 /remember <text>     Add a high-confidence memory candidate.
 /dream               Run memory consolidation in foreground.
 /dream --background  Run memory consolidation in background.
@@ -189,7 +188,7 @@ CodeMate 会自动创建项目级和用户级目录。
 /session list        List sessions for this project.
 /session rename      Rename the current session.
 /session resume      Choose and resume another session.
-/reset               Clear current session history and memory.
+/reset               Clear current conversation and task state.
 /exit                Exit.
 ```
 
@@ -202,9 +201,9 @@ CodeMate 的内置工具分为几类：
 - File tools: `list_files`, `read_file`, `grep`
 - Edit tools: `write_file`, `patch_file`
 - Shell: `run_shell`
-- Planning: `todo_write`
+- Planning: `todo_write`, `todo_list`
 - Delegation: `delegate`
-- Skills: `skill_load`, `skill_unload`
+- Skills: `skill_load`
 - Web: `web_search`, `web_extract`, `web_research`
 - MCP: 动态发现并注册为 `mcp__<server>__<tool>`
 
@@ -235,13 +234,13 @@ CodeMate 的内置工具分为几类：
 CodeMate 的上下文分层包括：
 
 - prefix: agent 身份、工具规则、工作流规则、输出规则
-- skills: 当前激活的 skill
-- working memory: 当前任务相关的结构化短期记忆
+- available skills: 可按需加载的 skill 名称和描述
+- runtime context: 当前日期、时区和项目记忆目录
 - relevant memory: 从长期记忆中召回的相关事实
 - history summary: compact 后的旧历史摘要
 - recent history: 最近对话和工具结果
 
-可以使用 `/budget` 查看各层字符量、工具 schema 大小、估算 token 和模型上下文预算。历史过大时可以手动 `/compact`，运行时也会在需要时压缩旧 history。compact 只压缩 history，不会压缩 prefix、skills、working memory 或 relevant memory。
+Todo 和最近调用的 Skill 保存为会话状态，需要时通过工具结果或 compact 恢复消息进入 history。可以使用 `/budget` 查看各层字符量、工具 schema 大小、估算 token 和模型上下文预算。历史过大时可以手动 `/compact`，运行时也会在需要时压缩旧 history。
 
 长期记忆采用三段式流程：
 

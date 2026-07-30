@@ -340,7 +340,7 @@ Writes may require approval or be blocked by permission rules.
             "properties": {
                 "todos": {
                     "type": "array",
-                    "description": "Complete replacement todo plan for the current coding session.",
+                    "description": "Complete replacement todo plan for the current task.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -378,9 +378,9 @@ Writes may require approval or be blocked by permission rules.
         },
         "risky": False,
         "description": """
-Create or update the active todo plan for the current coding session.
+Create or update the active todo plan for the current task.
 
-The todo plan is shown in Working memory as current_todos. When it appears, follow it until the work is completed or the plan is no longer relevant.
+todo_write replaces the entire active plan. Include every still-relevant phase and task whenever you update it. A fully completed plan is cleared automatically.
 
 When to use:
 - Use todo_write for complex multi-step work, non-trivial tasks that require planning, investigation, multiple edits, or verification.
@@ -525,6 +525,24 @@ Negative examples:
 }
 """.strip(),
     },
+    "todo_list": {
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": """
+Read the active todo plan for the current task.
+
+Use this when you need to review the current phases, tasks, and progress before continuing work.
+
+Do not call todo_list repeatedly when the active plan is already known.
+
+This tool does not modify the plan. Use todo_write to create, replace, update, or clear it.
+""".strip(),
+    },
     "skill_load": {
         "input_schema": {
             "type": "object",
@@ -536,37 +554,13 @@ Negative examples:
         },
         "risky": False,
         "description": """
-Load a skill into Working memory when it is clearly useful for the current task.
+Load the complete instructions for an available skill that clearly matches the current task.
 
-Use this only for skills listed in Available skills. Do not load a skill that is already active.
-After loading, follow the skill instructions while they remain relevant.
+Use this only for skills listed in Available skills. Do not load the same skill repeatedly when its instructions are already available.
+Follow the returned instructions while completing the task.
 
 Available skills may come from the project skill root or the user skill root.
-After loading, Working memory shows the skill's absolute Root.
-Relative resources mentioned by the skill, such as scripts/, references/, examples/, and templates/, are located under that Root.
-""".strip(),
-    },
-    "skill_unload": {
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name of the active skill to unload."},
-                "reason": {"type": "string", "description": "Brief reason why the skill no longer applies.", "default": ""},
-            },
-            "required": ["name"],
-            "additionalProperties": False,
-        },
-        "risky": False,
-        "description": """
-Unload an active skill from Working memory when it no longer applies to the current user task.
-
-Use skill_unload when:
-- The user switches to an unrelated task and the active skill is no longer useful.
-- The active skill was loaded by mistake.
-- The current task direction changed and the skill instructions no longer apply.
-
-Do not unload a skill only because one request has been completed. Keep it active if the next user request may reasonably continue the same task, project, or workflow.
-Do not unload a skill if its instructions are still relevant.
+The result includes the skill's absolute root and full instructions. Relative resources such as scripts/, references/, examples/, and templates/ are located under that root.
 """.strip(),
     },
 }

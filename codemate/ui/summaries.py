@@ -74,6 +74,8 @@ def summarize_tool_call(name, args):
                 description = str(task.get("description", "")).strip()
                 lines.append(f"     - [{task_status}] {_clip_line(description, 100)}")
         return "\n".join(lines)
+    if name == "todo_list":
+        return "todo_list"
     if name == "write_file":
         content = str(args.get("content", ""))
         path = args.get("path", "")

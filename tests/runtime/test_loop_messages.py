@@ -61,8 +61,7 @@ def test_repeated_tool_call_uses_assistant_tool_calls_and_excludes_current_call(
     third = agent.run_tool("read_file", args, current_tool_call_id="call_3")
 
     assert "repeated identical tool call" in third
-    notes = agent.session["memory"]["process_notes"]
-    assert notes[0]["kind"] == "repeated_call"
+    assert "memory" not in agent.session
 
 def test_runtime_records_one_assistant_message_for_multiple_tool_calls(tmp_path):
     call_id = "toolu_read"
@@ -169,7 +168,7 @@ def test_main_agent_does_not_stop_at_max_steps(tmp_path):
     assert agent.current_task_state.tool_steps == 2
     assert agent.current_task_state.stop_reason == "final_answer_returned"
 
-def test_repeated_call_process_note_clears_after_any_successful_tool(tmp_path):
+def test_successful_tool_still_runs_after_repeated_call_rejection(tmp_path):
     agent = build_agent(tmp_path, [])
     args = {"path": "README.md", "start": 1, "end": 1}
 
@@ -195,9 +194,7 @@ def test_repeated_call_process_note_clears_after_any_successful_tool(tmp_path):
 
     rejected = agent.run_tool("read_file", args, current_tool_call_id="call_2")
     assert "repeated identical tool call" in rejected
-    assert agent.session["memory"]["process_notes"][0]["kind"] == "repeated_call"
 
     result = agent.run_tool("list_files", {"path": "."})
 
     assert "README.md" in result
-    assert agent.session["memory"]["process_notes"] == []

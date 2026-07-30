@@ -6,7 +6,15 @@
 from dataclasses import dataclass
 
 
-SECTION_ORDER = ("prefix", "skills", "memory", "relevant_memory", "history_summary", "history", "current_request")
+SECTION_ORDER = (
+    "prefix",
+    "skills",
+    "runtime_context",
+    "relevant_memory",
+    "history_summary",
+    "history",
+    "current_request",
+)
 CURRENT_REQUEST_SECTION = "current_request"
 HISTORY_SUMMARY_SECTION = "history_summary"
 LONG_TERM_MEMORY_SOURCES = ("user_profile", "feedback_workflow", "project_context")
@@ -16,6 +24,7 @@ MAX_RECENT_OBSERVATION_TOOL_RESULTS = 50
 RECENT_HISTORY_MIN_MESSAGES = 20
 RECENT_HISTORY_MIN_CHARS = 50_000
 MAX_COMPACT_RETRIES = 3
+INTERNAL_CONTEXT_MESSAGE_KINDS = frozenset({"skill_context", "todo_context"})
 HISTORY_SUMMARY_SECTIONS = (
     "Working Directory",
     "User Preferences And Constraints",

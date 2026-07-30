@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 
 from .. import tools as toolkit
+from ..tools.file_state import has_current_file_state, record_file_state
 
 
 class ToolExecutionMixin:
@@ -35,7 +36,7 @@ class ToolExecutionMixin:
             return True
         if name in {"list_files", "read_file", "grep"}:
             return True
-        if name in {"todo_write", "skill_load", "skill_unload"}:
+        if name in {"todo_write", "todo_list", "skill_load", "skill_unload"}:
             return True
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
@@ -115,7 +116,6 @@ class ToolExecutionMixin:
                 "risk_level": "high",
                 "read_only": False,
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         try:
             # 参数合法性、路径硬边界和审批门禁统一在 validate_tool 中完成。
@@ -130,7 +130,6 @@ class ToolExecutionMixin:
                 **self.tool_runtime_metadata(name, tool),
                 **self.shell_analysis_metadata(),
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         except Exception as exc:
             message = f"error: invalid arguments for {name}: {exc}"
@@ -142,7 +141,6 @@ class ToolExecutionMixin:
                 **self.tool_runtime_metadata(name, tool),
                 **self.shell_analysis_metadata(),
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         if self.repeated_tool_call(name, args, exclude_call_id=current_tool_call_id):
             message = f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
@@ -154,7 +152,6 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         asked_for_approval = gate.action == "ask"
         if asked_for_approval and not self.approval_decision(name, args, tool):
@@ -167,7 +164,6 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
         if not asked_for_approval:
             self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
@@ -190,7 +186,8 @@ class ToolExecutionMixin:
                     tool_status = delegate_status
                     tool_error_code = "delegate_failed"
 
-            self.update_memory_after_tool(name, args, result)
+            if tool_status == "ok" and name in {"read_file", "write_file", "patch_file"}:
+                record_file_state(self.session, self.root, args["path"])
             self._last_tool_result_content_blocks = content_blocks
             self._last_tool_result_metadata = {
                 "tool_status": tool_status,
@@ -204,10 +201,6 @@ class ToolExecutionMixin:
                 **dict(raw_output.metadata or {}),
                 **truncation_metadata,
             }
-            if tool_status == "ok":
-                self.resolve_process_notes_after_success(name, args)
-            else:
-                self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, result)
             return result
         except Exception as exc:
             security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
@@ -221,7 +214,6 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
             }
-            self.record_process_note_for_tool(name, args, self._last_tool_result_metadata, message)
             return message
 
     def recent_tool_calls(self, exclude_call_id=None):
@@ -272,9 +264,7 @@ class ToolExecutionMixin:
         path = self.path(args["path"])
         if name == "write_file" and not path.exists():
             return
-        if name == "write_file" and str(args.get("mode", "overwrite")) == "append":
-            return
-        if not self.memory.has_fresh_file_summary(args["path"]):
+        if not has_current_file_state(self.session, self.root, args["path"]):
             raise ValueError(
                 "existing files must be read with read_file before editing; "
                 "grep/list_files results are not enough"
@@ -300,6 +290,9 @@ class ToolExecutionMixin:
 
     def tool_skill_load(self, args):
         return toolkit.tool_skill_load(self, args)
+
+    def tool_todo_list(self, args):
+        return toolkit.tool_todo_list(self, args)
 
     def tool_skill_unload(self, args):
         return toolkit.tool_skill_unload(self, args)

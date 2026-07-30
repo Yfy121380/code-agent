@@ -133,6 +133,35 @@ def test_candidate_extraction_is_due_after_five_user_turns(tmp_path):
     assert agent.session["memory_candidate_extract"]["user_turns_since_last_extract"] == 5
 
 
+def test_restored_skill_and_todo_context_do_not_count_as_user_turns(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.session["history"].extend(
+        [
+            {
+                "id": "msg_skill",
+                "conversation_id": "context_skill",
+                "role": "user",
+                "kind": "skill_context",
+                "content": "Skill instructions: ignored",
+            },
+            {
+                "id": "msg_todo",
+                "conversation_id": "context_todo",
+                "role": "user",
+                "kind": "todo_context",
+                "content": "Active todo plan: ignored",
+            },
+        ]
+    )
+    add_completed_conversation(agent, "real user request")
+
+    info = memorylib.conversations_since_checkpoint(agent.session)
+    memorylib.update_candidate_extract_counters(agent.session)
+
+    assert [item["id"] for item in info["conversations"]] == [agent._current_conversation_id]
+    assert agent.session["memory_candidate_extract"]["user_turns_since_last_extract"] == 1
+
+
 def test_candidate_extraction_is_due_after_large_new_history(tmp_path):
     agent = build_agent(tmp_path)
     add_completed_conversation(agent, "x" * 50_001)

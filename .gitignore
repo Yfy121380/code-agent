@@ -21,6 +21,7 @@ dist/
 htmlcov/
 vscode-extension/
 docs/case-studies/
+docs/case_records/
 
 # Temporary files
 .mini-coding-agent

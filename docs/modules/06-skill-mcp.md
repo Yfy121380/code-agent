@@ -2,56 +2,25 @@
 
 ## 1. 模块定位
 
-Skill 和 MCP 都是 Codemate 的能力扩展机制，但二者解决的问题不同。
+Skill 和 MCP 都扩展 Codemate 的能力，但边界不同：
 
-- **Skill** 扩展的是“怎么做事”的知识，比如某类项目的开发流程、代码审查方式、论文总结模板、特定技术栈的工作习惯。
-- **MCP** 扩展的是“能调用什么外部工具”，比如搜索服务、数据库工具、浏览器工具、公司内部系统工具等。
+- Skill 提供“任务应该怎么做”的工作说明和配套资源。
+- MCP 提供“能够调用什么外部服务”的动态工具。
 
-二者共同的设计原则是：扩展能力不能绕过 Codemate 的上下文、工具、权限和 trace 体系。Skill 进入 working memory，MCP 进入 tool registry；它们都不是直接让模型获得无限能力。
+Skill 通过 `skill_load` 进入 history；MCP 通过工具注册表进入模型 schema。二者都经过统一的 runtime、trace 和权限流程。
 
-## 2. Skill 的作用
+## 2. Skill 目录
 
-Skill 用来保存某类任务的专门说明和资源。它更像一个可加载的工作手册，而不是长期记忆。
-
-适合放进 skill 的内容包括：
-
-- 特定任务的标准工作流。
-- 某类项目的实现步骤。
-- 代码生成或评审规范。
-- 需要复用的脚本、模板、示例和参考资料。
-- 针对某个领域的注意事项。
-
-不适合放进 skill 的内容包括：
-
-- 当前任务的临时状态。
-- 某次对话中的短期发现。
-- 用户跨项目偏好。
-- 会频繁变化的项目运行结果。
-
-这些信息分别应该进入 working memory、history、长期记忆或 trace。
-
-## 3. Skill 存储位置
-
-Codemate 当前支持两级 skill：
+支持项目级和用户级 Skill：
 
 ```text
-项目级：
-<workspace>/.codemate/skills/<skill-name>/SKILL.md
-
-用户级：
-~/.codemate/skills/<skill-name>/SKILL.md
+<workspace>/.codemate/skills/<name>/SKILL.md
+~/.codemate/skills/<name>/SKILL.md
 ```
 
-启动时会自动创建这些目录：
+同名时项目级覆盖用户级。目录会在初始化时自动创建。
 
-- 项目内 `.codemate/skills`
-- 用户级 `~/.codemate/skills`
-
-发现 skill 时，Codemate 会同时扫描用户级和项目级目录。如果用户级和项目级存在同名 skill，项目级会覆盖用户级。这样既支持全局复用，也支持单项目定制。
-
-## 4. SKILL.md 格式要求
-
-每个 skill 目录下必须有 `SKILL.md`。文件开头需要 frontmatter，至少包含：
+`SKILL.md` 使用 frontmatter：
 
 ```markdown
 ---
@@ -59,355 +28,174 @@ name: ai-coding-backend
 description: Structured workflow for Python backend/API projects.
 ---
 
-具体 skill 指令...
+具体指令...
 ```
 
-当前发现规则包括：
+目录名必须与 frontmatter `name` 一致，description 不能为空且最多展示 250 字符。
 
-- skill 目录名必须是合法名称。
-- `SKILL.md` 必须存在。
-- frontmatter 中必须有 `name`。
-- frontmatter 的 `name` 必须和目录名一致。
-- 必须有非空 `description`。
-- description 最长 250 字符，超过会截断。
+## 3. Skill 发现与调用
 
-要求 `SKILL.md` 内部显式写 `name` 的原因是：目录名虽然可以作为本地实现的优先来源，但标准 skill 文件本身应该是自描述的。这样以后迁移到其他 agent 或工具生态时，不会依赖 Codemate 的目录约定。
-
-## 5. Available Skills
-
-模型每轮会看到一个 `Available skills` section，其中只包含 skill 的 name 和 description，例如：
+模型首先看到：
 
 ```text
 Available skills:
 - ai-coding-backend: Structured workflow for Python backend/API projects.
-- paper-summary: ...
 ```
 
-这里不放完整 `SKILL.md` 正文。原因是 skill 内容可能很长，如果全部提前塞进上下文，会挤占 history 和 working memory。
+这里只放名称和 description，不提前发送完整正文。匹配任务后，模型调用：
 
-这个列表只解决“模型知道有哪些 skill 可选”的问题。模型判断某个 skill 和当前任务明显相关时，再调用 `skill_load`。
-
-## 6. Skill 生命周期
-
-Skill 的生命周期是：
-
-```text
-扫描 skill 目录
-  -> 渲染 Available skills
-  -> 模型判断当前任务需要某个 skill
-  -> skill_load
-  -> 完整 SKILL.md 进入 working memory
-  -> 模型按 skill 指令执行当前任务
-  -> 用户切换到无关任务时 skill_unload
+```json
+{"name": "ai-coding-backend"}
 ```
 
-`skill_load` 会做几件事：
-
-- 检查 skill 是否存在。
-- 检查是否已经 active，防止重复加载。
-- 检查 active skill 数量，当前最多 3 个。
-- 读取完整 `SKILL.md`。
-- 校验 frontmatter name 和目录名一致。
-- 把 skill 存入 session 的 `active_skills`。
-- 在 trace 中记录 `skill_loaded`。
-
-`skill_unload` 会做几件事：
-
-- 检查 skill 当前是否 active。
-- 从 session 的 `active_skills` 删除。
-- 记录卸载原因。
-- 在 trace 中记录 `skill_unloaded`。
-
-设计上不要求一个请求完成后立刻卸载 skill。更合理的规则是：当用户切换到无关任务、skill 加载错误、或当前任务方向变化导致 skill 不再适用时再卸载。
-
-## 7. Active Skill 如何进入上下文
-
-已加载 skill 会进入 working memory，而不是放在 available skills 列表里。
-
-Working memory 中会展示：
-
-- skill name。
-- skill root。
-- skill-relative 资源说明。
-- 完整 `SKILL.md` 内容。
-
-这样设计是为了让 skill 能在多轮复杂任务中持续生效。如果 skill 只作为一次 tool result 出现在 history，随着后续工具调用增加，它很快可能被挤掉或 compact 掉；放在 working memory 则说明它是当前任务仍然相关的操作指南。
-
-同时，active skill 也不能永久保留。否则无关任务也会被旧 skill 影响，并且占用上下文。因此卸载由模型通过 `skill_unload` 显式完成，runtime 则负责防止重复加载和数量失控。
-
-## 8. Skill Root 和资源定位
-
-Skill root 是 skill 目录的绝对路径，这个路径会写在 Active Skill 中,例如：
+`skill_load` 返回：
 
 ```text
-Name: ai-coding-backend
-Root: /home/pea/.codemate/skill/ai-coding-backend
-Skill-relative resources such as scripts/, references/, examples/, and templates/ are under this root.
+Skill loaded: ai-coding-backend
+Root: /absolute/path/to/ai-coding-backend
+
 Instructions:
+<完整 SKILL.md>
 ```
 
-`SKILL.md` 中提到的相对资源都基于这个 root 查找：
+完整结果直接进入 history。Skill 中的 `scripts/`、`references/`、`examples/` 和 `templates/` 均相对于返回的 root。
 
-- `scripts/`
-- `references/`
-- `examples/`
-- `templates/`
+## 4. Skill 状态与 Compact
 
-例如 `SKILL.md` 写：
+Session 保存最近调用的三个不同 Skill，包括 name、root 和完整正文。重复调用同名 Skill 会刷新内容和顺序；调用第四个时淘汰最早记录。
 
-```text
-Run scripts/check_project.py before final review.
-```
+History compact 后：
 
-模型应该理解为：
+- retained recent history 中仍有成功 `skill_load` 的 Skill 不重复恢复。
+- 只恢复 recent history 已经缺失的 Skill。
+- 最多恢复三个，正文不截断。
+- 重复 compact 会删除旧 `skill_context` 后重新计算，避免累积。
 
-```text
-<skill-root>/scripts/check_project.py
-```
+## 5. Skill 的设计理由
 
-而不是 workspace 下的 `scripts/check_project.py`。
+把完整 Skill 每轮重复放进固定上下文会破坏缓存，也会长期占用 token；只保留一次工具结果又可能在 compact 后丢失。当前方案采用“历史追加 + compact 按需恢复”：
 
-这点很重要。Skill 是一个自带资源包的能力单元，不只是一个 markdown 文件。明确 root 可以避免模型把 skill 资源和项目文件混淆。
+- 平时只有一次正文成本。
+- 动态内容位于 history 尾部，更有利于缓存稳定。
+- Compact 后仍能恢复当前任务需要的说明。
+- 最近三个的边界防止无限增长。
 
-## 9. Skill 的设计取舍
+## 6. MCP 配置
 
-Skill 加载策略的核心取舍是上下文成本和任务连续性。
+MCP 配置位于用户级或项目级 `settings.json` 的 `mcp` 字段。项目配置覆盖同名用户配置。
 
-如果只把 skill 作为工具结果放进 history：
-
-- 优点是简单。
-- 缺点是复杂任务多轮执行后容易丢失，不使用时还会占用上下文。
-
-
-Codemate 采用折中方案：
-
-- 未加载时只展示 name/description。
-- 需要时加载完整 skill 到 working memory。
-- 任务切换后由模型卸载。
-- runtime 限制重复加载和 active 数量。
-
-这样可以让 skill 在相关任务中持续可用，又避免长期污染上下文。
-
-## 10. MCP 的作用
-
-MCP 用来接入外部工具服务。它和内置工具不同：内置工具由 Codemate 自己定义 schema 和执行逻辑；MCP 工具由外部 server 提供 schema、description 和执行能力。
-
-适合通过 MCP 接入的能力包括：
-
-- 搜索或资料系统。
-- 浏览器自动化。
-- 数据库或 BI 查询。
-- 公司内部系统。
-- 第三方工具平台。
-
-MCP 的价值是让 Codemate 不需要为每个外部系统写死一套工具，而是通过标准协议动态发现和调用。
-
-## 11. MCP 配置
-
-MCP 配置放在 settings 中：
+stdio 示例：
 
 ```json
 {
   "mcp": {
-    "servers": {
-      "tavily-mcp": {
-        "command": "npx",
-        "args": ["-y", "tavily-mcp"],
-        "env": {
-          "TAVILY_API_KEY": "..."
-        }
+    "tavily": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "tavily-mcp"],
+      "env": {
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}"
       }
     }
   }
 }
 ```
 
-支持用户级和项目级 settings：
-
-```text
-用户级：
-~/.codemate/settings.json
-
-项目级：
-<workspace>/.codemate/settings.json
-```
-
-配置合并时，用户级先加载，项目级后加载。同名 MCP server 会被项目级配置覆盖。这样可以在用户级放通用 MCP，在项目级放当前项目需要的特殊 MCP。
-
-## 12. MCP 支持的连接方式
-
-当前支持三种 transport：
-
-### stdio
-
-本地启动 MCP server，通过标准输入输出通信。
-
-典型配置：
+HTTP 示例：
 
 ```json
 {
-  "command": "npx",
-  "args": ["-y", "some-mcp-server"],
-  "env": {
-    "API_KEY": "..."
+  "mcp": {
+    "demo": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
   }
 }
 ```
 
-如果没有显式写 `type` 或 `transport`，默认按 `stdio` 处理。
+配置中的 secret 环境变量在 trace 和日志中脱敏。
 
-### http / streamable_http
+## 7. MCP Transport
 
-连接远程或本地 HTTP MCP server。
+### stdio
 
-典型配置：
+Runtime 启动子进程，通过标准输入输出传输 MCP 消息。服务端业务日志必须写 stderr，否则会污染协议 stdout。
 
-```json
-{
-  "transport": "http",
-  "url": "http://127.0.0.1:8000/mcp"
-}
-```
+### streamable_http
 
-`streamable_http` 会被规范化为 `http`。
+Runtime 连接 HTTP MCP endpoint，适合独立运行或远程部署的服务。
 
 ### sse
 
-兼容旧版 SSE MCP server。
+保留旧版 SSE 兼容，用于尚未迁移到 Streamable HTTP 的服务。
 
-典型配置：
+## 8. 动态工具发现
 
-```json
-{
-  "transport": "sse",
-  "url": "http://127.0.0.1:8000/sse"
-}
-```
+Agent 启动时对每个启用的 MCP server：
 
-SSE 已经偏旧，但保留支持有利于兼容已有 MCP server。
+1. 建立连接并初始化 session。
+2. 调用 `list_tools`。
+3. 将 schema 转为模型工具。
+4. 注册为 `mcp__<server>__<tool>`。
+5. 保存连接供后续调用复用。
 
-## 13. MCP 动态工具发现
+发现失败只记录到 `mcp_load_errors`，不会阻止 Agent 使用内置工具启动。
 
-MCP 工具加载流程是：
+## 9. MCP 连接生命周期
 
-```text
-读取 settings.json
-  -> 合并 mcp.servers
-  -> 为每个 server 建立 MCP session
-  -> session.list_tools()
-  -> 读取每个工具的 name / description / input_schema
-  -> 包装成 Codemate 工具
-  -> 合并进 tool registry
-```
-
-包装后的工具名规则是：
+MCP session、异步上下文管理器和底层 transport 必须始终运行在同一个长期事件循环和线程中。Runtime 使用专用后台 loop：
 
 ```text
-mcp__<server-name>__<tool-name>
+connect
+list_tools
+call_tool
+close
 ```
 
-例如：
+同步 runtime 通过 `asyncio.run_coroutine_threadsafe()` 把异步操作提交到该 loop。连接断开时按需重连，正常退出时由 `agent.close()` 统一关闭 session、transport 和事件循环。
 
-```text
-mcp__tavily-mcp__tavily_search
-```
+这避免了异步上下文在一个 task 中进入、却在另一个 task 中退出导致的 AnyIO cancel scope 错误。
 
-模型看到的是这个 wrapper name。真正执行时，Codemate 会根据 wrapper 找到：
+## 10. MCP 日志
 
-- 对应 MCP server。
-- 原始 MCP tool name。
-- 已连接的 MCP session。
+stdio server 的 stderr 由 runtime 接收。为了避免服务端启动提示反复刷终端：
 
-然后调用：
+- 默认写入日志文件。
+- 只有加载失败等必要错误进入用户界面。
+- stdout 严格保留给 MCP 协议。
 
-```text
-session.call_tool(original_tool_name, arguments)
-```
+## 11. MCP 权限
 
-MCP 返回结果后，再转换成普通文本 tool result 写回 history。
+MCP 工具能力由外部 server 定义，runtime 无法仅根据名称证明是否只读，因此默认采用保守策略：
 
-## 14. MCP 连接生命周期
+- MCP 工具标为较高风险。
+- 按审批策略决定 allow 或 ask。
+- 工具调用和结果写入 history、trace。
+- 配置中禁用的 server 不连接、不发现工具。
 
-MCP SDK 的 stdio/http/sse client 基于异步上下文管理器。连接创建、工具调用和关闭必须在稳定的事件循环中完成，否则容易出现 async context manager 在一个 loop/task 里进入、在另一个 loop/task 里退出的问题。
+Web 内置工具与 MCP 分开管理；Web 工具具有已知参数和行为边界，不需要套用所有 MCP 的未知能力策略。
 
-Codemate 的处理方式是：
+## 12. 设计难点
 
-- 为当前 agent 创建一个 MCP manager。
-- MCP manager 启动一个后台 asyncio event loop。
-- 所有 MCP 操作通过一个单 worker 队列串行提交到这个 loop。
-- 发现工具时连接 server 并复用 session。
-- 调用工具时优先复用已有 session。
-- 如果调用失败，关闭该 server 的旧连接，重连后重试一次。
-- agent close 时关闭所有 MCP session、transport 和后台 loop。
+### Skill 资源路径
 
-这样避免每次工具调用都重新连接，也避免异步资源跨 event loop 关闭导致的异常。
+`SKILL.md` 中的相对资源属于 Skill 包，而不是 workspace。工具结果显式返回绝对 root，让模型能够稳定定位配套脚本和参考文件。
 
-## 15. MCP 日志处理
+### Skill 与缓存
 
-stdio MCP server 的 stderr 常常会输出运行日志，例如：
+完整正文每轮重复注入会让缓存前缀在加载后永久变化。正文改为一次工具结果，并在 compact 后按需恢复，减少重复 token。
 
-```text
-Tavily MCP server running on stdio
-```
+### MCP 能力不可预测
 
-这些日志不是 MCP 协议内容，也不是 agent 的用户可见回答。如果直接继承终端 stderr，会污染交互界面。
+内置工具可以人工分类风险，MCP 工具来自外部服务。统一命名、保守审批和完整 trace 提供了可审计边界。
 
-因此 stdio transport 会把 server stderr 重定向到 `os.devnull`。真正的工具结果只来自 MCP 协议返回内容。
+### MCP 异步生命周期
 
-## 16. MCP 权限策略
+连接不能跨临时 event loop 使用。专用长期 loop 统一承担建立、调用、重连和关闭。
 
-MCP 工具默认比内置低风险工具更保守。
+## 13. 面试复述
 
-原因是：MCP 工具的能力来自外部 server，Codemate 不能仅凭名称判断它是否只读、是否访问网络、是否修改外部系统、是否读取本地敏感数据。
+Codemate 使用 Skill 扩展工作方法，使用 MCP 扩展外部工具。Skill 未调用时只展示 name 和 description；`skill_load` 返回完整正文和绝对 root，结果进入 history，compact 后仅恢复 recent history 缺失的最近三个 Skill。
 
-当前策略：
-
-- `ask`：MCP 默认需要询问。
-- `auto`：MCP 仍然需要询问。
-- `full`：MCP 自动放行。
-- `read_only`：MCP 直接拒绝。
-
-MCP 工具虽然进入统一 tool registry，但不会因为“看起来像工具”就继承内置工具的低风险判断。
-
-## 17. Skill 和 MCP 的关系
-
-Skill 和 MCP 可以配合，但职责不同。
-
-一个 skill 可以告诉模型：
-
-- 当前任务应该使用哪个 MCP 工具。
-- 使用某个 MCP 工具前应该准备什么参数。
-- MCP 返回结果应该如何解读。
-- 什么时候不应该调用 MCP。
-
-但 skill 本身不执行 MCP。真正执行仍然要走工具调用、权限 gate、审批、trace 和 history。
-
-这种分层可以避免 skill 绕过安全边界：skill 只是指导，MCP 才是外部动作。
-
-## 18. 设计难点
-
-### Skill 资源路径容易混淆
-
-模型看到 `scripts/run.py` 时，可能误以为是 workspace 下的脚本。
-
-解决方式是：active skill 在 working memory 中明确展示绝对 Root，并说明相对资源都在该 Root 下。
-
-### MCP 工具能力不可预测
-
-MCP 工具由外部 server 提供，Codemate 无法提前知道它的真实风险。
-
-解决方式是：动态发现 schema，但权限默认 ask；read_only 下拒绝；full 才自动通过。
-
-### MCP 异步生命周期容易出错
-
-如果每次调用都创建新 event loop，或者跨 loop 关闭 async context manager，stdio/http/sse client 都可能报错。
-
-解决方式是：MCP manager 使用后台长期 event loop 和单 worker 队列，保证连接、调用、关闭都在同一条异步执行链路中。
-
-## 19. 面试复述版本
-
-Codemate 的扩展能力分为 Skill 和 MCP 两类。Skill 解决“任务应该怎么做”，MCP 解决“外部工具怎么接入”。Skill 以 `SKILL.md` 形式放在项目级或用户级 skills 目录中，未加载时只把 name 和 description 展示给模型；模型判断相关后调用 `skill_load`，完整 skill 进入 working memory，并通过 skill root 定位 scripts、references、examples 等资源。任务切换到无关方向时再用 `skill_unload` 卸载，避免长期污染上下文。
-
-MCP 则从 settings 中读取 server 配置，支持 stdio、http/streamable_http 和旧版 sse。启动后连接 server，调用 `tools/list` 动态发现工具，再包装成 `mcp__server__tool` 形式合并到工具注册表。调用时根据 wrapper 找回原始 server 和 tool name，通过 MCP session 执行。为了避免重复连接和异步关闭问题，MCP 连接由后台长期 event loop 管理，调用失败时重连重试一次。
-
-二者都不会绕过 Codemate 的统一控制体系：Skill 进入 working memory，MCP 进入 tool registry；MCP 默认需要审批，trace/history 会记录加载、卸载和工具调用结果。
+MCP 支持 stdio、Streamable HTTP 和旧版 SSE。Agent 启动时连接服务并动态发现工具，后续复用同一 session；所有异步生命周期固定在专用后台事件循环中，退出时统一关闭。动态 MCP 工具采用保守审批并写入 trace，避免外部能力绕过 runtime 控制。

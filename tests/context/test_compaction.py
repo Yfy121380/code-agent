@@ -140,3 +140,137 @@ def test_ask_auto_compacts_before_model_request_when_budget_is_high(tmp_path, mo
     assert agent.model_client.tool_specs[0] == []
     assert agent.model_client.tool_specs[1]
     assert agent.session["history_summary"].startswith("## Working Directory")
+
+
+def test_compaction_restores_missing_skill_and_todo_context(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    agent.session["invoked_skills"] = [
+        {
+            "name": "backend",
+            "root": str(tmp_path / ".codemate" / "skills" / "backend"),
+            "content": "Follow the backend workflow.",
+        }
+    ]
+    agent.session["todos"] = [
+        {
+            "phase": "Implement compact restoration",
+            "status": "in_progress",
+            "tasks": [{"description": "Add tests", "status": "in_progress"}],
+        }
+    ]
+    add_plain_history(agent, 26)
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "ok"
+    assert [item["kind"] for item in agent.session["history"][:2]] == ["skill_context", "todo_context"]
+    assert "Follow the backend workflow." in agent.session["history"][0]["content"]
+    assert "Implement compact restoration" in agent.session["history"][1]["content"]
+
+
+def test_compaction_does_not_restore_todo_when_recent_write_has_current_plan(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    todos = [{"phase": "Run focused tests", "status": "in_progress", "tasks": []}]
+    agent.session["todos"] = todos
+    add_plain_history(agent, 8)
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_todo", "name": "todo_write", "args": {"todos": todos}}],
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": "call_todo",
+            "name": "todo_write",
+            "content": "todos updated: 1 phases. Continue working through the active todo plan.",
+        }
+    )
+    add_plain_history(agent, 18)
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "ok"
+    assert not any(item.get("kind") == "todo_context" for item in agent.session["history"])
+    assert any(
+        call.get("name") == "todo_write"
+        for item in agent.session["history"]
+        for call in item.get("tool_calls", [])
+    )
+
+
+def test_compaction_does_not_restore_todo_when_recent_list_has_current_plan(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    todos = [{"phase": "Review context state", "status": "in_progress", "tasks": []}]
+    agent.session["todos"] = todos
+    add_plain_history(agent, 8)
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_todo_list", "name": "todo_list", "args": {}}],
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": "call_todo_list",
+            "name": "todo_list",
+            "content": "Active todo plan:\n1. [in_progress] Review context state",
+        }
+    )
+    add_plain_history(agent, 18)
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "ok"
+    assert not any(item.get("kind") == "todo_context" for item in agent.session["history"])
+
+
+def test_compaction_does_not_restore_skill_when_recent_load_is_retained(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    agent.session["invoked_skills"] = [
+        {"name": "backend", "root": str(tmp_path / "skill"), "content": "Follow the backend workflow."}
+    ]
+    add_plain_history(agent, 8)
+    agent.record(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_skill", "name": "skill_load", "args": {"name": "backend"}}],
+        }
+    )
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": "call_skill",
+            "name": "skill_load",
+            "content": (
+                f"Skill loaded: backend\nRoot: {tmp_path / 'skill'}\n\n"
+                "Instructions:\nFollow the backend workflow."
+            ),
+        }
+    )
+    add_plain_history(agent, 18)
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "ok"
+    assert not any(item.get("kind") == "skill_context" for item in agent.session["history"])
+
+
+def test_compaction_replaces_old_restoration_messages_instead_of_accumulating(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY), ModelResponse.final(SUMMARY)])
+    agent.session["invoked_skills"] = [
+        {"name": "backend", "root": str(tmp_path / "skill"), "content": "Keep this instruction."}
+    ]
+    add_plain_history(agent, 26)
+    assert agent.compact_history(reason="manual")["status"] == "ok"
+    add_plain_history(agent, 22)
+
+    assert agent.compact_history(reason="manual")["status"] == "ok"
+
+    restored = [item for item in agent.session["history"] if item.get("kind") == "skill_context"]
+    assert len(restored) == 1

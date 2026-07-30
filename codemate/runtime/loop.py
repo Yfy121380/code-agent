@@ -119,9 +119,7 @@ class RuntimeLoopMixin:
         # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
         run_started_at = time.monotonic()
         self._current_conversation_id = self.new_conversation_id()
-        self.memory.set_task_summary(user_message)
         self.record({"role": "user", "content": user_message, "created_at": now()})
-        self.expire_process_notes()
         task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
         self.current_task_state = task_state
         self.current_run_dir = self.run_store.start_run(task_state)

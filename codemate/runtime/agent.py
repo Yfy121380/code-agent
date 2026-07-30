@@ -1,7 +1,7 @@
 """Agent 运行时核心逻辑。
 
 CodeMate 是包在模型外面的控制循环：负责组 prompt、解析模型输出、
-校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
+校验并执行工具、写 trace、维护会话状态，以及在合适的时候停下来。
 现在主要负责状态管理，调用循环见loop.py、工具在tool_execution.py、
 审批在approvals.py、长期记忆整理在dream.py。
 """
@@ -42,11 +42,9 @@ REDACTED_VALUE = "<redacted>"
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
 DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
 MAX_SKILL_DESCRIPTION_CHARS = 250
-MAX_ACTIVE_SKILLS = 3
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SESSION_TITLE_MAX_CHARS = 20
 DEFAULT_FEATURE_FLAGS = {
-    "memory": True,
     "relevant_memory": True,
     "long_term_memory": True,
     "memory_candidates": True,
@@ -105,6 +103,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # session、memory、skills、settings 都从这里获得统一绝对路径。
         self.paths = ensure_codemate_layout(self.root)
         self.settings = load_codemate_settings(self.paths)
+        # Long-term memory has its own on-disk lifecycle; initialize its files
+        # directly instead of relying on the removed short-memory facade.
+        memorylib.ensure_long_term_memory(self.root)
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -137,10 +138,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "workspace_root": workspace.repo_root,
             "history": [],
             "history_summary": "",
-            "memory": memorylib.default_memory_state(), # 运行时的结构化笔记
             "memory_candidate_extract": memorylib.default_candidate_extract_state(),
+            "read_files": {},
             "todos": [],
-            "active_skills": [],
+            "invoked_skills": [],
             "temporary_permissions": default_temporary_permissions(),
         }
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
@@ -161,12 +162,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             self.settings.project,
             self.temporary_permission_settings,
         )
-        # 负责管理当前会话的短期工作记忆、文件摘要、长期记忆并进行相关的笔记召回，为session的一部分
-        self.memory = memorylib.LayeredMemory(
-            self.session.setdefault("memory", memorylib.default_memory_state()),
-            workspace_root=self.root,
-        )
-        self.session["memory"] = self.memory.to_dict()
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
         # 可复用的前缀提示词在启动时构建一次，避免运行中的仓库变化破坏缓存前缀。
@@ -174,7 +169,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.prefix = self.prefix_state.text
         # 上下文管理器，组装上下文，进行上下文压缩
         self.context_manager = ContextManager(self)
-        self.invalidate_stale_memory()
         # 保存当前session状态文件
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
@@ -217,12 +211,12 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("title", "")
         self.session.setdefault("title_slug", "")
         self.session.setdefault("updated_at", self.session.get("created_at", now()))
-        self.session.setdefault("memory", memorylib.default_memory_state())
         self.session["memory_candidate_extract"] = memorylib.normalize_candidate_extract_state(
             self.session.get("memory_candidate_extract", {})
         )
+        self.session.setdefault("read_files", {})
         self.session.setdefault("todos", [])
-        self.session.setdefault("active_skills", [])
+        self.session.setdefault("invoked_skills", [])
         temporary_permissions = self.session.setdefault("temporary_permissions", default_temporary_permissions())
         permissions = temporary_permissions.setdefault("permissions", {})
         for access in ("read", "write"):
@@ -232,22 +226,14 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._ensure_history_message_ids()
 
     def _ensure_history_message_ids(self):
-        # 旧 session 可能没有 message id 和 conversation_id。
-        # 这里按 user 消息切分历史对话，补齐后候选提取和 compact 都能稳定定位。
+        # 持久化消息必须有稳定 id；按 user 消息切分 conversation，
+        # 让候选提取和 compact 可以用会话边界而不是消息下标定位。
         current_conversation_id = ""
         for item in self.session.get("history", []) or []:
             item.setdefault("id", f"msg_{uuid.uuid4().hex[:12]}")
             if item.get("role") == "user" or not current_conversation_id:
                 current_conversation_id = str(item.get("conversation_id", "") or f"turn_{uuid.uuid4().hex[:12]}")
             item.setdefault("conversation_id", current_conversation_id)
-
-    def invalidate_stale_memory(self):
-        invalidated = self.memory.invalidate_stale_file_summaries()
-        self.session["memory"] = self.memory.to_dict()
-        return invalidated
-
-    def current_memory_turn(self):
-        return sum(1 for item in self.session.get("history", []) if item.get("role") == "user")
 
     @staticmethod
     def remember(bucket, item, limit):
@@ -313,13 +299,13 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - To edit an existing file, use patch_file after read_file.
             - To create, replace, or append to a file, use write_file.
             - Use todo_write for complex multi-step work, explicit task tracking requests, and multi-part user requests.
-            - When current_todos appears in Working memory, follow those items until completed or no longer relevant.
+            - Keep the active todo plan accurate as work progresses.
+            - Use todo_list when you need to review the current plan before continuing.
+            - Do not call todo_list repeatedly when the current plan is already known.
             - Use skill_load when an available skill clearly matches the current task.
-            - Do not load a skill that is already active.
-            - Loaded skills appear in Working memory and remain active until unloaded.
-            - Follow active skill instructions while they are relevant.
-            - When the user switches to an unrelated task, unload active skills that no longer apply before proceeding.
-            - Skill-relative resources such as scripts/, references/, examples/, and templates/ are located under the skill root shown in Working memory.
+            - skill_load returns the skill's complete instructions and absolute root. Follow those instructions while completing the task.
+            - Skill-relative resources such as scripts/, references/, examples/, and templates/ are located under the root returned by skill_load.
+            - Do not load the same skill repeatedly when its instructions are already available.
             - Use web_search for current external sources, recent information, official documentation, or when you do not know which URLs to read.
             - Use web_extract to read specific URLs after search results or when the user provides URLs.
             - Use web_research only for broad multi-source research or explicit research requests; prefer web_search and web_extract for transparent source gathering.
@@ -518,16 +504,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             lines.append(f"- {skill['name']}: {skill['description']}")
         return "\n".join(lines)
 
-    def active_skill_names(self):
-        return {str(skill.get("name", "")).strip() for skill in self.session.get("active_skills", [])}
+    def invoked_skill_names(self):
+        return {str(skill.get("name", "")).strip() for skill in self.session.get("invoked_skills", [])}
 
     def load_skill(self, name):
         name = self.normalize_skill_name(name)
-        if name in self.active_skill_names():
-            raise ValueError(f"skill already active: {name}")
-        active_skills = self.session.setdefault("active_skills", [])
-        if len(active_skills) >= MAX_ACTIVE_SKILLS:
-            raise ValueError(f"at most {MAX_ACTIVE_SKILLS} skills may be active")
         available = {skill["name"]: skill for skill in self.available_skills()}
         skill_info = available.get(name)
         if skill_info is None:
@@ -562,58 +543,27 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "content": content,
             "loaded_at": now(),
         }
-        active_skills.append(skill)
-        self.session["active_skills"] = active_skills
+        # Keep only the three most recently invoked skills. Their full instructions
+        # are restored after history compaction when no recent skill_load remains.
+        invoked_skills = [
+            item
+            for item in self.session.setdefault("invoked_skills", [])
+            if str(item.get("name", "")).strip() != name
+        ]
+        invoked_skills.append(skill)
+        self.session["invoked_skills"] = invoked_skills[-toolkit.MAX_INVOKED_SKILLS:]
         return skill
 
     def unload_skill(self, name, reason=""):
         name = self.normalize_skill_name(name)
-        active_skills = self.session.setdefault("active_skills", [])
-        for index, skill in enumerate(active_skills):
+        invoked_skills = self.session.setdefault("invoked_skills", [])
+        for index, skill in enumerate(invoked_skills):
             if str(skill.get("name", "")).strip() == name:
-                removed = active_skills.pop(index)
-                self.session["active_skills"] = active_skills
+                removed = invoked_skills.pop(index)
+                self.session["invoked_skills"] = invoked_skills
                 removed["reason"] = str(reason or "").strip()
                 return removed
-        raise ValueError(f"skill is not active: {name}")
-
-    def memory_text(self):
-        lines = self.memory.render_memory_text().splitlines()
-        active_skills = self.session.get("active_skills") or []
-        if active_skills:
-            lines.append("- active_skills:")
-            for skill in active_skills:
-                name = str(skill.get("name", "")).strip()
-                root = str(skill.get("root", "")).strip()
-                content = str(skill.get("content", "")).strip()
-                if not name:
-                    continue
-                lines.append(f"  - {name}")
-                if root:
-                    lines.append(f"    Root: {root}")
-                    lines.append("    Skill-relative resources such as scripts/, references/, examples/, and templates/ are under this root.")
-                if content:
-                    lines.append("    Instructions:")
-                    for content_line in content.splitlines():
-                        lines.append(f"    {content_line}")
-        else:
-            lines.append("- active_skills: -")
-        todos = self.session.get("todos") or []
-        if todos:
-            lines.append("- current_todos: follow these phases and tasks until completed")
-            for index, item in enumerate(todos, 1):
-                phase = str(item.get("phase", "")).strip()
-                status = str(item.get("status", "")).strip()
-                if phase and status:
-                    lines.append(f"  {index}. [{status}] {phase}")
-                for task in item.get("tasks") or []:
-                    description = str(task.get("description", "")).strip()
-                    task_status = str(task.get("status", "")).strip()
-                    if description and task_status:
-                        lines.append(f"     - [{task_status}] {description}")
-        else:
-            lines.append("- current_todos: -")
-        return "\n".join(lines)
+        raise ValueError(f"skill was not invoked: {name}")
 
     def local_now(self):
         try:
@@ -633,9 +583,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - memory_root: {memorylib.memory_root(self.root)}
             """
         ).strip()
-
-    def prompt_memory_text(self):
-        return "\n\n".join([self.runtime_context_text(), self.memory_text()])
 
     def remember_long_term(self, text):
         return memorylib.append_manual_candidate(self.root, text)
@@ -891,7 +838,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         )
 
     def _build_messages_and_metadata(self, user_message):
-        self.invalidate_stale_memory()
         message_build = self.context_manager.build_messages(user_message)
         metadata = dict(message_build.metadata)
         sections = metadata.get("sections", {})
@@ -900,10 +846,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 "prefix_chars": sections.get("prefix", {}).get("rendered_chars", len(self.prefix)),
                 "workspace_chars": len(self.workspace.text()),
                 "skills_chars": sections.get("skills", {}).get("rendered_chars", 0),
-                "memory_chars": sections.get("memory", {}).get("rendered_chars", 0),
                 "runtime_context_chars": (
                     sections.get("skills", {}).get("rendered_chars", 0)
-                    + sections.get("memory", {}).get("rendered_chars", 0)
+                    + sections.get("runtime_context", {}).get("rendered_chars", 0)
                     + sections.get("relevant_memory", {}).get("rendered_chars", 0)
                 ),
                 "history_summary_chars": sections.get("history_summary", {}).get("rendered_chars", 0),
@@ -936,70 +881,13 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.run_store.append_trace(task_state, payload)
         return payload
 
-    def update_memory_after_tool(self, name, args, result):
-        """把少量高价值工具结果沉淀到 working memory。
-
-        为什么存在：
-        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进了
-        `history`，这里只挑少量“下一轮大概率还会用到”的事实做提纯，
-        例如最近读写过哪些文件、某个文件读出来的短摘要。
-
-        输入 / 输出：
-        - 输入：工具名 `name`、参数 `args`、执行结果 `result`
-        - 输出：无显式返回值，副作用是更新 `self.memory`
-
-        在 agent 链路里的位置：
-        它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
-        也就是说：工具结果先进入完整历史，再由这个函数择优沉淀成轻量记忆。
-        """
-        if not self.feature_enabled("memory"):
-            return
-        path = args.get("path")
-        if not path:
-            return
-
-        canonical_path = self.memory.canonical_path(path)
-        # 不是所有工具结果都进入工作记忆。
-        # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
-        if name in {"read_file", "write_file", "patch_file"}:
-            # 最近访问过的文件
-            self.memory.remember_file(canonical_path)
-        if name == "read_file":
-            # 读文件之后保存摘要，前三个非空行最多 180 字符的结果
-            summary = memorylib.summarize_read_result(result)
-            self.memory.set_file_summary(canonical_path, summary)
-            # 改动过的文件去除摘要
-        elif name in {"write_file", "patch_file"}:
-            self.memory.invalidate_file_summary(canonical_path)
-
-    def note_tool(self, name, args, result):
-        self.update_memory_after_tool(name, args, result)
-
-    def expire_process_notes(self):
-        if not self.feature_enabled("memory"):
-            return
-        self.memory.expire_process_notes(self.current_memory_turn())
-        self.session["memory"] = self.memory.to_dict()
-
-    def record_process_note_for_tool(self, name, args, metadata, message):
-        if not self.feature_enabled("memory"):
-            return
-        self.memory.record_process_note(name, args, metadata, message, self.current_memory_turn())
-        self.session["memory"] = self.memory.to_dict()
-
-    def resolve_process_notes_after_success(self, name, args):
-        if not self.feature_enabled("memory"):
-            return
-        self.memory.resolve_process_notes_after_success(name, args, self.current_memory_turn())
-        self.session["memory"] = self.memory.to_dict()
-
     def reset(self):
         self.session["history"] = []
-        self.session["memory"].clear()
-        self.session["memory"].update(memorylib.default_memory_state())
-        self.session["active_skills"] = []
+        self.session["history_summary"] = ""
+        self.session["read_files"] = {}
+        self.session["todos"] = []
+        self.session["invoked_skills"] = []
         self.session["updated_at"] = now()
-        self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
         self.session_store.save(self.session)
 
     def close(self):

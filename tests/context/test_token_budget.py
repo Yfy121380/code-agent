@@ -42,6 +42,8 @@ def test_budget_report_shows_section_chars_before_context_budget(tmp_path, monke
     assert report.index("Sections by chars:") < report.index("Context budget:")
     assert report.index("Tool schemas:") < report.index("Context budget:")
     assert "- total:" in report
+    assert "- runtime context:" in report
+    assert "working memory" not in report
     assert "- tools count:" in report
     assert "- tool schemas:" in report
     assert "- Model: openai:gpt-5.4" in report

@@ -32,7 +32,7 @@ class DreamMixin:
         """
         self.relevant_long_term_memory = []
         self.long_term_memory_status = "disabled"
-        if not (self.feature_enabled("memory") and self.feature_enabled("relevant_memory") and self.feature_enabled("long_term_memory")):
+        if not (self.feature_enabled("relevant_memory") and self.feature_enabled("long_term_memory")):
             return
         if self.runtime_mode != "agent":
             self.long_term_memory_status = "skipped_runtime_mode"
@@ -91,11 +91,7 @@ class DreamMixin:
         候选提取以完整 conversation 为单位。普通维护可以后台执行；history compact
         前会同步执行一次，避免旧消息被压缩后还没进入候选池。
         """
-        if not (
-            self.feature_enabled("memory")
-            and self.feature_enabled("long_term_memory")
-            and self.feature_enabled("memory_candidates")
-        ):
+        if not (self.feature_enabled("long_term_memory") and self.feature_enabled("memory_candidates")):
             return {"status": "disabled", "reason": "feature_disabled"}
         if self.runtime_mode != "agent":
             return {"status": "skipped", "reason": "runtime_mode"}
@@ -229,8 +225,10 @@ class DreamMixin:
                     "created_at": now(),
                     "workspace_root": str(self.root),
                     "history": [],
-                    "memory": memorylib.default_memory_state(),
+                    "history_summary": "",
+                    "read_files": {},
                     "todos": [],
+                    "invoked_skills": [],
                     "runtime_mode": "dream",
                     "reason": str(reason),
                 }
@@ -252,7 +250,15 @@ class DreamMixin:
                         "relevant_memory": False,
                         "memory_dream": False,
                     },
-                    allowed_tools={"list_files", "read_file", "grep", "write_file", "patch_file", "todo_write"},
+                    allowed_tools={
+                        "list_files",
+                        "read_file",
+                        "grep",
+                        "write_file",
+                        "patch_file",
+                        "todo_write",
+                        "todo_list",
+                    },
                     memory_scope_only=True,
                     runtime_mode="dream",
                     timezone_name=self.timezone_name,

@@ -1,7 +1,7 @@
 """上下文组装测试。
 
 覆盖模块：context.manager、context.history、长期记忆注入。
-重点边界：section 顺序、history summary 位置、skill/working memory 渲染、旧读类工具结果清理、tool group 保持完整。
+重点边界：section 顺序、runtime context、长期记忆、旧读类工具结果清理、tool group 保持完整。
 """
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
@@ -52,14 +52,21 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
 
     prompt, metadata = ContextManager(agent).build("Where is the deploy key?")
 
-    assert prompt.index("You are codemate") < prompt.index("Working memory:")
     assert prompt.index("You are codemate") < prompt.index("Available skills:")
-    assert prompt.index("Available skills:") < prompt.index("Working memory:")
-    assert prompt.index("Working memory:") < prompt.index("Relevant memory:")
+    assert prompt.index("Available skills:") < prompt.index("Runtime context:")
+    assert prompt.index("Runtime context:") < prompt.index("Relevant memory:")
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["section_order"] == ["prefix", "skills", "memory", "relevant_memory", "history_summary", "history", "current_request"]
+    assert metadata["section_order"] == [
+        "prefix",
+        "skills",
+        "runtime_context",
+        "relevant_memory",
+        "history_summary",
+        "history",
+        "current_request",
+    ]
     assert metadata["sections"]["history_summary"]["rendered_chars"] == 0
 
 
@@ -81,7 +88,7 @@ def test_context_manager_injects_history_summary_before_recent_history(tmp_path)
 def test_context_manager_no_longer_reduces_sections_by_legacy_budget(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
-    agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
+    agent.runtime_context_text = lambda: "RUNTIME " + ("B" * 600)
     add_durable_notes(
         agent,
         [
@@ -100,7 +107,7 @@ def test_context_manager_no_longer_reduces_sections_by_legacy_budget(tmp_path):
 
     prompt, metadata = manager.build("keep this request verbatim")
 
-    for section in ("prefix", "skills", "memory", "relevant_memory", "history"):
+    for section in ("prefix", "skills", "runtime_context", "relevant_memory", "history"):
         assert metadata["sections"][section]["budget_chars"] is None
 
     assert "RECENT-CONTEXT" in prompt
@@ -147,7 +154,7 @@ def test_context_manager_renders_available_skills(tmp_path):
 
     prompt, metadata = ContextManager(agent).build("inspect skills")
 
-    skills_section = prompt.split("Available skills:\n", 1)[1].split("\n\nWorking memory:", 1)[0]
+    skills_section = prompt.split("Available skills:\n", 1)[1].split("\n\nRuntime context:", 1)[0]
     assert "- backend:" in skills_section or "- backend" in skills_section
     assert "- paper:" in skills_section or "- paper" in skills_section
     assert metadata["skills"]["selected_count"] == 2
@@ -171,7 +178,7 @@ def test_available_skills_require_frontmatter_name_matching_directory(tmp_path):
 def test_context_manager_preserves_current_request_in_text_prompt(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.prefix = "PREFIX " + ("A" * 600)
-    agent.memory.render_memory_text = lambda: "MEMORY " + ("B" * 600)
+    agent.runtime_context_text = lambda: "RUNTIME " + ("B" * 600)
     agent.relevant_long_term_memory = [
         {"source": "project_context", "text": f"{i} " + ("C" * 220), "kind": "long_term"}
         for i in range(5)
@@ -187,7 +194,7 @@ def test_context_manager_preserves_current_request_in_text_prompt(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
-def test_context_manager_renders_current_todos_in_working_memory(tmp_path):
+def test_context_manager_keeps_runtime_sections_in_one_user_message_without_todos(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.session["todos"] = [
         {
@@ -203,24 +210,14 @@ def test_context_manager_renders_current_todos_in_working_memory(tmp_path):
         {"phase": "Run tests", "status": "pending", "tasks": []},
     ]
 
-    prompt, _metadata = ContextManager(agent).build("continue")
     message_build = ContextManager(agent).build_messages("continue")
+    runtime_message = message_build.messages[0]["content"]
 
-    assert "- current_todos: follow these phases and tasks until completed" in prompt
-    assert "  1. [completed] Inspect current implementation" in prompt
-    assert "     - [completed] Read tool files" in prompt
-    assert "  2. [in_progress] Add todo_write tool" in prompt
-    assert "     - [in_progress] Update handler" in prompt
-    assert "  3. [pending] Run tests" in prompt
-    assert "current_todos: follow these phases and tasks until completed" in message_build.messages[0]["content"]
-
-
-def test_context_manager_renders_empty_current_todos(tmp_path):
-    agent = build_agent(tmp_path, [])
-
-    prompt, _metadata = ContextManager(agent).build("continue")
-
-    assert "- current_todos: -" in prompt
+    assert "Available skills:" in runtime_message
+    assert "Runtime context:" in runtime_message
+    assert "Relevant memory:" in runtime_message
+    assert "Inspect current implementation" not in runtime_message
+    assert "current_todos" not in runtime_message
 
 
 def test_build_messages_does_not_append_current_user_after_tool_result(tmp_path):
@@ -256,8 +253,6 @@ def test_context_manager_collapses_older_duplicate_reads_to_latest_structured_gr
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\nbeta\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
-    agent.memory.set_file_summary("sample.txt", "alpha | beta")
-    agent.memory.remember_file("sample.txt")
 
     for index, created_at in enumerate(("2026-04-07T09:00:00+00:00", "2026-04-07T09:01:00+00:00")):
         call_id = f"call_read_{index}"

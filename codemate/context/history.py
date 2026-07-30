@@ -11,6 +11,7 @@ import json
 from ..tools.constants import WEB_TOOL_NAMES
 from ..workspace import clip
 from .types import (
+    INTERNAL_CONTEXT_MESSAGE_KINDS,
     MAX_RECENT_OBSERVATION_TOOL_RESULTS,
     OLD_TOOL_RESULT_CLEARED,
     RECENT_HISTORY_MIN_CHARS,
@@ -100,7 +101,12 @@ class HistoryContextRenderer:
         """
         selected_reversed = []
         message_count = 0
-        for group in reversed(self.history_groups(self.history_for_request())):
+        retrieval_history = [
+            item
+            for item in self.history_for_request()
+            if str(item.get("kind", "")) not in INTERNAL_CONTEXT_MESSAGE_KINDS
+        ]
+        for group in reversed(self.history_groups(retrieval_history)):
             messages = self.group_messages(group)
             if not messages:
                 continue

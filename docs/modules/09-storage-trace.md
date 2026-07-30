@@ -99,9 +99,9 @@ title_slug
 workspace_root
 history
 history_summary
-memory
+read_files
 todos
-active_skills
+invoked_skills
 temporary_permissions
 ```
 
@@ -113,32 +113,27 @@ temporary_permissions
 - `workspace_root`：记录会话所属 workspace。
 - `history`：当前会话的消息历史，包括 user、assistant、tool。
 - `history_summary`：history compact 后保存的旧历史摘要。
-- `memory`：工作记忆状态，包括任务摘要、最近文件、文件摘要和过程笔记。
+- `read_files`：已读取文件的真实绝对路径以及 `mtime_ns + size` 版本指纹。
 - `todos`：当前任务计划。
-- `active_skills`：当前加载的 skill 内容。
+- `invoked_skills`：最近调用的三个 skill，用于 compact 后恢复完整指令。
 - `temporary_permissions`：本会话临时允许的读写目录。
 
 这里的关键点是：session 保存的是“继续工作所需的信息”。trace 里可以有大量细节，但恢复会话时不需要把 trace 全部读回来。
 
-## 5. Session 字段补齐
+## 5. Session 结构初始化
 
-恢复旧 session 时，Codemate 会补齐缺失字段。这样即使 session 是旧版本创建的，也能在当前 runtime 中继续使用。
-
-会补齐的字段包括：
+创建 session 时会初始化：
 
 - `history`
 - `history_summary`
 - `title`
 - `title_slug`
 - `updated_at`
-- `memory`
+- `read_files`
 - `todos`
-- `active_skills`
+- `invoked_skills`
 - `temporary_permissions`
 
-这一步很重要。否则代码每次读 session 字段都要做大量兼容判断，主流程会变得混乱。
-
-不过这个补齐只是结构兜底，不是旧业务逻辑兼容。已经废弃的旧字段不会继续参与运行。
 
 ## 6. Session 保存时机
 
@@ -364,7 +359,6 @@ tool_executed
 history_compact
 history_compact_failed
 skill_loaded
-skill_unloaded
 dream_scheduled
 run_finished
 ```
@@ -383,7 +377,7 @@ run_finished
 
 `history_compact` 和 `history_compact_failed` 记录 history 压缩结果。
 
-`skill_loaded` 和 `skill_unloaded` 记录 skill 生命周期变化。
+`skill_loaded` 记录 Skill 指令进入 history。
 
 `dream_scheduled` 记录自动 dream 被调度的原因。
 
@@ -477,7 +471,7 @@ Delegate 和 dream 都会产生自己的 session 和 run。如果它们出现在
 
 ## 20. 面试复述版本
 
-Codemate 的持久化层分成会话状态和运行记录两部分。会话状态保存在 `session.json`，用于恢复同一会话，里面包含 history、history summary、工作记忆、todo、active skills、临时权限和标题等信息。运行记录保存在 session 下的 runs 目录，每次用户请求对应一个 run，里面有 `task_state.json` 和 `trace.jsonl`。
+Codemate 的持久化层分成会话状态和运行记录两部分。会话状态保存在 `session.json`，用于恢复同一会话，里面包含 history、history summary、文件版本状态、Todo、最近调用的 Skills、临时权限和标题等信息。运行记录保存在 session 下的 runs 目录，每次用户请求对应一个 run，里面有 `task_state.json` 和 `trace.jsonl`。
 
 `task_state.json` 是一次 ask 的状态快照，记录当前 status、模型调用次数、工具步数、最后工具、停止原因和最终回答。它会在运行过程中不断原子写入，方便中途观察或异常后恢复判断。`trace.jsonl` 是事件时间线，记录 run_started、prompt_build、model_parsed、tool_executed、history_compact、run_finished 等事件，用来复盘模型看到了什么、调用了什么工具、工具怎么返回、为什么结束。
 

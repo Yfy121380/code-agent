@@ -31,7 +31,6 @@ SLASH_COMMANDS = [
     ("/model deepseek-v4-pro", "/model deepseek-v4-pro", "Use deepseek-v4-pro."),
     ("/budget", "/budget", "Show context section sizes and token budget usage."),
     ("/compact", "/compact", "Compact older conversation history now."),
-    ("/memory", "/memory", "Show the agent's distilled working memory."),
     ("/remember ", "/remember <text>", "Add a high-confidence memory candidate."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
     ("/dream --background", "/dream --background", "Run dream memory consolidation in background."),
@@ -39,7 +38,7 @@ SLASH_COMMANDS = [
     ("/session list", "/session list", "List sessions for this project."),
     ("/session rename ", "/session rename <title>", "Rename the current session."),
     ("/session resume", "/session resume", "Choose and resume another session."),
-    ("/reset", "/reset", "Clear the current session history and memory."),
+    ("/reset", "/reset", "Clear the current conversation and task state."),
     ("/exit", "/exit", "Exit the agent."),
 ]
 
@@ -55,7 +54,6 @@ HELP_DETAILS = textwrap.dedent(
     /model <name>        Set model from the current provider's allowed model list.
     /budget              Show context section sizes and token budget usage.
     /compact             Compact older conversation history now.
-    /memory              Show the agent's distilled working memory.
     /remember <text>     Add a high-confidence memory candidate.
     /dream               Run dream memory consolidation in foreground.
     /dream --background  Run dream memory consolidation in background.
@@ -63,7 +61,7 @@ HELP_DETAILS = textwrap.dedent(
     /session list        List sessions for this project.
     /session rename      Rename the current session.
     /session resume      Choose and resume another session.
-    /reset               Clear the current session history and memory.
+    /reset               Clear the current conversation and task state.
     /exit                Exit the agent.
     """
 ).strip()

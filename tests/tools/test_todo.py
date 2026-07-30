@@ -1,6 +1,6 @@
-"""todo_write 工具测试。
+"""Todo 工具测试。
 
-覆盖模块：todo_write schema/状态机/session 更新。
+覆盖模块：todo_write/todo_list schema、状态机和计划读取。
 重点边界：状态枚举、单 in_progress 限制、空内容、read_only 允许、完成后清空。
 """
 
@@ -152,3 +152,38 @@ def test_todo_write_empty_or_all_completed_clears_session(tmp_path):
     assert cleared == "todos updated: todo list cleared."
     assert "all phases completed; todo list cleared" in completed
     assert agent.session["todos"] == []
+
+
+def test_todo_list_returns_complete_plan_without_modifying_it(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    todos = [
+        {
+            "phase": "Inspect implementation",
+            "status": "in_progress",
+            "tasks": [
+                {"description": "Read context code", "status": "completed"},
+                {"description": "Review compact flow", "status": "in_progress"},
+            ],
+        },
+        {"phase": "Run tests", "status": "pending", "tasks": []},
+    ]
+    agent.session["todos"] = todos
+
+    result = agent.run_tool("todo_list", {})
+
+    assert "Active todo plan:" in result
+    assert "1. [in_progress] Inspect implementation" in result
+    assert "   - [completed] Read context code" in result
+    assert "2. [pending] Run tests" in result
+    assert agent.session["todos"] == todos
+    assert agent._last_tool_result_metadata["read_only"] is True
+
+
+def test_todo_list_returns_empty_state_and_rejects_arguments(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    empty = agent.run_tool("todo_list", {})
+    invalid = agent.run_tool("todo_list", {"unexpected": True})
+
+    assert empty == "No active todo plan."
+    assert "todo_list does not accept arguments" in invalid

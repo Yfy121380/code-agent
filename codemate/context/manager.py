@@ -44,27 +44,22 @@ class ContextManager:
         return MessageBuild(system=system, messages=messages, metadata=metadata)
 
     def _render_sections(self, user_message):
-        # 统一渲染上下文各层。prefix 作为 system，skills/memory/relevant_memory
+        # 统一渲染上下文各层。prefix 作为 system，skills/runtime/relevant_memory
         # 作为 runtime context，history_summary 和 history 保持独立消息顺序。
-        memory_enabled = True
         relevant_memory_enabled = True
         if hasattr(self.agent, "feature_enabled"):
-            memory_enabled = self.agent.feature_enabled("memory")
             relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
 
-        memory_text = "Working memory:\n- disabled"
-        if memory_enabled:
-            if hasattr(self.agent, "prompt_memory_text"):
-                memory_text = str(self.agent.prompt_memory_text())
-            else:
-                memory_text = str(self.agent.memory_text())
+        runtime_context_text = ""
+        if hasattr(self.agent, "runtime_context_text"):
+            runtime_context_text = str(self.agent.runtime_context_text())
 
         skills_text = "Available skills:\n- none"
         if hasattr(self.agent, "available_skills_text"):
             skills_text = str(self.agent.available_skills_text())
 
         selected_notes = []
-        if memory_enabled and relevant_memory_enabled:
+        if relevant_memory_enabled:
             selected_notes = list(getattr(self.agent, "relevant_long_term_memory", []) or [])[:RELEVANT_MEMORY_LIMIT]
 
         relevant_raw, relevant_details = self._format_relevant_memory(selected_notes)
@@ -73,7 +68,12 @@ class ContextManager:
         rendered = {
             "prefix": SectionRender(raw=str(getattr(self.agent, "prefix", "")), budget=0, rendered=str(getattr(self.agent, "prefix", "")), details={}),
             "skills": SectionRender(raw=skills_text, budget=0, rendered=skills_text, details=self._skills_details(skills_text)),
-            "memory": SectionRender(raw=memory_text, budget=0, rendered=memory_text, details={}),
+            "runtime_context": SectionRender(
+                raw=runtime_context_text,
+                budget=0,
+                rendered=runtime_context_text,
+                details={},
+            ),
             "relevant_memory": SectionRender(raw=relevant_raw, budget=0, rendered=relevant_raw, details=relevant_details),
             HISTORY_SUMMARY_SECTION: SectionRender(raw=history_summary_text, budget=0, rendered=history_summary_text, details={"has_summary": bool(history_summary_text.strip())}),
             "history": history_render,
@@ -151,7 +151,7 @@ class ContextManager:
             [
                 rendered["prefix"].rendered,
                 rendered["skills"].rendered,
-                rendered["memory"].rendered,
+                rendered["runtime_context"].rendered,
                 rendered["relevant_memory"].rendered,
                 rendered[HISTORY_SUMMARY_SECTION].rendered,
                 rendered["history"].rendered,
@@ -164,7 +164,7 @@ class ContextManager:
             [
                 "This message is runtime context, not a new user request. Use it as background.",
                 rendered["skills"].rendered,
-                rendered["memory"].rendered,
+                rendered["runtime_context"].rendered,
                 rendered["relevant_memory"].rendered,
             ]
         ).strip()

@@ -10,9 +10,9 @@ import re
 from collections import OrderedDict
 
 from ..workspace import clip, now
+from ..context.types import INTERNAL_CONTEXT_MESSAGE_KINDS
 from .constants import (
     MEMORY_CANDIDATE_EXTRACT_INTERVAL_TURNS,
-    MEMORY_CANDIDATE_EXTRACT_MAX_RETRIES,
     MEMORY_CANDIDATE_EXTRACT_MIN_CHARS,
     MEMORY_CANDIDATE_MAX_EVIDENCE_CHARS,
     MEMORY_CANDIDATE_MAX_ITEMS,
@@ -357,7 +357,11 @@ def conversations_since_checkpoint(session, include_incomplete=False):
     每轮 ask 写入的 user、assistant、tool 消息共享同一个 conversation_id，
     候选提取只处理已结束的完整对话，避免把当前半截任务写入候选池。
     """
-    history = list((session or {}).get("history", []) or [])
+    history = [
+        message
+        for message in ((session or {}).get("history", []) or [])
+        if str(message.get("kind", "")) not in INTERNAL_CONTEXT_MESSAGE_KINDS
+    ]
     state = normalize_candidate_extract_state((session or {}).get("memory_candidate_extract", {}))
     checkpoint = state["last_extracted_conversation_id"]
 
@@ -553,6 +557,8 @@ def _normalize_candidates(raw_items):
 def _messages_for_model(messages):
     result = []
     for item in messages or []:
+        if str(item.get("kind", "")) in INTERNAL_CONTEXT_MESSAGE_KINDS:
+            continue
         role = item.get("role", "user")
         if role == "tool":
             result.append({"role": "user", "content": f"[tool:{item.get('name', '')}] {clip(item.get('content', ''), 1200)}"})

@@ -8,13 +8,12 @@ import textwrap
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .. import memory as memorylib
 from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
 from .constants import BINARY_SNIFF_BYTES, LIST_FILE_LINE_COUNT_MAX_BYTES, TODO_STATUSES
 from .images import image_media_type_for_file, path_has_image_extension, prepare_image_read_result, sniff_image_media_type
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
-from .validators import _normalize_todos
+from .todos import format_todo_plan, normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
 
 
@@ -363,8 +362,8 @@ def tool_patch_file(agent, args):
 
 def tool_todo_write(agent, args):
     # todo_write 只更新当前 session 的任务列表，不修改工作区文件。
-    # 当所有 phase 都完成时直接清空，避免已完成计划长期污染 working memory。
-    todos = _normalize_todos(args.get("todos"))
+    # 当所有 phase 都完成时直接清空，避免已经结束的计划继续影响后续任务。
+    todos = normalize_todos(args.get("todos"))
     if not todos:
         agent.session["todos"] = []
         return "todos updated: todo list cleared."
@@ -382,8 +381,13 @@ def tool_todo_write(agent, args):
         f"todos updated: {len(todos)} phases, {task_count} tasks, "
         f"{phase_counts['in_progress']} phase in_progress, {task_counts['in_progress']} task in_progress, "
         f"{phase_counts['pending']} phases pending, {phase_counts['completed']} phases completed. "
-        "Continue working through current_todos."
+        "Continue working through the active todo plan."
     )
+
+
+def tool_todo_list(agent, _args):
+    """Return the complete active plan without changing it."""
+    return format_todo_plan(agent.session.get("todos"))
 
 
 def tool_skill_load(agent, args):
@@ -398,7 +402,12 @@ def tool_skill_load(agent, args):
             },
         )
     agent.session_store.save(agent.session)
-    return f"skill loaded: {skill['name']} ({skill['root']})"
+    return (
+        f"Skill loaded: {skill['name']}\n"
+        f"Root: {skill['root']}\n\n"
+        "Instructions:\n"
+        f"{str(skill.get('content', '')).strip()}"
+    )
 
 
 def tool_skill_unload(agent, args):
@@ -418,7 +427,15 @@ def tool_skill_unload(agent, args):
     return f"skill unloaded: {removed['name']}" + (f" ({reason})" if reason else "")
 
 
-DELEGATE_ALLOWED_TOOLS = {"list_files", "read_file", "grep", "web_search", "web_extract", "todo_write"}
+DELEGATE_ALLOWED_TOOLS = {
+    "list_files",
+    "read_file",
+    "grep",
+    "web_search",
+    "web_extract",
+    "todo_write",
+    "todo_list",
+}
 
 
 def _delegate_prompt(task, focus):
@@ -464,9 +481,9 @@ def _delegate_child_session(agent, index, task):
         "workspace_root": agent.workspace.repo_root,
         "history": [],
         "history_summary": "",
-        "memory": memorylib.default_memory_state(),
+        "read_files": {},
         "todos": [],
-        "active_skills": [],
+        "invoked_skills": [],
         "temporary_permissions": copy.deepcopy(agent.session.get("temporary_permissions", {})),
         "delegate_parent_session": agent.session.get("id", ""),
         "delegate_task": task,
@@ -503,8 +520,6 @@ def _run_delegate_task(agent, item, index, max_steps):
         allowed_tools=DELEGATE_ALLOWED_TOOLS,
         timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
     )
-    child.memory.set_task_summary(task if not focus else f"{task}\nFocus: {focus}")
-    child.session["memory"] = child.memory.to_dict()
     try:
         report = child.ask(_delegate_prompt(task, focus))
         status = "ok"
@@ -616,6 +631,7 @@ _TOOL_RUNNERS = {
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,
     "todo_write": tool_todo_write,
+    "todo_list": tool_todo_list,
     "skill_load": tool_skill_load,
     "skill_unload": tool_skill_unload,
 }

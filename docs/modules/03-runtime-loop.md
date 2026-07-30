@@ -69,9 +69,9 @@ Runtime 创建 Agent 时，主要完成以下初始化工作。
 新会话会创建初始 session，恢复会话则加载已有状态。Session 中主要保存：
 
 - history 和 history summary。
-- working memory。
+- 已读文件版本状态。
 - todos。
-- active skills。
+- 最近调用的 skills。
 - temporary permissions。
 - 会话标题和更新时间。
 
@@ -87,7 +87,6 @@ Runtime 将默认规则、用户 settings、项目 settings、当前审批模式
 
 最后创建：
 
-- Working Memory。
 - 工具注册表和模型可见的 tool schemas。
 - Prefix。
 - Context Manager。
@@ -104,12 +103,10 @@ Runtime 将默认规则、用户 settings、项目 settings、当前审批模式
 
 收到用户请求后，Runtime 会：
 
-1. 更新 working memory 中的当前任务摘要。
-2. 将 user message 写入 history。
-3. 清理已经过期的工具错误笔记。
-4. 创建 TaskState、task ID 和 run ID。
-5. 写入 run 开始事件。
-6. 为当前请求召回一次长期记忆。
+1. 将 user message 写入 history。
+2. 创建 TaskState、task ID 和 run ID。
+3. 写入 run 开始事件。
+4. 为当前请求召回一次长期记忆。
 
 长期记忆只在请求开始时召回一次，后续工具循环直接复用，避免每轮都额外调用模型。
 
@@ -120,13 +117,13 @@ Runtime 将默认规则、用户 settings、项目 settings、当前审批模式
 ```text
 prefix
 available skills
-working memory
+runtime context
 relevant memory
 history summary
 recent history
 ```
 
-之所以每轮重新构建，是因为工具结果、todo、skills、working memory 和权限状态都可能在上一轮发生变化。
+之所以每轮重新构建，是因为 history 和工具结果会在上一轮发生变化；Todo 和完整 Skill 指令通过工具消息留在 history，需要时可由只读工具或 compact 恢复。
 
 构建完成后，Runtime 根据最近一次模型 usage 和新增工具结果的 token 估算检查上下文预算。
 
@@ -197,7 +194,7 @@ tool:
 - 展示工具结果摘要。
 - 将完整结果写入 history。
 - 更新工具结果 token 估算。
-- 更新 working memory 和错误笔记。
+- `read_file` 或文件修改成功后更新文件版本状态。
 - 写入工具执行 trace。
 
 所有工具完成后重新构建上下文，让模型根据新观察决定下一步。

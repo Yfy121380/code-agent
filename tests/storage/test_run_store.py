@@ -12,8 +12,8 @@ from codemate.storage import TaskState
 
 def test_session_store_groups_session_json_and_runs_dir(tmp_path):
     store = SessionStore(tmp_path / ".codemate" / "sessions")
-    session = {"id": "session_001", "history": [], "memory": {}, "todos": []}
-    dream_session = {"id": "dream-001", "history": [], "memory": {}, "todos": []}
+    session = {"id": "session_001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
+    dream_session = {"id": "dream-001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
 
     session_path = store.save(session)
     store.save(dream_session)

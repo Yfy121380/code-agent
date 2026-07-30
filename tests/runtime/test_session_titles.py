@@ -80,7 +80,7 @@ def test_benchmark_flag_disables_cross_session_memory_and_title(tmp_path, monkey
         "session_title",
     ):
         assert agent.feature_enabled(name) is False
-    assert agent.feature_enabled("memory") is True
+    assert agent.feature_enabled("prompt_cache") is True
     agent.close()
 
 

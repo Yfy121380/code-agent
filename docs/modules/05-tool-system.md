@@ -26,7 +26,7 @@ Codemate 的内置工具是显式注册的。每个工具都有固定 schema、�
 - Shell 工具：`run_shell`
 - 文件修改工具：`write_file`、`patch_file`
 - 任务规划工具：`todo_write`
-- Skill 工具：`skill_load`、`skill_unload`
+- Skill 工具：`skill_load`
 - 子 agent 工具：`delegate`
 - MCP 工具：动态发现并包装成 `mcp__server__tool`
 
@@ -44,7 +44,7 @@ MCP 工具不是写死在内置工具表中，而是启动时读取 settings 中
   -> 路径解析和权限 gate
   -> 必要时请求用户审批
   -> handler 执行真实动作
-  -> 结果写入 trace / history / working memory
+  -> 结果写入 trace / history，必要状态写入 session
 ```
 
 Schema 主要解决“参数结构是否合理”：必填字段、字段类型、枚举值、是否允许额外字段。
@@ -173,7 +173,7 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 - 图片文件必须是真实有效的支持格式，不能只靠扩展名伪装。
 - 工具成功结果最终最多保留 30000 字符，超出时会加截断提示。
 - 读路径需要通过 read 权限 gate。
-- 工具结果会进入 history；最近读过的文件和短摘要会沉淀进 working memory。
+- 工具结果会进入 history；`read_file` 还会记录文件的轻量版本指纹，供修改前校验。
 
 ### grep
 
@@ -401,14 +401,18 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 执行行为：
 
 - 如果传入空 todos，则清空当前 todo。
-- 如果所有 phase 都 completed，也会清空 todo，避免已完成计划长期留在 working memory。
-- 否则写入 session，并在 working memory 中显示为 `current_todos`。
+- 如果所有 phase 都 completed，也会清空 todo，避免已完成计划继续影响后续工作。
+- 否则保存完整计划；模型需要重新查看时使用 `todo_list`。
+
+### todo_list
+
+`todo_list` 不接收参数，返回当前完整计划，但不修改任何状态。它适合在当前计划已经不在最近上下文中时按需查看，不应该在每次工具调用后重复执行。
 
 ## 10. Skill 工具
 
 ### skill_load
 
-`skill_load` 用于把一个可用 skill 加载进 working memory。
+`skill_load` 用于读取一个可用 skill 的完整工作说明。
 
 参数：
 
@@ -419,32 +423,11 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 限制和校验：
 
 - skill name 会规范化。
-- 不能加载已经 active 的 skill。
 - skill 必须存在。
 - `SKILL.md` frontmatter 中的 name 必须和目录名一致。
-- active skill 数量有上限。
 - 加载后记录 trace。
 
-加载后，working memory 会展示 skill root 和完整指令。Skill 中提到的 `scripts/`、`references/`、`examples/`、`templates/` 都按这个 root 解析。
-
-### skill_unload
-
-`skill_unload` 用于卸载不再相关的 active skill。
-
-参数：
-
-| 参数 | 类型 | 必填 | 默认值 | 范围/规则 |
-| --- | --- | --- | --- | --- |
-| `name` | string | 是 | 无 | 必须是 active skill |
-| `reason` | string | 否 | `""` | 简短卸载原因 |
-
-限制和校验：
-
-- 只能卸载已经 active 的 skill。
-- 卸载后从 working memory 移除。
-- 卸载行为记录 trace。
-
-设计上不要求每完成一个请求就卸载 skill。更合理的规则是：当用户切换到无关任务，或者 skill 明显不再适用时再卸载。
+工具结果直接返回 skill root 和完整指令并进入 history。Skill 中提到的 `scripts/`、`references/`、`examples/`、`templates/` 都按这个 root 解析。Session 只保留最近三次不同 Skill 的正文，供 history compact 后按需恢复。
 
 ## 11. Delegate 工具
 
@@ -560,7 +543,7 @@ MCP server 是外部动态能力，工具描述和参数来自 server。解决�
 
 ### 工具结果不能无限进入上下文
 
-读文件、搜索、web 和 shell 输出都可能很长。解决方式是：UI 展示摘要，history 里对旧观察结果做 microcompact，working memory 只沉淀少量高价值状态。
+读文件、搜索、web 和 shell 输出都可能很长。解决方式是：UI 展示摘要，history 里对旧观察结果做 microcompact，并在工具执行出口统一限制结果大小。
 
 ## 16. 面试复述版本
 

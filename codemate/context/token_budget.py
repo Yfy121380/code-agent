@@ -108,7 +108,7 @@ def section_char_report(prompt_metadata):
     values = {
         "prefix": _section_chars(sections, "prefix"),
         "available skills": _section_chars(sections, "skills"),
-        "working memory": _section_chars(sections, "memory"),
+        "runtime context": _section_chars(sections, "runtime_context"),
         "relevant memory": _section_chars(sections, "relevant_memory"),
         "history summary": _section_chars(sections, "history_summary"),
         "recent history": _section_chars(sections, "history"),

@@ -361,7 +361,7 @@ def run_cli(args, ui, agent_holder):
 
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 session history 和 working memory 会跨轮延续。
+        # 因此 history、Todo、Skill 和权限状态会跨轮延续。
         try:
             user_input = prompt_session.prompt("\ncodemate> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -444,9 +444,6 @@ def run_cli(args, ui, agent_holder):
                 print(f"compact skipped: {result.get('reason', '')}")
             elif result.get("status") == "error":
                 print(f"compact failed: {result.get('reason', '')}")
-            continue
-        if user_input == "/memory":
-            print(agent.memory_text())
             continue
         if user_input.startswith("/remember"):
             memory_text = user_input[len("/remember"):].strip()

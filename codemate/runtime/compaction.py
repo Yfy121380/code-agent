@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 
 from ..context.history import HistoryContextRenderer
 from ..context.types import (
@@ -13,6 +14,8 @@ from ..context.types import (
     RECENT_HISTORY_MIN_CHARS,
     RECENT_HISTORY_MIN_MESSAGES,
 )
+from ..tools.constants import MAX_INVOKED_SKILLS
+from ..tools.todos import format_todo_plan, normalize_todos
 from ..workspace import clip
 
 
@@ -21,8 +24,7 @@ SUMMARY_WRAPPER_PREFIX = (
     "The summary below covers the earlier portion of the conversation.\n\n"
     "Summary:\n"
 )
-
-COMPACT_SYSTEM_PROMPT = f"""Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests, constraints, decisions, and the assistant's previous actions.
+COMPACT_SYSTEM_PROMPT = """Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests, constraints, decisions, and the assistant's previous actions.
 
 This summary will be used to continue a coding session after older context has been removed. It should preserve the technical details, codebase state, decisions, and current work needed to continue without losing context.
 
@@ -79,7 +81,7 @@ Example output:
 - Current open question: how to build the compact sub-agent prompt and where to place the compact request.
 
 ## Key Decisions
-- Only history should be compacted; prefix, skills, working memory, and relevant memory stay outside compact.
+- Only old history should be summarized; recent history and relevant runtime context remain available separately.
 - Compact summary should use six sections.
 - Recent messages should not be passed into the compact request.
 
@@ -164,7 +166,7 @@ class HistoryCompactionMixin:
                 summary = self._run_compact_model(history_to_compact, original_summary)
                 self._validate_history_summary(summary)
                 self.session["history_summary"] = self.normalize_history_summary(summary)
-                self.session["history"] = recent_history
+                self.session["history"] = self._restore_compact_context(recent_history)
                 self.session_path = self.session_store.save(self.session)
                 self.reset_token_usage()
                 result = {
@@ -172,7 +174,7 @@ class HistoryCompactionMixin:
                     "reason": reason,
                     "candidate_extraction": candidate_result,
                     "history_before_messages": before_messages,
-                    "history_after_messages": len(recent_history),
+                    "history_after_messages": len(self.session["history"]),
                     "history_compacted_messages": len(history_to_compact),
                     "summary_chars": len(self.session["history_summary"]),
                     "attempts": attempts,
@@ -198,6 +200,93 @@ class HistoryCompactionMixin:
         self._emit_compact_trace(task_state, "history_compact_failed", result)
         self.ui.compact_end(status="error", metadata=result)
         return result
+
+    def _restore_compact_context(self, recent_history):
+        """Restore only Skill and Todo state missing from retained history.
+
+        Restoration messages are persisted in history once. Repeated compaction
+        first removes older synthetic messages so they never accumulate.
+        """
+        recent_history = [
+            dict(item)
+            for item in recent_history
+            if str(item.get("kind", "")) not in {"skill_context", "todo_context"}
+        ]
+        events = self._successful_state_tool_events(recent_history)
+        recent_skill_names = {
+            str(event["call"].get("args", {}).get("name", "")).strip()
+            for event in events
+            if event["name"] == "skill_load"
+        }
+
+        restored = []
+        for skill in self.session.get("invoked_skills", [])[-MAX_INVOKED_SKILLS:]:
+            name = str(skill.get("name", "")).strip()
+            if not name or name in recent_skill_names:
+                continue
+            restored.append(
+                self._context_message(
+                    "skill_context",
+                    (
+                        f"Skill instructions:\nName: {name}\n"
+                        f"Root: {str(skill.get('root', '')).strip()}\n\n"
+                        f"{str(skill.get('content', '')).strip()}"
+                    ),
+                )
+            )
+
+        todos = list(self.session.get("todos") or [])
+        if todos and not self._recent_history_has_current_todos(events, todos):
+            restored.append(self._context_message("todo_context", format_todo_plan(todos)))
+        return restored + recent_history
+
+    @staticmethod
+    def _successful_state_tool_events(messages):
+        """Return successful Skill/Todo calls in retained chronological order."""
+        results = {
+            str(item.get("tool_call_id", "")): item
+            for item in messages
+            if item.get("role") == "tool"
+        }
+        events = []
+        for item in messages:
+            if item.get("role") != "assistant":
+                continue
+            for call in item.get("tool_calls") or []:
+                name = str(call.get("name", ""))
+                if name not in {"skill_load", "todo_write", "todo_list"}:
+                    continue
+                result = results.get(str(call.get("id", "")))
+                content = str((result or {}).get("content", "")).lstrip().lower()
+                if result is None or content.startswith(("error:", "rejected:")):
+                    continue
+                events.append({"name": name, "call": call, "result": result})
+        return events
+
+    @staticmethod
+    def _recent_history_has_current_todos(events, todos):
+        todo_events = [event for event in events if event["name"] in {"todo_write", "todo_list"}]
+        if not todo_events:
+            return False
+        latest = todo_events[-1]
+        if latest["name"] == "todo_list":
+            return str(latest["result"].get("content", "")).strip() == format_todo_plan(todos)
+        try:
+            written = normalize_todos(latest["call"].get("args", {}).get("todos"))
+        except (TypeError, ValueError):
+            return False
+        return written == todos
+
+    @staticmethod
+    def _context_message(kind, content):
+        context_id = f"context_{uuid.uuid4().hex[:12]}"
+        return {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "conversation_id": context_id,
+            "role": "user",
+            "kind": kind,
+            "content": str(content).strip(),
+        }
 
     def _run_compact_model(self, history_to_compact, existing_summary):
         messages = []

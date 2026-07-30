@@ -44,7 +44,6 @@ Codemate 在交互式 REPL 中支持一组 slash commands，用于查看状态�
 
 - `/budget`：查看各上下文 section 的字符数、工具 schema 字符数、估算 token、最大上下文和当前占比。
 - `/compact`：手动压缩较早的历史上下文。
-- `/memory`：查看当前工作记忆。
 - `/remember <text>`：追加一条高置信度候选记忆，后续由 dream 整理进正式长期记忆。
 - `/dream`：前台运行长期记忆整理。
 - `/dream --background`：后台运行长期记忆整理。

@@ -17,6 +17,7 @@ IMAGE_TARGET_BYTES = int(IMAGE_MAX_BASE64_BYTES * 3 / 4)
 IMAGE_JPEG_QUALITY_START = 85
 IMAGE_JPEG_QUALITY_MIN = 60
 TODO_STATUSES = {"pending", "in_progress", "completed"}
+MAX_INVOKED_SKILLS = 3
 WEB_TOOL_NAMES = {"web_search", "web_extract", "web_research"}
 WEB_SEARCH_DEPTHS = {"basic", "advanced", "fast", "ultra-fast"}
 WEB_SEARCH_TOPICS = {"general", "news", "finance"}
