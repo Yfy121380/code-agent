@@ -1,4 +1,4 @@
-# 工具执行函数：实现 list/read/grep/shell/write/patch/todo/delegate 等工具的实际动作。
+# 工具执行函数：实现文件、shell、todo、delegate、review 等工具的实际动作。
 
 import copy
 import json
@@ -540,8 +540,9 @@ def _delegate_child_session(agent, index, task):
     }
 
 
-def _run_delegate_task(agent, item, index, max_steps):
+def _run_delegate_task(agent, item, index):
     from ..runtime import CodeMate
+    from .constants import SUBAGENT_MAX_STEPS
 
     task = str(item.get("task", "")).strip()
     focus = str(item.get("focus", "")).strip()
@@ -554,7 +555,7 @@ def _run_delegate_task(agent, item, index, max_steps):
         session_store=agent.session_store,
         session=_delegate_child_session(agent, index, task),
         approval_policy="read_only",
-        max_steps=max_steps,
+        max_steps=SUBAGENT_MAX_STEPS,
         max_new_tokens=agent.max_new_tokens,
         depth=child_depth,
         max_depth=child_depth,
@@ -565,15 +566,27 @@ def _run_delegate_task(agent, item, index, max_steps):
             "memory_dream": False,
             "long_term_memory": False,
             "relevant_memory": False,
+            "memory_candidates": False,
             "session_title": False,
         },
         allowed_tools=DELEGATE_ALLOWED_TOOLS,
+        runtime_mode="delegate",
         timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
     )
     try:
         report = child.ask(_delegate_prompt(task, focus))
-        status = "ok"
-        error = ""
+        stop_reason = str(getattr(child.current_task_state, "stop_reason", "") or "")
+        if stop_reason == "step_limit_reached":
+            status = "step_limit"
+            error = f"delegated investigation reached the {SUBAGENT_MAX_STEPS}-step limit"
+            report = ""
+        elif stop_reason == "retry_limit_reached":
+            status = "error"
+            error = "delegated investigation stopped after too many malformed model responses"
+            report = ""
+        else:
+            status = "ok"
+            error = ""
     except Exception as exc:
         report = ""
         status = "error"
@@ -599,18 +612,17 @@ def tool_delegate(agent, args):
     if agent.depth >= agent.max_depth:
         raise ValueError("delegate depth exceeded")
     tasks = list(args.get("tasks") or [])
-    max_steps = int(args.get("max_steps", 20))
+    if set(args).difference({"tasks"}):
+        raise ValueError("delegate only accepts the tasks argument")
     if not tasks:
         raise ValueError("tasks must be a non-empty list")
     if len(tasks) > 3:
         raise ValueError("tasks must contain at most 3 items")
-    if max_steps < 1 or max_steps > 40:
-        raise ValueError("max_steps must be in [1, 40]")
 
     results = []
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         futures = {
-            executor.submit(_run_delegate_task, agent, item, index, max_steps): index
+            executor.submit(_run_delegate_task, agent, item, index): index
             for index, item in enumerate(tasks, 1)
         }
         for future in as_completed(futures):
@@ -668,6 +680,13 @@ def tool_delegate(agent, args):
         else:
             lines.extend(["Error:", item["error"] or "unknown error"])
     return "\n".join(lines)
+
+
+def tool_review(agent, args):
+    """Route one independent code review into the dedicated child runtime."""
+    from ..runtime.review import run_review
+
+    return run_review(agent, args["task"])
 
 
 _TOOL_RUNNERS = {

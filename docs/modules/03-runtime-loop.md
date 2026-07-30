@@ -49,6 +49,7 @@ Runtime 创建 Agent 时，主要完成以下初始化工作。
 
 - 主 Agent 使用完整工具集合。
 - Delegate 使用只读权限和工具白名单。
+- Review 串行启动一个只读审查子 Agent，使用独立 prompt 和工具白名单。
 - Dream 只允许长期记忆整理需要的工具。
 
 ### 2.2 初始化路径和 Settings

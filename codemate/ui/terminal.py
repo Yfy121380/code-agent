@@ -71,6 +71,12 @@ class NullUI:
     def plan_review(self, title, plan):
         return {"decision": "cancelled"}
 
+    def review_start(self):
+        pass
+
+    def review_end(self, status="", metadata=None):
+        pass
+
     def session_menu(self, sessions, current_id=""):
         return None
 
@@ -210,15 +216,29 @@ class TerminalUI(NullUI):
         elif status == "error":
             self.console.print(f"[yellow]  -> history compact failed: {metadata.get('reason', 'unknown error')}[/yellow]")
 
+    def review_start(self):
+        self.console.print("[dim]Reviewing current changes...[/dim]")
+
+    def review_end(self, status="", metadata=None):
+        metadata = dict(metadata or {})
+        if status == "ok":
+            self.console.print(
+                f"[dim]  -> review complete, {metadata.get('review_report_chars', 0)} chars[/dim]"
+            )
+        elif status == "step_limit":
+            self.console.print("[yellow]  -> review stopped after reaching the step limit[/yellow]")
+        else:
+            self.console.print("[yellow]  -> review failed[/yellow]")
+
     def commentary(self, text):
         text = str(text or "").strip()
         if text:
             self.console.print(Markdown(text, style=COMMENTARY_STYLE))
 
     def tool_start(self, name, args, risk_level=""):
-        if name == "submit_plan":
-            # submit_plan 随后会通过 plan_review() 打出完整 Plan 面板；
-            # 这里隐藏普通工具起始行，避免出现冗余的 “◇ submit_plan”。
+        if name in {"submit_plan", "review"}:
+            # These tools render their own workflow status. Hide the generic
+            # start line so the terminal does not print duplicate events.
             return
         summary = summarize_tool_call(name, args)
         lines = summary.splitlines() or [name]
@@ -233,6 +253,10 @@ class TerminalUI(NullUI):
         del args
         metadata = dict(metadata or {})
         status = metadata.get("tool_status", "ok")
+        if name == "review" and metadata.get("review_status"):
+            # review_end() already rendered the child status. The complete
+            # report remains in history/trace for the parent model.
+            return
         if name in COMPACT_RESULT_TOOLS and status == "ok":
             summary = summarize_read_tool_result(name, result, metadata)
             self.console.print(Text(f"  ↳ {summary}", style=TOOL_RESULT_STYLE))

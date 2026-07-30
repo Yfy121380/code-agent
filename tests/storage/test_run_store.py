@@ -14,9 +14,13 @@ def test_session_store_groups_session_json_and_runs_dir(tmp_path):
     store = SessionStore(tmp_path / ".codemate" / "sessions")
     session = {"id": "session_001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
     dream_session = {"id": "dream-001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
+    delegate_session = {"id": "delegate-001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
+    review_session = {"id": "review-001", "history": [], "read_files": {}, "todos": [], "invoked_skills": []}
 
     session_path = store.save(session)
     store.save(dream_session)
+    store.save(delegate_session)
+    store.save(review_session)
 
     assert session_path == tmp_path / ".codemate" / "sessions" / "session_001" / "session.json"
     assert store.runs_dir("session_001") == tmp_path / ".codemate" / "sessions" / "session_001" / "runs"

@@ -23,10 +23,13 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     model_items = list(completer.get_completions(Document("/model "), None))
     approval_items = list(completer.get_completions(Document("/approval "), None))
     plan_items = list(completer.get_completions(Document("/plan"), None))
+    review_items = list(completer.get_completions(Document("/rev"), None))
 
     assert any(str(item.display_text) == "/help" and str(item.display_meta_text) for item in root_items)
     assert any(str(item.display_text) == "/approval read_only" for item in approval_items)
     assert any(str(item.display_text) == "/plan exit" for item in plan_items)
+    assert any(str(item.display_text) == "/review" for item in review_items)
+    assert any(str(item.display_text) == "/review <focus>" for item in review_items)
     assert any(str(item.display_text) == "/provider openai" for item in provider_items)
     assert any(str(item.display_text) == "/provider anthropic" for item in provider_items)
     assert any(str(item.display_text) == "/model gpt-5.5" for item in model_items)

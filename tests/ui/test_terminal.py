@@ -44,6 +44,24 @@ def test_low_risk_label_is_omitted_from_normal_tool_log():
     assert console.printed[0]["objects"][0].plain == "◇ read_file README.md"
 
 
+def test_rejected_shell_result_shows_policy_error_instead_of_empty_streams():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.tool_result(
+        "run_shell",
+        {"command": "git ls-files --others --exclude-standard"},
+        "error: write operations are blocked in read-only mode",
+        {"tool_status": "rejected"},
+    )
+
+    rendered = [item["objects"][0].plain for item in console.printed]
+    assert rendered == [
+        "  ↳ rejected · run_shell",
+        "    error: write operations are blocked in read-only mode",
+    ]
+
+
 def test_commentary_and_final_render_as_unframed_markdown_with_marker():
     console = RecordingConsole()
     ui = TerminalUI(console=console)
@@ -74,3 +92,24 @@ def test_submit_plan_tool_start_is_hidden_because_plan_review_renders_panel():
     ui.tool_start("read_file", {"path": "README.md"}, risk_level="low")
 
     assert console.printed[0]["objects"][0].plain == "◇ read_file README.md"
+
+
+def test_review_uses_dedicated_progress_status_and_hides_generic_tool_start():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.tool_start("review", {"task": "Review the current changes."})
+    ui.review_start()
+    ui.review_end(status="ok", metadata={"review_report_chars": 321})
+    ui.tool_result(
+        "review",
+        {"task": "Review the current changes."},
+        "review_status: ok\nreview_report:\nNo findings.",
+        {"tool_status": "ok", "review_status": "ok", "review_report_chars": 321},
+    )
+
+    rendered = "\n".join(str(item["objects"][0]) for item in console.printed)
+    assert "Reviewing current changes..." in rendered
+    assert "review complete, 321 chars" in rendered
+    assert "◇ review" not in rendered
+    assert len(console.printed) == 2

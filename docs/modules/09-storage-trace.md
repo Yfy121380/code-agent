@@ -213,7 +213,7 @@ delegate-...
 
 这样既能保留子 agent 的 trace 供排查，又不会污染用户选择会话时看到的列表。
 
-Delegate 子 agent 会继承父 session 的 temporary permissions，保证已经审批过的外部读权限在调查任务中仍然生效。但它使用独立 history 和 run 目录，避免把子 agent 的大量搜索过程塞进父 agent history。
+Delegate 和 Review 子 agent 会继承父 session 的 temporary permissions，保证已经审批过的外部读权限在调查任务中仍然生效。但它们使用独立 history 和 run 目录，避免把子 agent 的大量搜索过程塞进父 agent history。
 
 ## 10. Temporary Permissions 持久化
 
@@ -463,7 +463,7 @@ Agent 可能在模型请求、工具执行、审批、写文件或用户中断�
 
 ### 难点四：子 agent 工件不能污染用户会话列表
 
-Delegate 和 dream 都会产生自己的 session 和 run。如果它们出现在 `/session list` 中，会让用户很难找到真正的会话。因此 session list 会过滤 `dream-` 和 `delegate-` 前缀，但这些目录仍然保留，方便排查子任务。
+Delegate、Review 和 dream 都会产生自己的 session 和 run。如果它们出现在 `/session list` 中，会让用户很难找到真正的会话。因此 session list 会过滤 `dream-`、`delegate-` 和 `review-` 前缀，但这些目录仍然保留，方便排查子任务。
 
 ### 难点五：临时权限必须随 session 恢复
 
@@ -475,6 +475,6 @@ Codemate 的持久化层分成会话状态和运行记录两部分。会话状�
 
 `task_state.json` 是一次 ask 的状态快照，记录当前 status、模型调用次数、工具步数、最后工具、停止原因和最终回答。它会在运行过程中不断原子写入，方便中途观察或异常后恢复判断。`trace.jsonl` 是事件时间线，记录 run_started、prompt_build、model_parsed、tool_executed、history_compact、run_finished 等事件，用来复盘模型看到了什么、调用了什么工具、工具怎么返回、为什么结束。
 
-会话管理上，session id 保持时间加随机后缀，稳定且唯一；session title 由首轮完成后模型生成，只用于展示和 `/session` 选择，不影响目录名。支持 `/session list`、`/session rename`、`/session resume` 和 `codemate --resume`。后台 dream 和 delegate 子任务也会落盘，但从普通 session 列表中过滤，避免污染用户会话选择。
+会话管理上，session id 保持时间加随机后缀，稳定且唯一；session title 由首轮完成后模型生成，只用于展示和 `/session` 选择，不影响目录名。支持 `/session list`、`/session rename`、`/session resume` 和 `codemate --resume`。dream、delegate 和 review 子任务也会落盘，但从普通 session 列表中过滤，避免污染用户会话选择。
 
 整体设计的重点是职责分离：session 用于恢复，task_state 用于看当前运行状态，trace 用于复盘行为，memory 用于跨轮上下文，settings 用于长期配置。这样排查复杂 agent 行为时，可以从 session 找到 run，再沿 trace 逐步还原完整执行链路。

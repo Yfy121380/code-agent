@@ -25,9 +25,9 @@ Codemate 的内置工具是显式注册的。每个工具都有固定 schema、�
 - 网络工具：`web_search`、`web_extract`、`web_research`
 - Shell 工具：`run_shell`
 - 文件修改工具：`write_file`、`patch_file`
-- 任务规划工具：`todo_write`
+- 任务规划工具：`todo_write`、`todo_list`
 - Skill 工具：`skill_load`
-- 子 agent 工具：`delegate`
+- 子 agent 工具：`delegate`、`review`
 - MCP 工具：动态发现并包装成 `mcp__server__tool`
 
 MCP 工具不是写死在内置工具表中，而是启动时读取 settings 中的 MCP server 配置，连接 server，调用 `tools/list`，再把每个 MCP tool 包装成普通工具暴露给模型。
@@ -440,7 +440,6 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 | 参数 | 类型 | 必填 | 默认值 | 范围/规则 |
 | --- | --- | --- | --- | --- |
 | `tasks` | array | 是 | 无 | 1-3 个调查任务 |
-| `max_steps` | integer | 否 | `20` | 1-40 |
 
 每个 task：
 
@@ -454,13 +453,38 @@ Validator 解决 schema 无法表达或不适合表达的规则，例如：
 - 使用独立 session 和 run 目录，不污染父 history。
 - 继承父 session 的临时读权限。
 - 子 agent 的审批策略固定为 `read_only`。
-- 只允许使用 `list_files`、`read_file`、`grep`、`web_search`、`web_extract`、`todo_write`。
+- 每个调查子 agent 由 runtime 固定限制为最多 100 个工具步骤；模型不能通过参数修改限制。
+- 只允许使用 `list_files`、`read_file`、`grep`、`web_search`、`web_extract`、`todo_write`、`todo_list`。
 - 不允许修改文件。
 - 不负责最终决策和最终回答。
 
 主 agent 应把 delegate 返回结果当作调查证据。如果后续要编辑某个文件，主 agent 仍需要自己读取目标文件。
 
-## 12. MCP 工具
+## 12. Review 工具
+
+### review
+
+`review` 用于串行启动一个独立的只读 Review 子 agent，审查当前 staged、unstaged 和 untracked 修改。它不只是读取 diff，还会调查相关类、函数、调用链、测试和项目惯例，避免根据局部代码直接下结论。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认值 | 范围/规则 |
+| --- | --- | --- | --- | --- |
+| `task` | string | 是 | 无 | 修改目标、重要约束、保留行为和审查关注点；最长 20000 字符 |
+
+执行边界：
+
+- 一次只启动一个 Review 子 agent，不与 Delegate 一样并发多个任务。
+- Review 必须是模型响应中唯一的工具调用。
+- 子 agent 使用独立 session、`read_only` 审批策略和最多 100 个工具步骤。
+- 只允许 `list_files`、`read_file`、`grep`、只读 `run_shell`、`todo_write` 和 `todo_list`。
+- 不继承父 history，但继承会话临时读取权限。
+- 禁用长期记忆召回、候选提取、dream 和 session title。
+- 子 agent 不修改文件，只把 Markdown 审查报告作为工具结果返回主 agent。
+
+当前修改是主要审查范围；如果在直接相关代码中发现明确的旧问题，也可以标记为 `Pre-existing` 后报告。主 agent 负责判断 finding 是否成立，并决定是否在当前任务范围内修复。
+
+## 13. MCP 工具
 
 MCP 工具来自外部 MCP server，不在内置工具表里写死。
 

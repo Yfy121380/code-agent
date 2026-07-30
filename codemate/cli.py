@@ -18,6 +18,7 @@ from .config import ensure_codemate_layout, load_project_env, provider_env
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .models.capabilities import PROVIDER_MODELS, default_model_for_provider, models_for_provider
 from .runtime import CodeMate
+from .runtime.review import manual_review_request
 from .storage import SessionStore
 from .ui import TerminalUI
 from .ui.banner import build_welcome
@@ -380,6 +381,19 @@ def run_cli(args, ui, agent_holder):
             return 0
         if user_input == "/help":
             print(HELP_DETAILS)
+            continue
+        if user_input == "/review" or user_input.startswith("/review "):
+            if agent.is_plan_mode():
+                print("review is not available in Plan Mode")
+                continue
+            review_focus = user_input[len("/review") :].strip()
+            print()
+            try:
+                agent.ask(manual_review_request(review_focus))
+            except KeyboardInterrupt:
+                print("\ninterrupted")
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
             continue
         if user_input == "/plan exit":
             if not agent.exit_plan_mode():

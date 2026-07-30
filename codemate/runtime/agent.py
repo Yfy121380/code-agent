@@ -44,6 +44,7 @@ from .planning import (
     PLAN_VISIBLE_TOOLS,
     PlanModeMixin,
 )
+from .review import review_system_prompt
 from .tool_execution import ToolExecutionMixin
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
@@ -219,6 +220,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._last_tool_gate = None
         # 最近一次 delegate 子任务摘要，供 UI 和 trace 展示并发调查结果。
         self._last_delegate_metadata = {}
+        # 最近一次独立审查摘要，供 UI 和 trace 展示 Review 子 agent 状态。
+        self._last_review_metadata = {}
         # 后台候选记忆提取运行标记，避免用户快速连续输入时重复启动同一类维护任务。
         self._memory_candidate_extract_running = False
     @classmethod
@@ -361,6 +364,13 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 tool_signature=self.tool_signature(AGENT_MODE),
             )
+        if self.runtime_mode == "review":
+            text = review_system_prompt()
+            return PromptPrefix(
+                text=text,
+                hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                tool_signature=self.tool_signature(AGENT_MODE),
+            )
 
         tool_use_rules = textwrap.dedent(
             """\
@@ -441,7 +451,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - Reuse established abstractions, extension points, validation patterns, exception styles, and naming conventions when they fit. Make the smallest durable change at the correct layer; a small patch is not sufficient if it only handles the visible example.
             - After editing, inspect the resulting diff and related code paths. Check that the patch implements the intended behavior without unintentionally changing defaults, alternate branches, error paths, compatibility behavior, or unrelated code.
 
-            Validation:
+            Validation and review:
             - Validate both the behavior that should change and the important adjacent behavior that should remain unchanged.
             - Derive expected results from the request and repository evidence, not solely from the implementation you just wrote. Do not change tests merely to make an implementation pass.
             - Prefer focused existing tests. For runtime behavior changes, syntax checks alone are not sufficient.
@@ -449,6 +459,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - If normal validation is blocked by missing dependencies, diagnose the project environment first. You may make at most one isolated virtual-environment attempt under `/tmp`, using the editable project and the smallest reasonable dependency setup. Never modify the user's active environment or leave verification artifacts in the repository.
             - In a temporary environment, run a minimal behavior check first, then focused tests when reasonably scoped. Stop if setup fails instead of repeatedly repairing the environment.
             - If meaningful runtime validation remains unavailable, report what was attempted, why it failed, and which behavior remains unverified.
+            - Use the review tool when an independent examination would materially improve confidence, especially after non-trivial bug fixes, multi-file behavior changes, public API changes, shared runtime work, permission or persistence changes, concurrency or state-transition changes, compatibility work, and substantial refactors. Use the review tool when the user explicitly requests a code review.
+            - Call the review tool only after the change is coherent enough to review. It must be the only tool call in that model response, and you must wait for its result before taking another action.
+            - Give the review tool a concrete objective derived from the user's request or approved plan. State the intended behavior, important constraints, deliberate interface or behavior changes, behavior explicitly required to remain unchanged, and any known concerns. Do not invent preservation requirements merely because an old behavior exists. If the original intent is unavailable, say so in the review task. Do not submit a vague objective such as "review the changes".
+            - After the review tool returns, independently verify each finding against the user's requirements, deliberate design decisions, and the actual repository code. Use read-only tools when needed to confirm the affected path and failure scenario. Present or fix only findings that remain actionable after verification; treat unsupported, intent-dependent, contradicted, or unverified findings as unconfirmed rather than established defects. Do not accept findings blindly or ignore them without reason.
+            - Do not call the review tool repeatedly when the reviewed changes have not materially changed.
             """
         ).strip()
         memory_rules = textwrap.dedent(

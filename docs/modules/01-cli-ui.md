@@ -29,6 +29,14 @@ Codemate 在交互式 REPL 中支持一组 slash commands，用于查看状态�
 
 切换审批模式后，顶部 banner 会重新展示当前状态。
 
+### 工作流命令
+
+- `/plan`：进入只读 Plan Mode。
+- `/plan exit`：取消当前计划并退出 Plan Mode。
+- `/review [focus]`：要求主 agent 根据当前对话组织审查目标，并调用独立 Review 子 agent 检查当前代码修改；可选的 `focus` 用于补充用户希望重点调查的问题。
+
+Review 执行期间终端显示 `Reviewing current changes...`，并展示子 agent 的阶段 commentary、工具调用和紧凑结果。完整审查报告返回主 agent 后，主 agent 会结合用户需求、既定设计决策和仓库代码逐条验证；必要时继续使用只读工具调查，最终只把确认成立的问题作为审查结论。
+
 ### 模型提供商和模型切换
 
 - `/provider`：查看当前 provider 和可用 provider。

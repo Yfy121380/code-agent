@@ -270,7 +270,6 @@ def test_delegate_terminal_summary_shows_tasks_and_result_metadata():
                 {"task": "inspect runtime loop", "focus": "codemate/runtime"},
                 {"task": "inspect tool summaries", "focus": "codemate/ui"},
             ],
-            "max_steps": 20,
         },
     )
     result_summary = summarize_tool_result(

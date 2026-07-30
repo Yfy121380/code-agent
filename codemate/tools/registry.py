@@ -2,9 +2,9 @@
 
 from functools import partial
 
-from .handlers import _TOOL_RUNNERS, tool_delegate
+from .handlers import _TOOL_RUNNERS, tool_delegate, tool_review
 from .mcp import build_mcp_tool_registry
-from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC, PLAN_TOOL_SPECS
+from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC, PLAN_TOOL_SPECS, REVIEW_TOOL_SPEC
 
 
 def build_tool_registry(agent):
@@ -18,6 +18,10 @@ def build_tool_registry(agent):
     # 就连 delegate 这个工具都不再暴露给模型。
     if agent.depth < agent.max_depth:
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
+    # Review is a main-agent boundary: review/delegate children cannot recurse
+    # into another independent reviewer.
+    if agent.depth == 0 and getattr(agent, "runtime_mode", "agent") == "agent":
+        tools["review"] = {**REVIEW_TOOL_SPEC, "run": partial(tool_review, agent)}
     allowed_tools = getattr(agent, "allowed_tools", None)
     if allowed_tools is None or any(str(name).startswith("mcp__") for name in allowed_tools):
         tools.update(build_mcp_tool_registry(agent))

@@ -402,6 +402,8 @@ def validate_tool(agent, name, args):
         return ToolGate("allow", "session_update")
 
     if name == "delegate":
+        if set(args).difference({"tasks"}):
+            raise ValueError("delegate only accepts the tasks argument")
         tasks = args.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("tasks must be a non-empty list")
@@ -415,7 +417,17 @@ def validate_tool(agent, name, args):
                 raise ValueError(f"tasks[{index}].task must not be empty")
             if "focus" in item and not isinstance(item.get("focus"), str):
                 raise ValueError(f"tasks[{index}].focus must be a string")
-        max_steps = int(args.get("max_steps", 20))
-        if max_steps < 1 or max_steps > 40:
-            raise ValueError("max_steps must be in [1, 40]")
         return ToolGate("allow", "delegate_read_only")
+
+    if name == "review":
+        task = args.get("task")
+        if not isinstance(task, str):
+            raise ValueError("task must be a string")
+        task = task.strip()
+        if not task:
+            raise ValueError("task must not be empty")
+        if len(task) > 20_000:
+            raise ValueError("task must contain at most 20000 characters")
+        if set(args).difference({"task"}):
+            raise ValueError("review only accepts the task argument")
+        return ToolGate("allow", "review_read_only")

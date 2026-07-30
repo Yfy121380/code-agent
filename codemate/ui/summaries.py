@@ -147,6 +147,8 @@ def summarize_tool_call(name, args):
         if not tasks:
             lines.append("  (no tasks)")
         return "\n".join(lines)
+    if name == "review":
+        return f"review\n  task: {_clip_line(args.get('task', ''), 160)}"
     return f"{name}\n  args: {compact_json(args)}"
 
 
@@ -210,7 +212,7 @@ def _edge_lines(text, edge_lines=SHELL_STREAM_EDGE_LINES):
 
 
 def summarize_shell_result(result, metadata=None):
-    """解析 run_shell 的标准结果块，分别压缩 stdout 和 stderr。"""
+    """解析标准 shell 结果，并保留执行前拒绝产生的错误正文。"""
     metadata = dict(metadata or {})
     result = str(result or "")
     lines = []
@@ -233,6 +235,10 @@ def summarize_shell_result(result, metadata=None):
             current = stderr_lines
         elif current is not None:
             current.append(raw_line.strip())
+
+    if not exit_code and not stdout_lines and not stderr_lines:
+        lines.extend(_edge_lines(result))
+        return "\n".join(lines)
 
     if exit_code:
         lines.append(f"exit_code: {exit_code}")
@@ -263,6 +269,9 @@ def summarize_tool_result(name, result, metadata=None):
             status_text = str(item.get("status", "unknown"))
             chars = int(item.get("chars", 0) or 0)
             lines.append(f"  {item.get('index', '?')}. {status_text}, {chars} chars")
+        return "\n".join(lines)
+    if name == "review" and metadata.get("review_status"):
+        lines.append(f"report: {int(metadata.get('review_report_chars', 0) or 0)} chars")
         return "\n".join(lines)
     result_lines = result.splitlines()
     for line in result_lines[:MAX_RESULT_LINES]:

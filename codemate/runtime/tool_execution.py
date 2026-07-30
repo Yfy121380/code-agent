@@ -36,7 +36,7 @@ class ToolExecutionMixin:
             return True
         if name in {"list_files", "read_file", "grep"}:
             return True
-        if name in {"todo_write", "todo_list", "skill_load", "skill_unload", "delegate"}:
+        if name in {"todo_write", "todo_list", "skill_load", "skill_unload", "delegate", "review"}:
             return True
         if name in toolkit.PLAN_INTERACTION_TOOLS:
             return True
@@ -107,6 +107,7 @@ class ToolExecutionMixin:
         self._last_shell_analysis = None
         self._last_tool_gate = None
         self._last_delegate_metadata = {}
+        self._last_review_metadata = {}
         self._last_tool_result_content_blocks = []
         tool = self.tools.get(name)
         if tool is None:
@@ -187,6 +188,12 @@ class ToolExecutionMixin:
                 if delegate_status != "ok":
                     tool_status = delegate_status
                     tool_error_code = "delegate_failed"
+            review_metadata = dict(getattr(self, "_last_review_metadata", {}) or {})
+            if name == "review" and review_metadata:
+                review_status = str(review_metadata.get("review_status", "ok"))
+                if review_status != "ok":
+                    tool_status = review_status
+                    tool_error_code = "review_failed"
 
             if tool_status == "ok" and name in {"read_file", "write_file", "patch_file"}:
                 record_file_state(self.session, self.root, args["path"])
@@ -200,6 +207,7 @@ class ToolExecutionMixin:
                 **self.shell_analysis_metadata(),
                 **gate.to_metadata(),
                 **delegate_metadata,
+                **review_metadata,
                 **dict(raw_output.metadata or {}),
                 **truncation_metadata,
             }
@@ -307,3 +315,6 @@ class ToolExecutionMixin:
 
     def tool_delegate(self, args):
         return toolkit.tool_delegate(self, args)
+
+    def tool_review(self, args):
+        return toolkit.tool_review(self, args)

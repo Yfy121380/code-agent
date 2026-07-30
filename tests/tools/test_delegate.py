@@ -14,11 +14,23 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
     agent = build_agent(tmp_path, [], depth=1, max_depth=1)
 
     try:
-        agent.validate_tool("delegate", {"tasks": [{"task": "inspect README.md"}], "max_steps": 2})
+        agent.validate_tool("delegate", {"tasks": [{"task": "inspect README.md"}]})
     except ValueError as exc:
         assert "delegate depth exceeded" in str(exc)
     else:
         raise AssertionError("delegate depth validation did not fail")
+
+
+def test_delegate_rejects_removed_max_steps_argument(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "delegate",
+        {"tasks": [{"task": "inspect README.md"}], "max_steps": 2},
+    )
+
+    assert "delegate only accepts the tasks argument" in result
+
 
 # delegate 创建的 child agent 是 read_only
 
@@ -27,7 +39,7 @@ def test_delegate_child_is_read_only(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelResponse.tool_call("delegate", {"tasks": [{"task": "write a file"}], "max_steps": 2}),
+            ModelResponse.tool_call("delegate", {"tasks": [{"task": "write a file"}]}),
             ModelResponse.tool_call("write_file", {"path": "child-was-not-allowed.txt", "content": "nope"}),
             ModelResponse.final("child done"),
             ModelResponse.final("parent done"),
@@ -52,7 +64,6 @@ def test_delegate_runs_multiple_read_only_investigations(tmp_path):
                 {"task": "inspect README", "focus": "README.md"},
                 {"task": "inspect tests", "focus": "tests"},
             ],
-            "max_steps": 2,
         },
     )
 
@@ -79,7 +90,7 @@ def test_delegate_child_inherits_temporary_read_permissions(tmp_path):
     )
     agent.add_temporary_permission("read", outside_dir)
 
-    result = agent.run_tool("delegate", {"tasks": [{"task": "read outside note", "focus": str(outside_file)}], "max_steps": 3})
+    result = agent.run_tool("delegate", {"tasks": [{"task": "read outside note", "focus": str(outside_file)}]})
 
     assert "Status: ok" in result
     assert "read delegated evidence" in result

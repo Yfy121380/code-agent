@@ -5,6 +5,7 @@
 """
 
 import shlex
+import subprocess
 import sys
 import os
 
@@ -23,6 +24,34 @@ def test_read_shell_command_allows_valid_workspace_paths_in_read_only_policy(tmp
     assert "safe read" in result
     assert agent._last_tool_result_metadata["shell_kind"] == "read"
     assert agent._last_tool_result_metadata["risk_level"] == "low"
+
+
+def test_read_only_policy_allows_git_untracked_file_inspection(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "untracked.txt").write_text("evidence\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+
+    result = agent.run_tool(
+        "run_shell",
+        {
+            "command": (
+                "git ls-files --others --exclude-standard "
+                "&& printf '\\n--- unstaged ---\\n' "
+                "&& git diff --name-only"
+            ),
+            "timeout": 20,
+        },
+    )
+
+    assert "exit_code: 0" in result
+    assert "untracked.txt" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+    assert agent._last_tool_result_metadata["shell_subjects"] == [
+        "git ls-files",
+        "printf",
+        "git diff",
+    ]
+
 
 def test_read_shell_command_allows_globs_when_paths_stay_in_workspace(tmp_path):
     (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")

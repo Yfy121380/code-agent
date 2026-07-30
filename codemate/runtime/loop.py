@@ -99,13 +99,15 @@ class RuntimeLoopMixin:
 
     @staticmethod
     def _interactive_tool_batch_error(calls):
-        """Reject responses that mix a terminal interaction with other tools."""
+        """Reject responses that mix an exclusive boundary tool with other tools."""
         names = {call.name for call in calls}
-        if len(calls) <= 1 or not names.intersection(toolkit.PLAN_INTERACTION_TOOLS):
+        exclusive = names.intersection(toolkit.EXCLUSIVE_TOOL_CALLS)
+        if len(calls) <= 1 or not exclusive:
             return ""
+        tool_names = ", ".join(sorted(exclusive))
         return (
-            "error: request_user_input and submit_plan must each be the only tool call "
-            "in a model response; no tools in this response were executed"
+            f"error: {tool_names} must each be the only tool call in a model response; "
+            "no tools in this response were executed"
         )
 
     def _record_tool_outcome(

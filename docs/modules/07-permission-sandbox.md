@@ -70,7 +70,7 @@ full
 
 - 允许文件读取类工具：`list_files`、`read_file`、`grep`。
 - 允许 web 工具：`web_search`、`web_extract`、`web_research`。
-- 允许非文件状态工具：`todo_write`、`todo_list`、`skill_load`。
+- 允许非文件状态工具：`todo_write`、`todo_list`、`skill_load`、`review`。
 - 允许只读 shell 命令，例如 `ls`、`cat`、`rg`、`git log`、`python -m py_compile`。
 - 拒绝文件写入类工具：`write_file`、`patch_file`。
 - 拒绝修改类 shell。

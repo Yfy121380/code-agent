@@ -19,6 +19,8 @@ IMAGE_JPEG_QUALITY_MIN = 60
 TODO_STATUSES = {"pending", "in_progress", "completed"}
 MAX_INVOKED_SKILLS = 3
 PLAN_INTERACTION_TOOLS = {"request_user_input", "submit_plan"}
+EXCLUSIVE_TOOL_CALLS = {*PLAN_INTERACTION_TOOLS, "review"}
+SUBAGENT_MAX_STEPS = 100
 WEB_TOOL_NAMES = {"web_search", "web_extract", "web_research"}
 WEB_SEARCH_DEPTHS = {"basic", "advanced", "fast", "ultra-fast"}
 WEB_SEARCH_TOPICS = {"general", "news", "finance"}
@@ -37,6 +39,7 @@ SHELL_READ_SUBJECTS = {
     "tail",
     "nl",
     "wc",
+    "printf",
     "rg",
     "grep",
     "find",
@@ -44,6 +47,7 @@ SHELL_READ_SUBJECTS = {
     "git diff",
     "git log",
     "git show",
+    "git ls-files",
     "python -m py_compile",
     "python3 -m py_compile",
 }

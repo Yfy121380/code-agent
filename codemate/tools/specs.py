@@ -684,11 +684,6 @@ DELEGATE_TOOL_SPEC = {
                     "additionalProperties": False,
                 },
             },
-            "max_steps": {
-                "type": "integer",
-                "description": "Maximum steps per delegated investigation. Default 50. Increase only for broad investigations.",
-                "default": 50,
-            },
         },
         "required": ["tasks"],
         "additionalProperties": False,
@@ -704,5 +699,33 @@ Provide 1 to 3 concrete investigation tasks. Each task should include a specific
 Do not use this tool for simple file reads, simple grep searches, single-file inspection, direct edits, or tasks where you already know what to do next. Do not ask delegated investigations to modify files, run risky commands, or make the final decision.
 
 The returned reports are supporting evidence and navigation hints. Use them to decide what to inspect or do next. If you will edit a file based on a report, read that exact file yourself before editing.
+""".strip(),
+}
+
+REVIEW_TOOL_SPEC = {
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": (
+                    "Describe the intended behavior of the changes, important "
+                    "constraints, deliberate behavior changes, explicitly "
+                    "preserved behavior, and specific review concerns."
+                ),
+            },
+        },
+        "required": ["task"],
+        "additionalProperties": False,
+    },
+    "risky": False,
+    "description": """
+Launch an independent reviewer for the current staged, unstaged, and untracked code changes.
+
+Use the review tool after non-trivial changes or when the user requests a review. The task must explain the intended behavior, important constraints, deliberate interface or behavior changes, behavior explicitly required to remain stable, and relevant concerns. Do not assume an old behavior must be preserved without support from the user's requirements, an approved plan, or a repository contract. If the original intent is unavailable, state that in the task.
+
+The reviewer examines the diff and relevant surrounding code, callers, tests, and project conventions. It does not modify files and returns an actionable Markdown review, including related pre-existing issues when relevant.
+
+Call the review tool by itself and wait for its result. Do not repeat the review unless the changes have materially changed.
 """.strip(),
 }

@@ -21,6 +21,8 @@ SLASH_COMMANDS = [
     ("/approval full", "/approval full", "Auto-approve all approval prompts in this process."),
     ("/plan", "/plan", "Enter Plan Mode."),
     ("/plan exit", "/plan exit", "Cancel the active plan and leave Plan Mode."),
+    ("/review", "/review", "Review current code changes with an independent reviewer."),
+    ("/review ", "/review <focus>", "Review changes with a specific investigation focus."),
     ("/provider", "/provider", "Show current model provider."),
     ("/provider openai", "/provider openai", "Use OpenAI-compatible provider."),
     ("/provider anthropic", "/provider anthropic", "Use Anthropic-compatible provider."),
@@ -52,6 +54,7 @@ HELP_DETAILS = textwrap.dedent(
     /approval <mode>     Set approval policy: ask, auto, read_only, or full.
     /plan                Enter Plan Mode and wait for a planning task.
     /plan exit           Cancel the current plan and leave Plan Mode.
+    /review [focus]      Review current changes, optionally emphasizing a specific concern.
     /provider            Show current provider and available providers.
     /provider <name>     Set provider: openai, anthropic, or deepseek.
     /model               Show current model and available models.

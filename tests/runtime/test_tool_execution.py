@@ -25,9 +25,15 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     assert agent.tool_run_shell.__func__.__module__ == "codemate.runtime.tool_execution"
 
     with patch("codemate.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = agent.tool_delegate({"tasks": [{"task": "inspect README.md"}], "max_steps": 2})
+        delegate_result = agent.tool_delegate({"tasks": [{"task": "inspect README.md"}]})
 
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
+
+    with patch("codemate.tools.tool_review", return_value="toolkit-review") as fake_review:
+        review_result = agent.tool_review({"task": "Review the current changes."})
+
+    assert review_result == "toolkit-review"
+    fake_review.assert_called_once()
 
 # delegate 超过 max_depth 会被拒绝
