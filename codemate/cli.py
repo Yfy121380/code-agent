@@ -405,7 +405,6 @@ def run_cli(args, ui, agent_holder):
             current_model = models_for_provider(provider)[0]
             agent.model_client = _build_switched_model_client(args, current_provider, current_model)
             agent.reset_token_usage()
-            agent.refresh_prefix(force=True)
             print(f"provider: {old_provider} -> {current_provider}")
             print(f"model: {old_model} -> {current_model}")
             print_status()
@@ -433,7 +432,6 @@ def run_cli(args, ui, agent_holder):
             current_model = model
             agent.model_client = _build_switched_model_client(args, current_provider, current_model)
             agent.reset_token_usage()
-            agent.refresh_prefix(force=True)
             print(f"model: {old_model} -> {current_model}")
             print_status()
             continue

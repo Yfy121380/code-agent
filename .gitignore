@@ -20,6 +20,7 @@ dist/
 .coverage
 htmlcov/
 vscode-extension/
+docs/case-studies/
 
 # Temporary files
 .mini-coding-agent

@@ -182,15 +182,13 @@ class RuntimeLoopMixin:
                 },
             )
             prompt_cache_key = None
-            prompt_cache_retention = None
             if getattr(self.model_client, "supports_prompt_cache", False):
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-                prompt_cache_retention = "in_memory"
             response, completion_metadata, model_duration_ms, streamed_text_chars = self._complete_model_response(
                 messages,
                 system,
                 prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=prompt_cache_retention,
+                prompt_cache_retention=None,
             )
             token_usage = self.update_token_usage_from_model(completion_metadata)
             if completion_metadata:

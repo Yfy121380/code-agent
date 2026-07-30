@@ -30,7 +30,7 @@ from ..context.token_budget import (
 from ..storage import RunStore
 from ..ui import NullUI
 from .. import tools as toolkit
-from ..workspace import MAX_HISTORY, WorkspaceContext, clip, now
+from ..workspace import MAX_HISTORY, clip, now
 from .approvals import ApprovalMixin
 from .compaction import HistoryCompactionMixin
 from .dream import DreamMixin
@@ -69,13 +69,10 @@ def default_temporary_permissions():
 
 @dataclass
 class PromptPrefix:
-    # prefix 除了文本本身，还带一小份元数据，
-    # 这样 runtime 才能明确判断 prefix 是否可以复用。
+    # Prefix 在 Agent 启动时构建一次；稳定 hash 用作 prompt cache key。
     text: str
     hash: str
-    workspace_fingerprint: str
     tool_signature: str
-    built_at: str
 
 
 class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin):
@@ -172,7 +169,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session["memory"] = self.memory.to_dict()
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
-        # 可复用的前缀提示词，包括 agent的身份、可用的工具、git仓库状态等等
+        # 可复用的前缀提示词在启动时构建一次，避免运行中的仓库变化破坏缓存前缀。
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         # 上下文管理器，组装上下文，进行上下文压缩
@@ -204,12 +201,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._last_delegate_metadata = {}
         # 后台候选记忆提取运行标记，避免用户快速连续输入时重复启动同一类维护任务。
         self._memory_candidate_extract_running = False
-        # 最近一次 prefix 刷新结果，说明仓库信息或工具签名是否变化。
-        self._last_prefix_refresh = {
-            "workspace_facts_changed": False,
-            "prefix_changed": False,
-        }
-
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
         return cls(
@@ -306,9 +297,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             return PromptPrefix(
                 text=text,
                 hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                workspace_fingerprint=self.workspace.fingerprint(),
                 tool_signature=self.tool_signature(),
-                built_at=now(),
             )
 
         tool_use_rules = textwrap.dedent(
@@ -362,6 +351,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - "这里有个容易混淆的点：大工具结果会先经过 `toolResultStorage.ts` 持久化成 preview，这和 microcompact 清理旧 tool_result 是两层机制。接下来我看 auto compact，确认它和 microcompact 的触发关系。"
             - "`codemate/context/history.py` 负责旧工具结果清理，`codemate/runtime/loop.py` 负责把 commentary 和 tool calls 写入 history。接下来我继续读取 storage、models、ui、memory 和 context 剩余关键文件。"
             - "现在可以判断问题不在 grep schema，而在 Anthropic 消息转换：同一轮多个 tool_use 对应的 tool_result 必须合并成一个 user message。接下来我检查转换函数和测试覆盖。"
+            - "`Config.from_file` 的问题还涉及 loader 接收文本还是二进制内容。现有测试和相邻配置入口都保留默认文本路径，因此修改不能破坏旧调用；我会在文件加载边界加入目标行为，并同时验证两种模式。"
             - "测试已经覆盖 OpenAI commentary-only 和 Anthropic 多工具结果合并，接下来跑全量测试确认没有回归。"
 
             Bad commentary:
@@ -376,27 +366,26 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             """\
             Workflow rules:
             - After a successful tool result, treat it as an observation and continue with the next required action unless the user's request is already complete.
-            - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
+            - For a direct mechanical edit with a clear target, avoid unnecessary exploration. For behavior changes, knowing the target file does not remove the need to inspect the surrounding contract, related paths, and repository conventions.
             - Before overwriting an existing file with write_file or editing with patch_file, read that exact file first; grep/list_files results are not enough.
-            - Base test expectations on the request and project evidence, never solely on the implementation under test. Do not change tests merely to make an implementation pass.
             - New files should be complete and runnable, including obvious imports.
 
-            Code understanding and implementation depth:
-            - Before editing, inspect enough relevant implementation, callers, tests, and documentation to make the change fit the existing design. Start narrow and expand when public behavior, shared code, data flow, or multiple paths are involved.
-            - Reuse established functions, extension points, conventions, and validation patterns when they fit.
-            - For non-trivial behavior changes, identify the root cause and behavior contract: what should change, what adjacent behavior must remain unchanged, and what repository evidence supports both.
-            - Inspect related branches and, when practical, observe their pre-edit behavior. Treat examples and failures as evidence rather than the complete specification.
-            - Do not broaden the change without evidence. Prefer the smallest durable fix that preserves unaffected behavior and compatibility.
-            - If the scope or established pattern is unclear, investigate before editing. Before finalizing, compare the patch with the original intent and review related paths for unintended changes.
+            Code changes:
+            - Scale investigation to the risk of the change. Direct mechanical edits need only enough context to edit safely. Bug fixes, behavior changes, public APIs, shared code, condition-heavy logic, and unclear requests require broader investigation.
+            - Before editing, understand the relevant behavior contract. Inspect the target implementation and enough related callers, tests, documentation, and similar code to determine what behavior should change, what related behavior must remain unchanged, and what repository evidence supports that interpretation.
+            - Treat examples, error messages, and reported failures as evidence, not necessarily as the complete specification. Check whether tests, conventions, related branches, or existing APIs establish broader behavior.
+            - For a non-trivial change, before the first edit, provide a commentary update that summarizes the likely root cause or intended behavior, the most relevant repository evidence, the adjacent behavior that must be preserved, and the chosen implementation approach. If an unresolved question could change the implementation, investigate it before editing.
+            - Reuse established abstractions, extension points, validation patterns, exception styles, and naming conventions when they fit. Make the smallest durable change at the correct layer; a small patch is not sufficient if it only handles the visible example.
+            - After editing, inspect the resulting diff and related code paths. Check that the patch implements the intended behavior without unintentionally changing defaults, alternate branches, error paths, compatibility behavior, or unrelated code.
 
             Validation:
-            - Validate the changed behavior and, when practical, adjacent behavior that should remain unchanged. Reuse the pre-edit behavior matrix so only intended cases change.
-            - Derive expected results from the request, repository evidence, or the preservation baseline; checks inferred only from the new implementation are self-confirming.
-            - Prefer focused existing tests. Syntax checks do not replace behavior validation for runtime changes.
+            - Validate both the behavior that should change and the important adjacent behavior that should remain unchanged.
+            - Derive expected results from the request and repository evidence, not solely from the implementation you just wrote. Do not change tests merely to make an implementation pass.
+            - Prefer focused existing tests. For runtime behavior changes, syntax checks alone are not sufficient.
             - For Python src-layout projects, try `PYTHONPATH=src` before concluding imports are unavailable. When validating imports, confirm the imported module comes from the current workspace, not from a globally installed package.
-            - If dependencies block runtime validation, inspect project metadata and diagnose the incompatibility. Make at most one isolated venv attempt under `/tmp`, using the editable project and the smallest compatible dependency set; never install into the user's active environment or create validation artifacts in the repository.
-            - In a temporary environment, run a minimal behavior check first, then focused tests when reasonably scoped. Stop if setup fails and do not keep repairing the environment.
-            - If no meaningful runtime validation is possible, state what was attempted, why it failed, and what remains unverified.
+            - If normal validation is blocked by missing dependencies, diagnose the project environment first. You may make at most one isolated virtual-environment attempt under `/tmp`, using the editable project and the smallest reasonable dependency setup. Never modify the user's active environment or leave verification artifacts in the repository.
+            - In a temporary environment, run a minimal behavior check first, then focused tests when reasonably scoped. Stop if setup fails instead of repeatedly repairing the environment.
+            - If meaningful runtime validation remains unavailable, report what was attempted, why it failed, and which behavior remains unverified.
             """
         ).strip()
         memory_rules = textwrap.dedent(
@@ -408,18 +397,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - feedback_workflow: reusable guidance about how Codemate should plan, code, test, report, and use tools with this user.
             - project_context: durable project goals, architecture decisions, constraints, storage layout, permission model, and feature direction.
             - Current tool results and file contents override memory when they conflict.
-            """
-        ).strip()
-        delegation_rules = textwrap.dedent(
-            """\
-            Delegation:
-            - Use delegate only for broad, uncertain, or multi-branch read-only investigations where isolating noisy intermediate search results would help.
-            - Delegate is useful when you need to inspect several independent areas, compare multiple modules, or gather external evidence before deciding the next action.
-            - Do not use delegate for simple file reads, simple grep searches, single-file inspection, direct edits, or tasks where the next action is already clear.
-            - Do not delegate work that requires modifying files, running risky shell commands, making final decisions, or answering the user directly.
-            - Give each delegated task a concrete question and scope. Vague delegated tasks produce weak reports.
-            - Treat delegate results as supporting evidence and navigation hints. You remain responsible for deciding, editing, verifying, and giving the final answer.
-            - If you will edit a file based on delegate findings, read that exact file yourself before editing.
             """
         ).strip()
         answer_rules = textwrap.dedent(
@@ -440,8 +417,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - When explaining local project changes, prefer concrete module/function references over vague summaries.
             """
         ).strip()
-        # prefix 可以理解成 agent 的“工作手册”：
-        # 它是谁、如何使用工具、当前仓库是什么状态，都写在这里。
+        # Prefix 是 agent 的稳定工作手册，只包含身份、规则和工作区路径。
         text = textwrap.dedent(
             f"""\
             You are codemate, a small local coding agent working inside a local repository.
@@ -454,8 +430,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
 
             {memory_rules}
 
-            {delegation_rules}
-
             {answer_rules}
 
             {self.workspace.text()}
@@ -464,37 +438,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return PromptPrefix(
             text=text,
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            workspace_fingerprint=self.workspace.fingerprint(),
             tool_signature=self.tool_signature(),
-            built_at=now(),
         )
-
-    def _apply_prefix_state(self, prefix_state):
-        self.prefix_state = prefix_state
-        self.prefix = prefix_state.text
-
-    def refresh_prefix(self, force=False):
-        previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
-        previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
-
-        # 工作区事实相对稳定，所以这里按整体刷新；
-        # 只有这些事实真的变化了，才重建完整 prefix。
-        refreshed_workspace = WorkspaceContext.build(self.root)
-        refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()
-        workspace_facts_changed = force or refreshed_workspace_fingerprint != previous_workspace_fingerprint
-        if workspace_facts_changed:
-            self.workspace = refreshed_workspace
-
-        prefix_state = self.build_prefix() if workspace_facts_changed or force or previous_hash is None else self.prefix_state
-        prefix_changed = force or previous_hash != prefix_state.hash
-        if prefix_changed:
-            self._apply_prefix_state(prefix_state)
-
-        self._last_prefix_refresh = {
-            "workspace_facts_changed": workspace_facts_changed,
-            "prefix_changed": prefix_changed,
-        }
-        return dict(self._last_prefix_refresh)
 
     def skills_root(self):
         return self.paths.project_skills
@@ -683,7 +628,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return textwrap.dedent(
             f"""\
             Runtime context:
-            - current_local_datetime: {local_now.isoformat(timespec="seconds")}
             - current_local_date: {current_date}
             - timezone: {self.timezone_name}
             - memory_root: {memorylib.memory_root(self.root)}
@@ -947,7 +891,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         )
 
     def _build_messages_and_metadata(self, user_message):
-        refresh = self.refresh_prefix()
         self.invalidate_stale_memory()
         message_build = self.context_manager.build_messages(user_message)
         metadata = dict(message_build.metadata)
@@ -970,10 +913,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
-                "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
+                "workspace_fingerprint": self.workspace.fingerprint(),
                 "tool_signature": self.prefix_state.tool_signature,
-                "workspace_facts_changed": refresh["workspace_facts_changed"],
-                "prefix_changed": refresh["prefix_changed"],
                 "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
             }
         )

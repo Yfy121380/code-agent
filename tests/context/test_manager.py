@@ -6,6 +6,7 @@
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
 from codemate.context import ContextManager
+from codemate.context.types import MAX_RECENT_OBSERVATION_TOOL_RESULTS
 
 
 def build_workspace(tmp_path):
@@ -450,7 +451,7 @@ def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
         }
     )
 
-    for index in range(21):
+    for index in range(MAX_RECENT_OBSERVATION_TOOL_RESULTS + 1):
         call_id = f"call_read_micro_{index}"
         args = {"path": "sample.txt", "start": index + 1, "end": index + 1}
         agent.record(
@@ -474,7 +475,7 @@ def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
     prompt, metadata = ContextManager(agent).build("summarize observations")
     transcript = prompt.split("\n\nTranscript:\n", 1)[1].split("\n\nCurrent user request:", 1)[0]
 
-    assert "OBSERVATION-20" in transcript
+    assert f"OBSERVATION-{MAX_RECENT_OBSERVATION_TOOL_RESULTS}" in transcript
     assert "OBSERVATION-0" not in transcript
     assert "OLD-WEB-OBSERVATION" not in transcript
     assert transcript.count("Old tool result content cleared.") == 2
@@ -483,7 +484,7 @@ def test_context_manager_microcompacts_old_read_only_tool_results(tmp_path):
 
 def test_context_manager_removes_image_blocks_when_old_read_result_is_cleared(tmp_path):
     agent = build_agent(tmp_path, [])
-    for index in range(25):
+    for index in range(MAX_RECENT_OBSERVATION_TOOL_RESULTS + 5):
         call_id = f"call_image_{index}"
         args = {"path": f"shot_{index}.png"}
         agent.record(
@@ -625,7 +626,8 @@ def test_ask_retrieves_long_term_memory_once_and_injects_selected_note(tmp_path)
     assert "feedback_workflow:" in agent.model_client.prompts[0]
     assert "project_context:" in agent.model_client.prompts[0]
     assert "Runtime context:" in agent.model_client.prompts[0]
-    assert "current_local_datetime:" in agent.model_client.prompts[0]
+    assert "current_local_datetime:" not in agent.model_client.prompts[0]
+    assert "current_local_date:" in agent.model_client.prompts[0]
     assert "memory_root:" in agent.model_client.prompts[0]
     assert agent.model_client.structured_outputs[0] is None
 

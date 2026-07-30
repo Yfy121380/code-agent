@@ -1,7 +1,7 @@
 """工作区快照工具。
 
-这个模块负责在 agent 按需读文件之前，先给它一份便宜的“仓库第一印象”。
-这份快照刻意保持小而稳定：只包含当前目录、Git 分支、状态和最近提交。
+这个模块收集工作目录和 Git 信息，供终端状态、trace 和运行时诊断使用。
+模型 prefix 只使用稳定的路径信息，避免文件修改导致 prompt 缓存失效。
 """
 
 import subprocess
@@ -90,19 +90,12 @@ class WorkspaceContext:
         )
 
     def text(self):
-        # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
-        commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
+        """返回适合放入模型 prefix 的稳定工作区信息。"""
         return textwrap.dedent(
             f"""\
             Workspace:
             - cwd: {self.cwd}
             - repo_root: {self.repo_root}
-            - branch: {self.branch}
-            - default_branch: {self.default_branch}
-            - status:
-            {self.status}
-            - recent_commits:
-            {commits}
             """
         ).strip()
 

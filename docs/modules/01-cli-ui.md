@@ -38,7 +38,7 @@ Codemate 在交互式 REPL 中支持一组 slash commands，用于查看状态�
 - `/model`：查看当前模型和当前 provider 下可选模型。
 - `/model <name>`：切换当前模型。
 
-切换 provider 或 model 后，会重新构建 model client，重置 token usage，并刷新 prefix。顶部 banner 会同步展示新的 `provider:model`。
+切换 provider 或 model 后，会重新构建 model client 并重置 token usage。Prefix 只在 Agent 启动时构建一次，不会因为模型切换或运行中的 Git 状态变化而刷新；顶部 banner 会同步展示新的 `provider:model`。
 
 ### 上下文和记忆
 

@@ -21,6 +21,12 @@ from .schemas import _tool_specs_to_openai, _tool_specs_to_openai_chat
 from .types import ModelResponse, ModelStreamEvent, ModelToolCall
 
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
+OPENAI_RETRY_DELAYS = (1.0, 3.0, 7.0)
+
+
+def _connection_error_detail(exc):
+    """Return the useful underlying reason hidden by urllib wrappers."""
+    return str(getattr(exc, "reason", exc))
 
 
 def _text_from_openai_content(content):
@@ -389,7 +395,9 @@ class OpenAICompatibleModelClient:
         self.supports_streaming = self.capabilities.supports_streaming
         self.supports_images = self.capabilities.supports_images
         self.supports_reasoning = self.capabilities.supports_reasoning
-        self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
+        # Responses-compatible providers may proxy OpenAI prompt caching under custom URLs.
+        # Always send the cache hint instead of guessing support from the hostname.
+        self.supports_prompt_cache = True
         self.supports_tools = True
         self.last_completion_metadata = {}
 
@@ -436,7 +444,8 @@ class OpenAICompatibleModelClient:
             raise RuntimeError(
                 "Could not reach the OpenAI-compatible chat fallback.\n"
                 f"Base URL: {self.base_url}\n"
-                f"Model: {self.model}"
+                f"Model: {self.model}\n"
+                f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
         if data.get("error"):
@@ -494,7 +503,8 @@ class OpenAICompatibleModelClient:
             raise RuntimeError(
                 "Could not reach the OpenAI-compatible chat streaming fallback.\n"
                 f"Base URL: {self.base_url}\n"
-                f"Model: {self.model}"
+                f"Model: {self.model}\n"
+                f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
         text_parts = []
@@ -526,7 +536,8 @@ class OpenAICompatibleModelClient:
             raise RuntimeError(
                 "OpenAI-compatible chat streaming fallback was interrupted.\n"
                 f"Base URL: {self.base_url}\n"
-                f"Model: {self.model}"
+                f"Model: {self.model}\n"
+                f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
         metadata = {
@@ -590,7 +601,7 @@ class OpenAICompatibleModelClient:
             headers=headers,
             method="POST",
         )
-        attempts = 3
+        attempts = len(OPENAI_RETRY_DELAYS) + 1
         for attempt in range(attempts):
             try:
                 stream = urllib.request.urlopen(request, timeout=self.timeout)
@@ -598,7 +609,7 @@ class OpenAICompatibleModelClient:
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
                 if tools and exc.code >= 500:
                     yield from self._stream_chat_completions(
@@ -612,12 +623,13 @@ class OpenAICompatibleModelClient:
                 raise RuntimeError(f"OpenAI-compatible streaming request failed with HTTP {exc.code}: {body}") from exc
             except (urllib.error.URLError, RemoteDisconnected) as exc:
                 if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible streaming backend.\n"
                     f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
+                    f"Model: {self.model}\n"
+                    f"Cause: {_connection_error_detail(exc)}"
                 ) from exc
 
         text_parts = []
@@ -659,7 +671,8 @@ class OpenAICompatibleModelClient:
             raise RuntimeError(
                 "OpenAI-compatible streaming response was interrupted.\n"
                 f"Base URL: {self.base_url}\n"
-                f"Model: {self.model}"
+                f"Model: {self.model}\n"
+                f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
         data = completed_response or _openai_stream_fallback_data(text_parts, tool_calls)
@@ -710,7 +723,7 @@ class OpenAICompatibleModelClient:
             headers=headers,
             method="POST",
         )
-        attempts = 3
+        attempts = len(OPENAI_RETRY_DELAYS) + 1
         for attempt in range(attempts):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -721,7 +734,7 @@ class OpenAICompatibleModelClient:
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
                 if tools and exc.code >= 500:
                     return self._complete_chat_completions(
@@ -734,12 +747,13 @@ class OpenAICompatibleModelClient:
                 raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
             except (urllib.error.URLError, RemoteDisconnected) as exc:
                 if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible backend.\n"
                     f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
+                    f"Model: {self.model}\n"
+                    f"Cause: {_connection_error_detail(exc)}"
                 ) from exc
 
         if content_type.startswith("text/event-stream") or body_text.lstrip().startswith("data:"):

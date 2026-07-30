@@ -5,14 +5,20 @@
 """
 
 import json
+import urllib.error
 import urllib.request
 
 from PIL import Image
+import pytest
 
 from codemate.models import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from codemate.models.anthropic import _extract_anthropic_response, _to_anthropic_messages
 from codemate.models.capabilities import model_capability
-from codemate.models.openai import _extract_openai_model_response, _to_openai_input
+from codemate.models.openai import (
+    OPENAI_RETRY_DELAYS,
+    _extract_openai_model_response,
+    _to_openai_input,
+)
 
 
 class FakeHTTPResponse:
@@ -235,6 +241,59 @@ def test_openai_reasoning_effort_is_added_for_reasoning_models(monkeypatch):
     assert response.text == "ok"
     assert client.supports_images is True
     assert captured["payload"]["reasoning"] == {"effort": "high"}
+
+
+def test_openai_custom_endpoint_receives_prompt_cache_key(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"output_text": "ok", "usage": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    client.complete("hello", 100, prompt_cache_key="stable-prefix")
+
+    assert client.supports_prompt_cache is True
+    assert captured["payload"]["prompt_cache_key"] == "stable-prefix"
+    assert "prompt_cache_retention" not in captured["payload"]
+
+
+def test_openai_responses_retries_transient_connection_errors(monkeypatch):
+    attempts = []
+    delays = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        if len(attempts) <= len(OPENAI_RETRY_DELAYS):
+            raise urllib.error.URLError("temporary disconnect")
+        return FakeHTTPResponse({"output_text": "ok", "usage": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.openai.time.sleep", delays.append)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    response = client.complete("hello", 100)
+
+    assert response.text == "ok"
+    assert len(attempts) == len(OPENAI_RETRY_DELAYS) + 1
+    assert delays == list(OPENAI_RETRY_DELAYS)
+
+
+def test_openai_connection_error_includes_underlying_reason(monkeypatch):
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        raise urllib.error.URLError("connection reset by peer")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.openai.time.sleep", lambda _delay: None)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(RuntimeError, match="Cause: connection reset by peer"):
+        client.complete("hello", 100)
 
 
 def test_anthropic_effort_is_added_for_claude_but_not_deepseek(monkeypatch):
