@@ -5,9 +5,11 @@ syntax. These tests exercise the block buffering rules directly.
 """
 
 from rich.markdown import Markdown
+from rich.text import Text
 
 from codemate.ui import TerminalUI
 from codemate.ui.markdown_stream import COMMENTARY_STYLE, MarkdownStreamRenderer
+from codemate.ui.terminal import FINAL_ANSWER_MARKER_STYLE
 
 
 class RecordingConsole:
@@ -96,9 +98,30 @@ def test_terminal_stream_flushes_pending_text_when_phase_changes():
     ui.stream_delta("final text\n\n", phase="final_answer")
     ui.stream_end(kind="final")
 
-    markdown_objects = [item["objects"][0] for item in console.printed if isinstance(item["objects"][0], Markdown)]
+    renderables = [item["objects"][0] for item in console.printed]
+    markdown_objects = [item for item in renderables if isinstance(item, Markdown)]
+    markers = [item for item in renderables if isinstance(item, Text) and item.plain == "◆ Final answer"]
     assert [item.markup for item in markdown_objects] == ["progress without blank", "final text"]
     assert [item.style for item in markdown_objects] == [COMMENTARY_STYLE, "none"]
+    assert len(markers) == 1
+    assert markers[0].style == FINAL_ANSWER_MARKER_STYLE
+    assert renderables.index(markers[0]) < renderables.index(markdown_objects[1])
+
+
+def test_terminal_stream_final_marker_is_printed_once_for_multiple_final_deltas():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.stream_start()
+    ui.stream_delta("Final", phase="final_answer")
+    ui.stream_delta(" answer\n\n", phase="final_answer")
+    ui.stream_end(kind="final")
+
+    renderables = [item["objects"][0] for item in console.printed]
+    markers = [item for item in renderables if isinstance(item, Text) and item.plain == "◆ Final answer"]
+    markdown_objects = [item for item in renderables if isinstance(item, Markdown)]
+    assert len(markers) == 1
+    assert [item.markup for item in markdown_objects] == ["Final answer"]
 
 
 def test_terminal_live_preview_updates_before_markdown_block_finishes():

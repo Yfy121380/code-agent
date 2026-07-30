@@ -35,6 +35,15 @@ from .approvals import ApprovalMixin
 from .compaction import HistoryCompactionMixin
 from .dream import DreamMixin
 from .loop import RuntimeLoopMixin
+from .planning import (
+    AGENT_MODE,
+    PLAN_MODE,
+    PLAN_MODE_PROMPT,
+    PLAN_STATUSES,
+    PLAN_TOOL_DESCRIPTION_OVERRIDES,
+    PLAN_VISIBLE_TOOLS,
+    PlanModeMixin,
+)
 from .tool_execution import ToolExecutionMixin
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
@@ -73,7 +82,7 @@ class PromptPrefix:
     tool_signature: str
 
 
-class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin):
+class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin, PlanModeMixin):
     def __init__(
         self,
         model_client,
@@ -138,6 +147,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "workspace_root": workspace.repo_root,
             "history": [],
             "history_summary": "",
+            "workflow_mode": AGENT_MODE,
+            "plan": None,
             "memory_candidate_extract": memorylib.default_candidate_extract_state(),
             "read_files": {},
             "todos": [],
@@ -164,9 +175,24 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         )
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
-        # 可复用的前缀提示词在启动时构建一次，避免运行中的仓库变化破坏缓存前缀。
-        self.prefix_state = self.build_prefix()
-        self.prefix = self.prefix_state.text
+        self.model_tool_specs_by_mode = {
+            AGENT_MODE: self._build_model_tool_specs(AGENT_MODE),
+            PLAN_MODE: self._build_model_tool_specs(PLAN_MODE),
+        }
+        # Normal/Plan 两套前缀和工具签名只构建一次。模式切换只选择现成状态，
+        # 避免运行中重组稳定前缀并破坏各模式内部的 prompt cache。
+        self.prefix_states = {
+            AGENT_MODE: self.build_prefix(AGENT_MODE),
+            PLAN_MODE: self.build_prefix(PLAN_MODE),
+        }
+        plan = self.session.get("plan")
+        if self.is_plan_mode():
+            self.approval_policy = "read_only"
+        elif isinstance(plan, dict) and plan.get("status") == "approved":
+            # Approval can be followed by a long implementation loop. If that
+            # process is interrupted, resume with the policy saved on entry.
+            self.approval_policy = str(plan.get("previous_approval_policy") or "ask")
+        self._activate_workflow_context()
         # 上下文管理器，组装上下文，进行上下文压缩
         self.context_manager = ContextManager(self)
         # 保存当前session状态文件
@@ -208,6 +234,34 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
     def _ensure_session_shape(self):
         self.session.setdefault("history", [])
         self.session.setdefault("history_summary", "")
+        workflow_mode = str(self.session.setdefault("workflow_mode", AGENT_MODE))
+        if workflow_mode not in {AGENT_MODE, PLAN_MODE}:
+            self.session["workflow_mode"] = AGENT_MODE
+        plan = self.session.setdefault("plan", None)
+        if self.session["workflow_mode"] == PLAN_MODE:
+            if not isinstance(plan, dict):
+                self.session["plan"] = {
+                    "status": "drafting",
+                    "title": "",
+                    "content": "",
+                    "revision_feedback": "",
+                    "previous_approval_policy": self.approval_policy,
+                    "updated_at": now(),
+                }
+            else:
+                if plan.get("status") not in PLAN_STATUSES:
+                    plan["status"] = "drafting"
+                if plan.get("status") in {"awaiting_approval", "approved"}:
+                    # Terminal approval cannot survive process exit. An
+                    # inconsistent approved/plan state also returns to drafting.
+                    plan["status"] = "drafting"
+                plan.setdefault("title", "")
+                plan.setdefault("content", "")
+                plan.setdefault("revision_feedback", "")
+                plan.setdefault("previous_approval_policy", self.approval_policy)
+                plan.setdefault("updated_at", now())
+        elif isinstance(plan, dict) and plan.get("status") != "approved":
+            self.session["plan"] = None
         self.session.setdefault("title", "")
         self.session.setdefault("title_slug", "")
         self.session.setdefault("updated_at", self.session.get("created_at", now()))
@@ -250,40 +304,62 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             tools = {name: tool for name, tool in tools.items() if name in self.allowed_tools}
         return tools
 
-    def tool_signature(self):
+    def active_tool_names(self, mode=None):
+        """Return the model-visible tool names for one stable workflow mode."""
+        mode = mode or (PLAN_MODE if self.is_plan_mode() else AGENT_MODE)
+        if mode == PLAN_MODE:
+            return set(self.tools).intersection(PLAN_VISIBLE_TOOLS)
+        return set(self.tools).difference(toolkit.PLAN_INTERACTION_TOOLS)
+
+    @staticmethod
+    def _tool_description_for_mode(name, tool, mode):
+        description = tool["description"]
+        if mode == PLAN_MODE:
+            return PLAN_TOOL_DESCRIPTION_OVERRIDES.get(name, description)
+        return description
+
+    def tool_signature(self, mode=None):
         payload = []
-        for name in sorted(self.tools):
+        for name in sorted(self.active_tool_names(mode)):
             tool = self.tools[name]
             payload.append(
                 {
                     "name": name,
                     "input_schema": tool["input_schema"],
                     "risky": tool["risky"],
-                    "description": tool["description"],
+                    "description": self._tool_description_for_mode(name, tool, mode),
                 }
             )
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
-    def model_tools(self):
+    def _build_model_tool_specs(self, mode):
+        """Build one immutable-by-convention model schema set per workflow mode."""
         specs = []
+        active_names = self.active_tool_names(mode)
         for name, tool in self.tools.items():
+            if name not in active_names:
+                continue
             specs.append(
                 {
                     "name": name,
-                    "description": tool["description"],
+                    "description": self._tool_description_for_mode(name, tool, mode),
                     "input_schema": tool["input_schema"],
                     "risky": tool["risky"],
                 }
             )
         return specs
 
-    def build_prefix(self):
+    def model_tools(self):
+        mode = PLAN_MODE if self.is_plan_mode() else AGENT_MODE
+        return self.model_tool_specs_by_mode[mode]
+
+    def build_prefix(self, mode=AGENT_MODE):
         if self.runtime_mode == "dream":
             text = memorylib.dream_system_prompt(memorylib.memory_root(self.root))
             return PromptPrefix(
                 text=text,
                 hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                tool_signature=self.tool_signature(),
+                tool_signature=self.tool_signature(AGENT_MODE),
             )
 
         tool_use_rules = textwrap.dedent(
@@ -302,6 +378,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - Keep the active todo plan accurate as work progresses.
             - Use todo_list when you need to review the current plan before continuing.
             - Do not call todo_list repeatedly when the current plan is already known.
+            - The latest user request always takes precedence. A previously approved plan retained in context is background for possible continuation, not an instruction that must override the current request.
             - Use skill_load when an available skill clearly matches the current task.
             - skill_load returns the skill's complete instructions and absolute root. Follow those instructions while completing the task.
             - Skill-relative resources such as scripts/, references/, examples/, and templates/ are located under the root returned by skill_load.
@@ -403,28 +480,43 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - When explaining local project changes, prefer concrete module/function references over vague summaries.
             """
         ).strip()
-        # Prefix 是 agent 的稳定工作手册，只包含身份、规则和工作区路径。
-        text = textwrap.dedent(
-            f"""\
-            You are codemate, a small local coding agent working inside a local repository.
+        # 两种模式共享身份、Memory 和 workspace；工具、工作流与回答规则互不混用。
+        if mode == PLAN_MODE:
+            text = textwrap.dedent(
+                f"""\
+                You are codemate, a local coding agent working in Plan Mode inside a local repository.
 
-            {tool_use_rules}
+                Your responsibility is to investigate the user's request, resolve important uncertainty, and prepare an implementation-ready plan. Do not implement the plan or modify project files while Plan Mode is active.
 
-            {progress_rules}
+                {PLAN_MODE_PROMPT}
 
-            {workflow_rules}
+                {memory_rules}
 
-            {memory_rules}
+                {self.workspace.text()}
+                """
+            ).strip()
+        else:
+            text = textwrap.dedent(
+                f"""\
+                You are codemate, a local coding agent working inside a local repository.
 
-            {answer_rules}
+                {tool_use_rules}
 
-            {self.workspace.text()}
-            """
-        ).strip()
+                {progress_rules}
+
+                {workflow_rules}
+
+                {memory_rules}
+
+                {answer_rules}
+
+                {self.workspace.text()}
+                """
+            ).strip()
         return PromptPrefix(
             text=text,
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            tool_signature=self.tool_signature(),
+            tool_signature=self.tool_signature(mode),
         )
 
     def skills_root(self):
@@ -854,7 +946,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 "history_summary_chars": sections.get("history_summary", {}).get("rendered_chars", 0),
                 "history_chars": sections.get("history", {}).get("rendered_chars", 0),
                 "request_chars": len(user_message),
-                "tool_count": len(self.tools),
+                "tool_count": len(self.active_tool_names()),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
@@ -882,6 +974,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return payload
 
     def reset(self):
+        if self.is_plan_mode():
+            self.exit_plan_mode()
+        elif isinstance(self.session.get("plan"), dict):
+            self.session["plan"] = None
         self.session["history"] = []
         self.session["history_summary"] = ""
         self.session["read_files"] = {}

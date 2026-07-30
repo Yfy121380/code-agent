@@ -130,9 +130,13 @@ class HistoryCompactionMixin:
         split = renderer.split_for_compaction(
             min_messages=RECENT_HISTORY_MIN_MESSAGES,
             min_chars=RECENT_HISTORY_MIN_CHARS,
+            pinned_conversation_id=(
+                self._current_conversation_id if task_state is not None else ""
+            ),
         )
         history_to_compact = list(split["history_to_compact"])
         recent_history = list(split["recent_history"])
+        pinned_user_request = split.get("pinned_user_request")
         before_messages = len(self.session.get("history", []))
         if not history_to_compact:
             result = {
@@ -176,6 +180,7 @@ class HistoryCompactionMixin:
                     "history_before_messages": before_messages,
                     "history_after_messages": len(self.session["history"]),
                     "history_compacted_messages": len(history_to_compact),
+                    "pinned_current_user_request": bool(pinned_user_request),
                     "summary_chars": len(self.session["history_summary"]),
                     "attempts": attempts,
                     "duration_ms": int((time.monotonic() - started_at) * 1000),
@@ -202,7 +207,7 @@ class HistoryCompactionMixin:
         return result
 
     def _restore_compact_context(self, recent_history):
-        """Restore only Skill and Todo state missing from retained history.
+        """Restore active Skill, Todo, and Plan state missing from retained history.
 
         Restoration messages are persisted in history once. Repeated compaction
         first removes older synthetic messages so they never accumulate.
@@ -210,7 +215,7 @@ class HistoryCompactionMixin:
         recent_history = [
             dict(item)
             for item in recent_history
-            if str(item.get("kind", "")) not in {"skill_context", "todo_context"}
+            if str(item.get("kind", "")) not in {"skill_context", "todo_context", "plan_context"}
         ]
         events = self._successful_state_tool_events(recent_history)
         recent_skill_names = {
@@ -238,11 +243,37 @@ class HistoryCompactionMixin:
         todos = list(self.session.get("todos") or [])
         if todos and not self._recent_history_has_current_todos(events, todos):
             restored.append(self._context_message("todo_context", format_todo_plan(todos)))
+
+        plan = self.session.get("plan")
+        if (
+            isinstance(plan, dict)
+            and plan.get("status") in {"drafting", "approved"}
+            and str(plan.get("content", "")).strip()
+            and not self._recent_history_has_current_plan(events, plan)
+        ):
+            state_label = (
+                "Plan draft requiring revision"
+                if plan.get("status") == "drafting"
+                else "Previously approved implementation plan retained for possible continuation"
+            )
+            feedback = str(plan.get("revision_feedback", "")).strip()
+            feedback_text = f"\n\nRevision feedback:\n{feedback}" if feedback else ""
+            restored.append(
+                self._context_message(
+                    "plan_context",
+                    (
+                        f"{state_label}:\n"
+                        f"Title: {str(plan.get('title', '')).strip()}\n\n"
+                        f"{str(plan.get('content', '')).strip()}"
+                        f"{feedback_text}"
+                    ),
+                )
+            )
         return restored + recent_history
 
     @staticmethod
     def _successful_state_tool_events(messages):
-        """Return successful Skill/Todo calls in retained chronological order."""
+        """Return successful state-bearing calls in retained chronological order."""
         results = {
             str(item.get("tool_call_id", "")): item
             for item in messages
@@ -254,7 +285,7 @@ class HistoryCompactionMixin:
                 continue
             for call in item.get("tool_calls") or []:
                 name = str(call.get("name", ""))
-                if name not in {"skill_load", "todo_write", "todo_list"}:
+                if name not in {"skill_load", "todo_write", "todo_list", "submit_plan"}:
                     continue
                 result = results.get(str(call.get("id", "")))
                 content = str((result or {}).get("content", "")).lstrip().lower()
@@ -276,6 +307,20 @@ class HistoryCompactionMixin:
         except (TypeError, ValueError):
             return False
         return written == todos
+
+    @staticmethod
+    def _recent_history_has_current_plan(events, plan):
+        title = str(plan.get("title", "")).strip()
+        content = str(plan.get("content", "")).strip()
+        for event in reversed(events):
+            if event["name"] != "submit_plan":
+                continue
+            args = event["call"].get("args", {})
+            return (
+                str(args.get("title", "")).strip() == title
+                and str(args.get("plan", "")).strip() == content
+            )
+        return False
 
     @staticmethod
     def _context_message(kind, content):

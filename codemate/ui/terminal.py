@@ -26,6 +26,7 @@ TOOL_CALL_STYLE = "#b0b0b0"
 TOOL_RESULT_STYLE = "#b0b0b0"
 TOOL_DETAIL_STYLE = "#999999"
 TOOL_ERROR_STYLE = "#d6a85f"
+FINAL_ANSWER_MARKER_STYLE = "#e5e7eb"
 
 
 class NullUI:
@@ -64,6 +65,12 @@ class NullUI:
     def approval_request(self, name, args, metadata=None):
         return False
 
+    def request_user_input(self, questions):
+        return {"status": "cancelled", "answers": {}}
+
+    def plan_review(self, title, plan):
+        return {"decision": "cancelled"}
+
     def session_menu(self, sessions, current_id=""):
         return None
 
@@ -77,6 +84,7 @@ class TerminalUI(NullUI):
     def __init__(self, console=None):
         self.console = console or Console()
         self._stream_phase = ""
+        self._stream_final_marker_printed = False
         self._stream_renderer = MarkdownStreamRenderer(self.console)
 
     def approval_menu(self, choices):
@@ -160,16 +168,26 @@ class TerminalUI(NullUI):
         # 流式文本是正式输出，但 Markdown 需要分块渲染：
         # renderer 会先缓冲未完成语法块，history/trace 仍保存完整原文。
         self._stream_phase = str(phase or "")
+        self._stream_final_marker_printed = False
         self._stream_renderer.reset()
+
+    def _print_final_answer_marker(self):
+        # 最终回答提示只属于终端展示，不进入 history/trace；
+        # 让 final answer 和之前的 commentary、工具输出更容易区分。
+        self.console.print(Text("◆ Final answer", style=FINAL_ANSWER_MARKER_STYLE))
 
     def stream_delta(self, text, phase=""):
         text = str(text or "")
         if not text:
             return
+        target_phase = str(phase or self._stream_phase or "")
         if phase:
             if self._stream_phase and phase != self._stream_phase:
                 self._stream_renderer.finish(phase=self._stream_phase)
-            self._stream_phase = str(phase)
+            self._stream_phase = target_phase
+        if target_phase == "final_answer" and not self._stream_final_marker_printed:
+            self._print_final_answer_marker()
+            self._stream_final_marker_printed = True
         self._stream_renderer.write(text, phase=self._stream_phase)
 
     def stream_end(self, kind="", metadata=None):
@@ -198,6 +216,10 @@ class TerminalUI(NullUI):
             self.console.print(Markdown(text, style=COMMENTARY_STYLE))
 
     def tool_start(self, name, args, risk_level=""):
+        if name == "submit_plan":
+            # submit_plan 随后会通过 plan_review() 打出完整 Plan 面板；
+            # 这里隐藏普通工具起始行，避免出现冗余的 “◇ submit_plan”。
+            return
         summary = summarize_tool_call(name, args)
         lines = summary.splitlines() or [name]
         title = f"◇ {lines[0]}"
@@ -254,8 +276,74 @@ class TerminalUI(NullUI):
             self.console.print()
             return {"allowed": False}
 
+    def request_user_input(self, questions):
+        """Collect bounded planning decisions without exposing terminal details to runtime."""
+        answers = {}
+        try:
+            for question in questions:
+                header = str(question.get("header", "")).strip()
+                prompt = str(question.get("question", "")).strip()
+                self.console.print(Panel(Markdown(prompt), title=header, border_style="cyan"))
+
+                choices = []
+                for option in question.get("options", []):
+                    label = str(option.get("label", "")).strip()
+                    description = str(option.get("description", "")).strip()
+                    suffix = " (Recommended)" if bool(option.get("recommended", False)) else ""
+                    choices.append(
+                        (
+                            f"{label}{suffix} - {description}",
+                            {"type": "option", "value": label},
+                        )
+                    )
+                choices.append(("Other - Enter a custom answer", {"type": "other"}))
+                selected = self._selection_menu(
+                    choices,
+                    hint="Use ↑/↓ to select, Enter to confirm, Ctrl+C to cancel.",
+                    cancel_result=None,
+                )
+                if not selected:
+                    return {"status": "cancelled", "answers": {}}
+                if selected.get("type") == "other":
+                    custom = self.console.input("Other: ").strip()
+                    if not custom:
+                        return {"status": "cancelled", "answers": {}}
+                    selected = {"type": "custom", "value": custom}
+                answers[str(question.get("id", "")).strip()] = selected
+        except (EOFError, KeyboardInterrupt):
+            self.console.print()
+            return {"status": "cancelled", "answers": {}}
+        return {"status": "answered", "answers": answers}
+
+    def plan_review(self, title, plan):
+        """Render a submitted plan and return the user's approval decision."""
+        self.console.print(Panel(Markdown(plan), title=f"Plan: {title}", border_style="cyan"))
+        choices = [
+            ("Approve and implement", {"decision": "approved"}),
+            ("Revise plan", {"decision": "revision_requested"}),
+            ("Cancel", {"decision": "cancelled"}),
+        ]
+        try:
+            decision = self._selection_menu(
+                choices,
+                hint="Use ↑/↓ to select, Enter to confirm.",
+                cancel_result={"decision": "cancelled"},
+            )
+            decision = decision or {"decision": "cancelled"}
+            if decision.get("decision") == "revision_requested":
+                while True:
+                    feedback = self.console.input("Revision feedback: ").strip()
+                    if feedback:
+                        return {"decision": "revision_requested", "feedback": feedback}
+                    self.console.print("Revision feedback cannot be empty.")
+            return decision
+        except (EOFError, KeyboardInterrupt):
+            self.console.print()
+            return {"decision": "cancelled"}
+
     def final_answer(self, text):
         text = str(text or "").strip()
         if not text:
             return
+        self._print_final_answer_marker()
         self.console.print(Markdown(text))

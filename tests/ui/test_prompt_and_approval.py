@@ -22,9 +22,11 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     provider_items = list(completer.get_completions(Document("/provider "), None))
     model_items = list(completer.get_completions(Document("/model "), None))
     approval_items = list(completer.get_completions(Document("/approval "), None))
+    plan_items = list(completer.get_completions(Document("/plan"), None))
 
     assert any(str(item.display_text) == "/help" and str(item.display_meta_text) for item in root_items)
     assert any(str(item.display_text) == "/approval read_only" for item in approval_items)
+    assert any(str(item.display_text) == "/plan exit" for item in plan_items)
     assert any(str(item.display_text) == "/provider openai" for item in provider_items)
     assert any(str(item.display_text) == "/provider anthropic" for item in provider_items)
     assert any(str(item.display_text) == "/model gpt-5.5" for item in model_items)
@@ -64,3 +66,84 @@ def test_terminal_approval_can_return_session_allow_choice():
         "Allow read for /home/user/data this session",
         "Deny",
     ]
+
+
+def test_terminal_request_user_input_adds_other_and_returns_custom_answer():
+    output = StringIO()
+    ui = TerminalUI(console=Console(file=output, force_terminal=False))
+    captured = []
+
+    def fake_menu(choices, **_kwargs):
+        captured.extend(choices)
+        return choices[-1][1]
+
+    with patch.object(ui, "_selection_menu", fake_menu), patch.object(ui.console, "input", return_value="Custom choice"):
+        result = ui.request_user_input(
+            [
+                {
+                    "id": "storage",
+                    "header": "Storage",
+                    "question": "Choose a storage format.",
+                    "options": [
+                        {
+                            "label": "JSON",
+                            "description": "Use the current format.",
+                            "recommended": True,
+                        },
+                        {
+                            "label": "SQLite",
+                            "description": "Add a database.",
+                        },
+                    ],
+                }
+            ]
+        )
+
+    assert result == {
+        "status": "answered",
+        "answers": {"storage": {"type": "custom", "value": "Custom choice"}},
+    }
+    assert captured[-1][0].startswith("Other")
+    assert "(Recommended)" in captured[0][0]
+
+
+def test_terminal_plan_review_collects_revision_feedback():
+    output = StringIO()
+    ui = TerminalUI(console=Console(file=output, force_terminal=False))
+
+    def choose_revision(choices, **_kwargs):
+        return choices[1][1]
+
+    with patch.object(ui, "_selection_menu", choose_revision), patch.object(
+        ui.console,
+        "input",
+        return_value="Preserve the old format.",
+    ):
+        result = ui.plan_review("Plan title", "# Plan title\n\n## Tool\n\nUpdate the tool.")
+
+    assert result == {
+        "decision": "revision_requested",
+        "feedback": "Preserve the old format.",
+    }
+    assert "Plan title" in output.getvalue()
+
+
+def test_terminal_plan_review_reprompts_for_empty_revision_feedback():
+    output = StringIO()
+    ui = TerminalUI(console=Console(file=output, force_terminal=False))
+
+    def choose_revision(choices, **_kwargs):
+        return choices[1][1]
+
+    with patch.object(ui, "_selection_menu", choose_revision), patch.object(
+        ui.console,
+        "input",
+        side_effect=["", "Preserve the old format."],
+    ):
+        result = ui.plan_review("Plan title", "# Plan title\n\n## Tool\n\nUpdate the tool.")
+
+    assert result == {
+        "decision": "revision_requested",
+        "feedback": "Preserve the old format.",
+    }
+    assert "Revision feedback cannot be empty." in output.getvalue()

@@ -24,7 +24,14 @@ MAX_RECENT_OBSERVATION_TOOL_RESULTS = 50
 RECENT_HISTORY_MIN_MESSAGES = 20
 RECENT_HISTORY_MIN_CHARS = 50_000
 MAX_COMPACT_RETRIES = 3
-INTERNAL_CONTEXT_MESSAGE_KINDS = frozenset({"skill_context", "todo_context"})
+INTERNAL_CONTEXT_MESSAGE_KINDS = frozenset(
+    {
+        "skill_context",
+        "todo_context",
+        "plan_context",
+        "todo_invalidated_context",
+    }
+)
 HISTORY_SUMMARY_SECTIONS = (
     "Working Directory",
     "User Preferences And Constraints",

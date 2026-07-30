@@ -4,7 +4,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from codemate.ui.terminal import COMMENTARY_STYLE, TerminalUI
+from codemate.ui.terminal import COMMENTARY_STYLE, FINAL_ANSWER_MARKER_STYLE, TerminalUI
 
 
 class RecordingConsole:
@@ -44,7 +44,7 @@ def test_low_risk_label_is_omitted_from_normal_tool_log():
     assert console.printed[0]["objects"][0].plain == "◇ read_file README.md"
 
 
-def test_commentary_and_final_render_as_unframed_markdown():
+def test_commentary_and_final_render_as_unframed_markdown_with_marker():
     console = RecordingConsole()
     ui = TerminalUI(console=console)
 
@@ -52,8 +52,25 @@ def test_commentary_and_final_render_as_unframed_markdown():
     ui.final_answer("**Done**")
 
     commentary = console.printed[0]["objects"][0]
-    final = console.printed[1]["objects"][0]
+    marker = console.printed[1]["objects"][0]
+    final = console.printed[2]["objects"][0]
     assert isinstance(commentary, Markdown)
     assert commentary.style == COMMENTARY_STYLE
+    assert isinstance(marker, Text)
+    assert marker.plain == "◆ Final answer"
+    assert marker.style == FINAL_ANSWER_MARKER_STYLE
     assert isinstance(final, Markdown)
     assert final.style == "none"
+
+
+def test_submit_plan_tool_start_is_hidden_because_plan_review_renders_panel():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.tool_start("submit_plan", {"title": "Plan", "plan": "# Plan"})
+
+    assert console.printed == []
+
+    ui.tool_start("read_file", {"path": "README.md"}, risk_level="low")
+
+    assert console.printed[0]["objects"][0].plain == "◇ read_file README.md"

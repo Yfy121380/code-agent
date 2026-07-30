@@ -36,7 +36,9 @@ class ToolExecutionMixin:
             return True
         if name in {"list_files", "read_file", "grep"}:
             return True
-        if name in {"todo_write", "todo_list", "skill_load", "skill_unload"}:
+        if name in {"todo_write", "todo_list", "skill_load", "skill_unload", "delegate"}:
+            return True
+        if name in toolkit.PLAN_INTERACTION_TOOLS:
             return True
         if name == "run_shell":
             analysis = getattr(self, "_last_shell_analysis", None)
@@ -246,6 +248,12 @@ class ToolExecutionMixin:
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
+        if bool(getattr(self, "is_plan_mode", lambda: False)()) and name not in self.active_tool_names("plan"):
+            raise toolkit.ToolPolicyError(
+                f"tool is not available in Plan Mode: {name}",
+                code="plan_tool_unavailable",
+                security_event_type="plan_tool_unavailable",
+            )
         gate = toolkit.validate_tool(self, name, args)
         if self.approval_policy == "read_only" and not self.tool_metadata_read_only(name, self.tools.get(name, {"risky": True})):
             raise toolkit.ToolPolicyError(

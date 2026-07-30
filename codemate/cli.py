@@ -315,12 +315,17 @@ def run_cli(args, ui, agent_holder):
         # 会话切换只替换 session 相关状态；模型 provider/model、审批策略和 UI 沿用当前进程设置。
         nonlocal agent
         old_agent = current_agent()
+        approval_policy = old_agent.approval_policy
+        if old_agent.is_plan_mode():
+            plan = old_agent.session.get("plan")
+            if isinstance(plan, dict):
+                approval_policy = str(plan.get("previous_approval_policy") or "ask")
         new_agent = CodeMate.from_session(
             model_client=old_agent.model_client,
             workspace=old_agent.workspace,
             session_store=old_agent.session_store,
             session_id=session_id,
-            approval_policy=old_agent.approval_policy,
+            approval_policy=approval_policy,
             max_steps=old_agent.max_steps,
             max_new_tokens=old_agent.max_new_tokens,
             secret_env_names=old_agent.secret_env_names,
@@ -363,7 +368,8 @@ def run_cli(args, ui, agent_holder):
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
         # 因此 history、Todo、Skill 和权限状态会跨轮延续。
         try:
-            user_input = prompt_session.prompt("\ncodemate> ").strip()
+            prompt_text = "\ncodemate[plan]> " if agent.is_plan_mode() else "\ncodemate> "
+            user_input = prompt_session.prompt(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
             print("")
             return 0
@@ -375,11 +381,36 @@ def run_cli(args, ui, agent_holder):
         if user_input == "/help":
             print(HELP_DETAILS)
             continue
+        if user_input == "/plan exit":
+            if not agent.exit_plan_mode():
+                print("not currently in Plan Mode")
+            else:
+                print("Plan Mode cancelled")
+                print_status()
+            continue
+        if user_input == "/plan":
+            if agent.enter_plan_mode():
+                print("entered Plan Mode")
+                print_status()
+            else:
+                print("already in Plan Mode")
+            continue
+        if user_input.startswith("/plan "):
+            print("usage: /plan or /plan exit")
+            continue
         if user_input == "/approval":
-            print(f"approval: {agent.approval_policy}")
+            if agent.is_plan_mode():
+                plan = agent.session.get("plan") or {}
+                previous = plan.get("previous_approval_policy", "ask")
+                print(f"approval: read_only (Plan Mode; previous: {previous})")
+            else:
+                print(f"approval: {agent.approval_policy}")
             print("modes: ask, auto, read_only, full")
             continue
         if user_input.startswith("/approval "):
+            if agent.is_plan_mode():
+                print("approval policy cannot be changed in Plan Mode")
+                continue
             mode = user_input[len("/approval "):].strip()
             if mode not in APPROVAL_POLICIES:
                 print("usage: /approval [ask|auto|read_only|full]")

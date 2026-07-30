@@ -1,6 +1,7 @@
 # 工具执行函数：实现 list/read/grep/shell/write/patch/todo/delegate 等工具的实际动作。
 
 import copy
+import json
 import re
 import shutil
 import subprocess
@@ -390,6 +391,55 @@ def tool_todo_list(agent, _args):
     return format_todo_plan(agent.session.get("todos"))
 
 
+def tool_request_user_input(agent, args):
+    """Collect one or more planning decisions through the active UI."""
+    result = agent.ui.request_user_input(list(args.get("questions") or []))
+    if not isinstance(result, dict):
+        result = {"status": "cancelled", "answers": {}}
+    return json.dumps(result, ensure_ascii=False)
+
+
+def tool_submit_plan(agent, args):
+    """Persist the current proposal and let the UI decide the next workflow state."""
+    title = args["title"].strip()
+    content = args["plan"].strip()
+    agent.begin_plan_submission(title, content)
+    try:
+        review = agent.ui.plan_review(title, content)
+    except Exception:
+        # An interrupted UI approval cannot remain resumable in-process.
+        agent.revise_plan()
+        raise
+    decision = str((review or {}).get("decision", "cancelled"))
+
+    if decision == "approved":
+        agent.approve_plan()
+        result = {
+            "status": "approved",
+            "message": (
+                "The plan was approved. Begin implementation now. "
+                "Replace planning Todos with implementation Todos when task tracking is useful."
+            ),
+        }
+    elif decision == "revision_requested":
+        feedback = str((review or {}).get("feedback", "")).strip()
+        agent.revise_plan(feedback)
+        result = {
+            "status": "revision_requested",
+            "feedback": feedback,
+            "message": "Revise the plan using the user's feedback, then submit it again.",
+        }
+    else:
+        # The Todo invalidation context must be appended after this tool result,
+        # otherwise Anthropic sees a user message between tool_use and tool_result.
+        agent.exit_plan_mode(defer_context=True)
+        result = {
+            "status": "cancelled",
+            "message": "The user cancelled the plan. Do not implement it.",
+        }
+    return json.dumps(result, ensure_ascii=False)
+
+
 def tool_skill_load(agent, args):
     skill = agent.load_skill(args.get("name"))
     if getattr(agent, "current_task_state", None) is not None:
@@ -632,6 +682,8 @@ _TOOL_RUNNERS = {
     "patch_file": tool_patch_file,
     "todo_write": tool_todo_write,
     "todo_list": tool_todo_list,
+    "request_user_input": tool_request_user_input,
+    "submit_plan": tool_submit_plan,
     "skill_load": tool_skill_load,
     "skill_unload": tool_skill_unload,
 }

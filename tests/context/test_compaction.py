@@ -6,6 +6,7 @@
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate.runtime.compaction import SUMMARY_WRAPPER_PREFIX
+from codemate.storage import TaskState
 
 
 SUMMARY = """## Working Directory
@@ -140,6 +141,54 @@ def test_ask_auto_compacts_before_model_request_when_budget_is_high(tmp_path, mo
     assert agent.model_client.tool_specs[0] == []
     assert agent.model_client.tool_specs[1]
     assert agent.session["history_summary"].startswith("## Working Directory")
+
+
+def test_auto_compaction_pins_current_user_request_before_recent_tail(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    add_plain_history(agent, 4)
+    conversation_id = agent.new_conversation_id()
+    agent._current_conversation_id = conversation_id
+    agent.record({"role": "user", "content": "preserve this exact request"})
+    for index in range(4):
+        agent.record({"role": "assistant", "content": f"observation-{index}-" + ("x" * 30_000)})
+    task_state = TaskState.create(
+        task_id="task_compact",
+        run_id="run_compact",
+        user_request="preserve this exact request",
+    )
+
+    result = agent.compact_history(reason="auto", task_state=task_state)
+
+    assert result["status"] == "ok"
+    assert result["pinned_current_user_request"] is True
+    assert agent.session["history"][0]["role"] == "user"
+    assert agent.session["history"][0]["content"] == "preserve this exact request"
+    assert agent.session["history"][0]["conversation_id"] == conversation_id
+    assert sum(
+        item.get("content") == "preserve this exact request"
+        for item in agent.session["history"]
+    ) == 1
+    assert "preserve this exact request" in agent.model_client.prompts[0]
+    assert agent.session["history"][1]["content"].startswith("observation-2-")
+
+
+def test_manual_compaction_does_not_pin_completed_request(tmp_path):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    add_plain_history(agent, 4)
+    conversation_id = agent.new_conversation_id()
+    agent._current_conversation_id = conversation_id
+    agent.record({"role": "user", "content": "completed request"})
+    for index in range(4):
+        agent.record({"role": "assistant", "content": f"observation-{index}-" + ("x" * 30_000)})
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "ok"
+    assert result["pinned_current_user_request"] is False
+    assert not any(
+        item.get("content") == "completed request"
+        for item in agent.session["history"]
+    )
 
 
 def test_compaction_restores_missing_skill_and_todo_context(tmp_path):

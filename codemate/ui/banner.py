@@ -24,7 +24,7 @@ def build_welcome(agent, model, host):
     """构造当前终端状态块。
 
     状态块展示的是运行期用户最关心的几项信息：工作区、模型、分支、
-    审批策略和 session。调用方负责传入已经格式化好的模型名称，
+    工作流模式、审批策略和 session。调用方负责传入已经格式化好的模型名称，
     例如 `openai:gpt-5.4`。
     """
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
@@ -104,7 +104,8 @@ def build_welcome(agent, model, host):
             row(""),
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("APPROVAL", agent.approval_policy, "SESSION", session_label),
+            pair("MODE", str(agent.session.get("workflow_mode", "agent")).upper(), "APPROVAL", agent.approval_policy),
+            row("SESSION    " + session_label),
             row(""),
         ]
     )

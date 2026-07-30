@@ -46,11 +46,20 @@ class HistoryContextRenderer:
             },
         )
 
-    def split_for_compaction(self, min_messages=RECENT_HISTORY_MIN_MESSAGES, min_chars=RECENT_HISTORY_MIN_CHARS):
+    def split_for_compaction(
+        self,
+        min_messages=RECENT_HISTORY_MIN_MESSAGES,
+        min_chars=RECENT_HISTORY_MIN_CHARS,
+        pinned_conversation_id="",
+    ):
         """把历史切成待压缩旧消息和需要原样保留的新消息。
 
         recent 选择以 group 为单位从新到旧推进，满足最小消息数或最小字符数后停止。
         这样既保留足够近的上下文，又不会留下孤立 tool result。
+
+        自动 compact 还会固定保留当前 conversation 的 user request。该消息仍留在
+        compact 输入的原始位置，帮助摘要模型理解中间操作；compact 成功后的
+        recent history 则只保留一份原文，并将它放在 recent 工具交互之前。
         """
         groups = self.history_groups(self.history_for_request())
         if not groups:
@@ -74,6 +83,9 @@ class HistoryContextRenderer:
 
         recent_groups = list(reversed(recent_reversed))
         older_groups = groups[: max(0, len(groups) - len(recent_groups))]
+        pinned_group = self._pinned_user_group(older_groups, pinned_conversation_id)
+        if pinned_group is not None:
+            recent_groups.insert(0, pinned_group)
         recent_dedupe_keys = set()
         for group in recent_groups:
             keys, group_can_be_collapsed = self.dedupe_keys_for_group(group)
@@ -90,7 +102,25 @@ class HistoryContextRenderer:
             "recent_history": self.groups_to_messages(recent_groups, prepare=False),
             "history_to_compact_groups": filtered_older_groups,
             "recent_groups": recent_groups,
+            "pinned_user_request": (
+                self.group_messages(pinned_group)[0] if pinned_group is not None else None
+            ),
         }
+
+    @staticmethod
+    def _pinned_user_group(groups, conversation_id):
+        """Find the active turn's original user message without changing groups."""
+        conversation_id = str(conversation_id or "")
+        if not conversation_id:
+            return None
+        for group in reversed(groups):
+            for message in group.get("messages", []):
+                if (
+                    message.get("role") == "user"
+                    and str(message.get("conversation_id", "")) == conversation_id
+                ):
+                    return group
+        return None
 
     def recent_messages_for_retrieval(self, max_messages=10, tool_result_chars=300):
         """为长期记忆召回提供轻量 recent history。

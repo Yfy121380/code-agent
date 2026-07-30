@@ -1,12 +1,14 @@
 # 工具参数校验：在工具真正执行前检查参数、路径边界和审批门禁。
 
 import ipaddress
+import re
 from datetime import datetime
 from urllib.parse import urlparse
 
 from .constants import (
     GREP_MODES,
     MAX_GREP_CONTEXT_LINES,
+    PLAN_INTERACTION_TOOLS,
     WEB_EXTRACT_DEPTHS,
     WEB_EXTRACT_FORMATS,
     WEB_RESEARCH_MODELS,
@@ -21,6 +23,9 @@ from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mc
 from .shell_safety import analyze_shell_command
 from .images import path_has_image_extension
 from .todos import normalize_todos
+
+
+QUESTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def _validate_string_array(args, name, limit=20):
@@ -133,11 +138,143 @@ def _validate_web_research(args):
     _validate_string_array(args, "exclude_domains")
 
 
+def _validate_request_user_input(args):
+    """Validate the bounded choice model used by the Plan Mode terminal UI."""
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+    if set(args) != {"questions"}:
+        raise ValueError("request_user_input only accepts the questions field")
+    questions = args.get("questions")
+    if not isinstance(questions, list) or not 1 <= len(questions) <= 3:
+        raise ValueError("questions must contain between 1 and 3 items")
+
+    question_ids = set()
+    for question_index, question in enumerate(questions):
+        if not isinstance(question, dict):
+            raise ValueError(f"questions[{question_index}] must be an object")
+        if set(question) != {"id", "header", "question", "options"}:
+            raise ValueError(
+                f"questions[{question_index}] must contain only id, header, question, and options"
+            )
+        question_id = question.get("id")
+        if not isinstance(question_id, str):
+            raise ValueError(f"questions[{question_index}].id must be a string")
+        question_id = question_id.strip()
+        if not question_id or len(question_id) > 64 or not QUESTION_ID_PATTERN.fullmatch(question_id):
+            raise ValueError(
+                f"questions[{question_index}].id must contain 1-64 letters, digits, or underscores"
+            )
+        if question_id in question_ids:
+            raise ValueError(f"duplicate question id: {question_id}")
+        question_ids.add(question_id)
+
+        header = question.get("header")
+        prompt = question.get("question")
+        if not isinstance(header, str):
+            raise ValueError(f"questions[{question_index}].header must be a string")
+        if not isinstance(prompt, str):
+            raise ValueError(f"questions[{question_index}].question must be a string")
+        header = header.strip()
+        prompt = prompt.strip()
+        if not header or len(header) > 40:
+            raise ValueError(f"questions[{question_index}].header must contain 1-40 characters")
+        if not prompt or len(prompt) > 500:
+            raise ValueError(f"questions[{question_index}].question must contain 1-500 characters")
+
+        options = question.get("options")
+        if not isinstance(options, list) or not 2 <= len(options) <= 3:
+            raise ValueError(f"questions[{question_index}].options must contain between 2 and 3 items")
+        labels = set()
+        recommended_indexes = []
+        for option_index, option in enumerate(options):
+            if not isinstance(option, dict):
+                raise ValueError(f"questions[{question_index}].options[{option_index}] must be an object")
+            if not set(option).issubset({"label", "description", "recommended"}) or not {
+                "label",
+                "description",
+            }.issubset(option):
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}] must contain "
+                    "label, description, and optional recommended"
+                )
+            label = option.get("label")
+            description = option.get("description")
+            if not isinstance(label, str):
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}].label must be a string"
+                )
+            if not isinstance(description, str):
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}].description must be a string"
+                )
+            recommended = option.get("recommended", False)
+            if not isinstance(recommended, bool):
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}].recommended must be a boolean"
+                )
+            label = label.strip()
+            description = description.strip()
+            if not label or len(label) > 80:
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}].label must contain 1-80 characters"
+                )
+            normalized_label = label.casefold()
+            if normalized_label in labels:
+                raise ValueError(f"questions[{question_index}] option labels must be unique")
+            if normalized_label == "other":
+                raise ValueError("the Other option is added by the UI and must not be supplied")
+            labels.add(normalized_label)
+            if not description or len(description) > 300:
+                raise ValueError(
+                    f"questions[{question_index}].options[{option_index}].description must contain 1-300 characters"
+                )
+            if recommended:
+                recommended_indexes.append(option_index)
+        if len(recommended_indexes) > 1:
+            raise ValueError(f"questions[{question_index}] must have at most one recommended option")
+        if recommended_indexes and recommended_indexes[0] != 0:
+            raise ValueError(f"questions[{question_index}] recommended option must be first")
+
+
+def _validate_submit_plan(args):
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+    if set(args) != {"title", "plan"}:
+        raise ValueError("submit_plan only accepts title and plan")
+    title = args.get("title")
+    plan = args.get("plan")
+    if not isinstance(title, str):
+        raise ValueError("title must be a string")
+    if not isinstance(plan, str):
+        raise ValueError("plan must be a string")
+    title = title.strip()
+    plan = plan.strip()
+    if not title or len(title) > 120:
+        raise ValueError("title must contain 1-120 characters")
+    if not plan or len(plan) > 30_000:
+        raise ValueError("plan must contain 1-30000 characters")
+    if not plan.startswith("# "):
+        raise ValueError("plan must begin with a Markdown level-one title")
+
+
 def validate_tool(agent, name, args):
     # 所有工具执行前都会经过这里。
     # 这里不执行实际动作，但会完成参数校验、路径硬边界校验和审批门禁判断。
     # deny 在这里直接抛出；返回值只可能是 allow/ask gate。
     args = args or {}
+
+    if name in PLAN_INTERACTION_TOOLS:
+        if not bool(getattr(agent, "is_plan_mode", lambda: False)()):
+            raise ToolPolicyError(
+                f"{name} is only available in Plan Mode",
+                code="plan_mode_only",
+                security_event_type="plan_mode_only",
+            )
+        if name == "request_user_input":
+            _validate_request_user_input(args)
+            return ToolGate("allow", "user_decision")
+        _validate_submit_plan(args)
+        return ToolGate("allow", "plan_submission")
 
     if is_mcp_tool_name(name):
         return gate_for_mcp(agent)

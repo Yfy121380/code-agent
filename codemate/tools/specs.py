@@ -565,6 +565,100 @@ The result includes the skill's absolute root and full instructions. Relative re
     },
 }
 
+PLAN_TOOL_SPECS = {
+    "request_user_input": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Stable identifier used to map the answer.",
+                            },
+                            "header": {
+                                "type": "string",
+                                "description": "Short label shown above the question.",
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "Focused decision question shown to the user.",
+                            },
+                            "options": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 3,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {
+                                            "type": "string",
+                                            "description": "Short user-facing option label.",
+                                        },
+                                        "description": {
+                                            "type": "string",
+                                            "description": "Brief practical impact or tradeoff.",
+                                        },
+                                        "recommended": {
+                                            "type": "boolean",
+                                            "description": "Whether this is the recommended option.",
+                                            "default": False,
+                                        },
+                                    },
+                                    "required": ["label", "description"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["id", "header", "question", "options"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["questions"],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": """
+Ask the user to choose between a small set of materially different options when the answer cannot be determined from the repository and would change the implementation plan.
+
+Investigate discoverable facts before using this tool. Do not ask about file locations, existing code behavior, configuration, or other facts that can be resolved with read or search tools.
+
+Prefer one focused question. You may ask up to three closely related questions when answering them together avoids unnecessary back-and-forth. Provide two or three mutually exclusive options, put the recommended option first, and explain the practical impact of each choice briefly.
+""".strip(),
+    },
+    "submit_plan": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Clear title for the proposed implementation plan.",
+                },
+                "plan": {
+                    "type": "string",
+                    "description": "Complete decision-ready implementation plan in Markdown.",
+                },
+            },
+            "required": ["title", "plan"],
+            "additionalProperties": False,
+        },
+        "risky": False,
+        "description": """
+Submit a decision-complete implementation plan for user review.
+
+Use this tool only after investigating the repository, resolving discoverable facts, and collecting any user decisions that materially affect the approach. The plan must be detailed enough for implementation without unresolved design choices.
+
+Do not use this tool for progress updates, partial drafts, questions, or general explanations. The runtime will present the plan to the user and return whether it was approved, needs revision, or was cancelled.
+""".strip(),
+    },
+}
+
 DELEGATE_TOOL_SPEC = {
     "input_schema": {
         "type": "object",
@@ -592,8 +686,8 @@ DELEGATE_TOOL_SPEC = {
             },
             "max_steps": {
                 "type": "integer",
-                "description": "Maximum steps per delegated investigation. Default 20. Increase only for broad investigations.",
-                "default": 20,
+                "description": "Maximum steps per delegated investigation. Default 50. Increase only for broad investigations.",
+                "default": 50,
             },
         },
         "required": ["tasks"],

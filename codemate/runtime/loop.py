@@ -5,6 +5,7 @@
 
 import time
 
+from .. import tools as toolkit
 from ..storage import TaskState
 from ..workspace import clip, now
 
@@ -95,6 +96,63 @@ class RuntimeLoopMixin:
         self.ui.stream_end(kind=kind, metadata=completion_metadata)
         self.ui.model_end(kind=kind, metadata=completion_metadata)
         return response, completion_metadata, int((time.monotonic() - model_started_at) * 1000), streamed_text_chars
+
+    @staticmethod
+    def _interactive_tool_batch_error(calls):
+        """Reject responses that mix a terminal interaction with other tools."""
+        names = {call.name for call in calls}
+        if len(calls) <= 1 or not names.intersection(toolkit.PLAN_INTERACTION_TOOLS):
+            return ""
+        return (
+            "error: request_user_input and submit_plan must each be the only tool call "
+            "in a model response; no tools in this response were executed"
+        )
+
+    def _record_tool_outcome(
+        self,
+        task_state,
+        call,
+        args,
+        result,
+        *,
+        started_at,
+        metadata=None,
+        content_blocks=None,
+    ):
+        """Persist one tool result and its UI/trace metadata in one place."""
+        metadata = dict(self._last_tool_result_metadata if metadata is None else metadata)
+        content_blocks = list(
+            self._last_tool_result_content_blocks if content_blocks is None else content_blocks
+        )
+        tool_result_tokens_added = self.add_tool_result_token_estimate(result)
+        self.ui.tool_result(call.name, args, result, metadata=metadata)
+        tool_record = {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "name": call.name,
+            "content": result,
+            "created_at": now(),
+        }
+        if content_blocks:
+            tool_record["content_blocks"] = content_blocks
+        self.record(tool_record)
+        self.flush_pending_internal_context()
+        self.run_store.write_task_state(task_state)
+        self.emit_trace(
+            task_state,
+            "tool_executed",
+            {
+                "name": call.name,
+                "args": args,
+                "tool_call_id": call.id,
+                "result": clip(result, 4000),
+                "content_blocks": content_blocks,
+                "duration_ms": int((time.monotonic() - started_at) * 1000),
+                "tool_result_tokens_added": tool_result_tokens_added,
+                "token_usage": self.last_token_usage.to_dict(),
+                **metadata,
+            },
+        )
 
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
@@ -237,8 +295,9 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
+                batch_error = self._interactive_tool_batch_error(calls)
                 calls_to_execute = calls
-                if limit_steps:
+                if limit_steps and not batch_error:
                     calls_to_execute = calls[: max(0, self.max_steps - tool_steps)]
                 commentary = str(getattr(response, "text", "") or "")
                 if commentary.strip():
@@ -255,6 +314,28 @@ class RuntimeLoopMixin:
                         "created_at": now(),
                     }
                 )
+                if batch_error:
+                    metadata = {
+                        "tool_status": "rejected",
+                        "tool_error_code": "interactive_tool_batch",
+                        "security_event_type": "interactive_tool_batch",
+                    }
+                    for call in calls_to_execute:
+                        tool_steps += 1
+                        args = dict(call.args or {})
+                        task_state.record_tool(call.name)
+                        self._last_tool_result_metadata = dict(metadata)
+                        self._last_tool_result_content_blocks = []
+                        self._record_tool_outcome(
+                            task_state,
+                            call,
+                            args,
+                            batch_error,
+                            started_at=time.monotonic(),
+                            metadata=metadata,
+                            content_blocks=[],
+                        )
+                    continue
                 for call in calls_to_execute:
                     tool_steps += 1
                     name = call.name
@@ -262,34 +343,12 @@ class RuntimeLoopMixin:
                     task_state.record_tool(name)
                     tool_started_at = time.monotonic()
                     result = self.run_tool(name, args, current_tool_call_id=call.id)
-                    content_blocks = list(getattr(self, "_last_tool_result_content_blocks", []) or [])
-                    tool_result_tokens_added = self.add_tool_result_token_estimate(result)
-                    self.ui.tool_result(name, args, result, metadata=dict(self._last_tool_result_metadata or {}))
-                    tool_record = {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "name": name,
-                        "content": result,
-                        "created_at": now(),
-                    }
-                    if content_blocks:
-                        tool_record["content_blocks"] = content_blocks
-                    self.record(tool_record)
-                    self.run_store.write_task_state(task_state)
-                    self.emit_trace(
+                    self._record_tool_outcome(
                         task_state,
-                        "tool_executed",
-                        {
-                            "name": name,
-                            "args": args,
-                            "tool_call_id": call.id,
-                            "result": clip(result, 4000),
-                            "content_blocks": content_blocks,
-                            "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
-                            "tool_result_tokens_added": tool_result_tokens_added,
-                            "token_usage": self.last_token_usage.to_dict(),
-                            **dict(self._last_tool_result_metadata or {}),
-                        },
+                        call,
+                        args,
+                        result,
+                        started_at=tool_started_at,
                     )
                 continue
 
