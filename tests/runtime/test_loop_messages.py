@@ -6,7 +6,14 @@
 
 from PIL import Image
 
+import pytest
+
 from codemate import ModelResponse, ModelStreamEvent
+from codemate.models import ModelStreamIncompleteError
+from codemate.context.history import INTERRUPTED_TOOL_RESULT, repair_incomplete_tool_results
+from codemate.models.anthropic import _to_anthropic_messages
+from codemate.runtime.errors import ModelRequestError
+from codemate.storage import PersistenceError
 from tests.helpers import build_agent
 
 
@@ -16,6 +23,7 @@ class RecordingUI:
         self.commentary_messages = []
         self.final_messages = []
         self.tool_results = []
+        self.stream_end_kinds = []
 
     def model_start(self):
         pass
@@ -30,7 +38,7 @@ class RecordingUI:
         self.streamed.append({"text": text, "phase": phase})
 
     def stream_end(self, kind="", metadata=None):
-        pass
+        self.stream_end_kinds.append(kind)
 
     def commentary(self, text):
         self.commentary_messages.append(text)
@@ -85,6 +93,67 @@ def test_runtime_records_one_assistant_message_for_multiple_tool_calls(tmp_path)
     assert [call["id"] for call in assistant_calls[0]["tool_calls"]] == [call_id, second_call_id]
 
 
+def test_tool_result_is_persisted_before_ui_rendering(tmp_path):
+    ui = RecordingUI()
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call(
+                "read_file",
+                {"path": "README.md", "start": 1, "end": 1},
+                call_id="call_read",
+            )
+        ],
+        ui=ui,
+    )
+
+    def fail_tool_result(*_args, **_kwargs):
+        raise RuntimeError("terminal rendering failed")
+
+    ui.tool_result = fail_tool_result
+
+    with pytest.raises(RuntimeError, match="terminal rendering failed"):
+        agent.ask("inspect README")
+
+    tool_messages = [item for item in agent.session["history"] if item.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "call_read"
+
+
+def test_repair_incomplete_tool_batch_preserves_provider_pairing():
+    session = {
+        "history": [
+            {
+                "role": "assistant",
+                "kind": "tool_calls",
+                "conversation_id": "turn_1",
+                "tool_calls": [
+                    {"id": "call_1", "name": "read_file", "args": {"path": "a.py"}},
+                    {"id": "call_2", "name": "write_file", "args": {"path": "b.py", "content": "x"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "conversation_id": "turn_1",
+                "tool_call_id": "call_1",
+                "name": "read_file",
+                "content": "ok",
+            },
+            {"role": "user", "conversation_id": "turn_2", "content": "continue"},
+        ]
+    }
+
+    repaired = repair_incomplete_tool_results(session)
+
+    assert repaired == 1
+    assert session["history"][2]["tool_call_id"] == "call_2"
+    assert session["history"][2]["content"] == INTERRUPTED_TOOL_RESULT
+    assert session["history"][2]["outcome_unknown"] is True
+    converted = _to_anthropic_messages(session["history"])
+    assert converted[1]["role"] == "user"
+    assert [block["tool_use_id"] for block in converted[1]["content"]] == ["call_1", "call_2"]
+
+
 def test_runtime_records_image_tool_content_blocks(tmp_path):
     Image.new("RGB", (5, 4), color="red").save(tmp_path / "shot.png")
     response = ModelResponse.tool_call("read_file", {"path": "shot.png"}, call_id="call_image")
@@ -124,6 +193,73 @@ def test_runtime_streams_text_but_records_complete_final_message(tmp_path):
     assert len(assistant_messages) == 1
     assert assistant_messages[0]["kind"] == "final"
     assert assistant_messages[0]["content"] == "done"
+
+
+def test_model_failure_marks_run_failed(tmp_path):
+    agent = build_agent(tmp_path, [], stream=False)
+
+    def fail_complete(*_args, **_kwargs):
+        raise RuntimeError("backend unavailable")
+
+    agent.model_client.complete = fail_complete
+
+    with pytest.raises(ModelRequestError, match="backend unavailable"):
+        agent.ask("inspect")
+
+    assert agent.current_task_state.status == "failed"
+    assert agent.current_task_state.stop_reason == "model_error"
+
+
+def test_persistence_failure_marks_run_failed(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path, [ModelResponse.final("done")], stream=False)
+
+    def fail_save(_session):
+        raise PersistenceError("disk full")
+
+    monkeypatch.setattr(agent.session_store, "save", fail_save)
+
+    with pytest.raises(RuntimeError, match="Agent persistence failed"):
+        agent.ask("inspect")
+
+    assert agent.current_task_state.status == "failed"
+    assert agent.current_task_state.stop_reason == "persistence_error"
+
+
+def test_post_completion_maintenance_failure_does_not_hide_final(tmp_path, monkeypatch):
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [ModelResponse.final("done")], ui=ui, stream=False)
+
+    def fail_maintenance(*_args, **_kwargs):
+        raise RuntimeError("maintenance failed")
+
+    monkeypatch.setattr(agent, "maybe_generate_session_title", fail_maintenance)
+    monkeypatch.setattr(agent, "maybe_extract_memory_candidates", fail_maintenance)
+    monkeypatch.setattr(agent, "schedule_dream_if_needed", fail_maintenance)
+
+    result = agent.ask("finish")
+
+    assert result == "done"
+    assert ui.final_messages == ["done"]
+    assert agent.current_task_state.status == "completed"
+
+
+def test_run_finished_trace_failure_does_not_hide_completed_final(tmp_path, monkeypatch):
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [ModelResponse.final("done")], ui=ui, stream=False)
+    original_emit_trace = agent.emit_trace
+
+    def fail_terminal_trace(task_state, event_type, payload):
+        if event_type == "run_finished":
+            raise PersistenceError("trace disk full")
+        return original_emit_trace(task_state, event_type, payload)
+
+    monkeypatch.setattr(agent, "emit_trace", fail_terminal_trace)
+
+    result = agent.ask("finish")
+
+    assert result == "done"
+    assert ui.final_messages == ["done"]
+    assert agent.current_task_state.status == "completed"
 
 
 def test_runtime_non_stream_final_preserves_and_displays_leading_commentary(tmp_path):
@@ -177,6 +313,60 @@ def test_runtime_does_not_treat_streamed_commentary_as_streamed_final(tmp_path):
     assert ui.streamed == [{"text": "Progress update.", "phase": "commentary"}]
     assert ui.commentary_messages == []
     assert ui.final_messages == ["Final body."]
+
+
+def test_incomplete_stream_marks_run_failed_without_recording_partial_text(tmp_path):
+    class IncompleteClient:
+        model = "test"
+        supports_streaming = True
+        supports_images = False
+        supports_prompt_cache = False
+        supports_tools = True
+        last_completion_metadata = {}
+
+        def stream_complete(self, *_args, **_kwargs):
+            yield ModelStreamEvent.text_delta("partial")
+
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [], ui=ui)
+    agent.model_client = IncompleteClient()
+
+    with pytest.raises(ModelStreamIncompleteError, match="stream_incomplete"):
+        agent.ask("finish")
+
+    assert ui.streamed == [{"text": "partial", "phase": ""}]
+    assert ui.stream_end_kinds == ["error"]
+    assert agent.current_task_state.status == "failed"
+    assert agent.current_task_state.stop_reason == "stream_incomplete"
+    assert not any(
+        item.get("role") == "assistant" and item.get("content") == "partial"
+        for item in agent.session["history"]
+    )
+
+
+def test_keyboard_interrupt_marks_run_stopped_and_closes_stream_ui(tmp_path):
+    class InterruptedClient:
+        model = "test"
+        supports_streaming = True
+        supports_images = False
+        supports_prompt_cache = False
+        supports_tools = True
+        last_completion_metadata = {}
+
+        def stream_complete(self, *_args, **_kwargs):
+            yield ModelStreamEvent.text_delta("partial")
+            raise KeyboardInterrupt
+
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [], ui=ui)
+    agent.model_client = InterruptedClient()
+
+    with pytest.raises(KeyboardInterrupt):
+        agent.ask("finish")
+
+    assert ui.stream_end_kinds == ["error"]
+    assert agent.current_task_state.status == "stopped"
+    assert agent.current_task_state.stop_reason == "user_interrupted"
 
 
 def test_runtime_streams_tool_commentary_before_executing_complete_tool_call(tmp_path):

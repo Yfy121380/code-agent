@@ -39,8 +39,17 @@ from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_prefl
 from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC, PLAN_TOOL_SPECS, REVIEW_TOOL_SPEC
 from .validators import validate_tool
-from .mcp import close_mcp_connections, is_mcp_tool_name
-from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_web, resolve_tool_path
+from .mcp import McpToolCallError, close_mcp_connections, is_mcp_tool_name
+from .path_policy import (
+    ToolGate,
+    ToolPolicyError,
+    gate_for_access,
+    gate_for_mcp,
+    gate_for_shell,
+    gate_for_web,
+    resolve_tool_path,
+    temporary_shell_subject_allowed,
+)
 
 __all__ = [
     "BASE_TOOL_SPECS",
@@ -52,6 +61,7 @@ __all__ = [
     "MAX_GREP_CONTEXT_LINES",
     "MAX_INVOKED_SKILLS",
     "MAX_TOOL_RESULT_CHARS",
+    "McpToolCallError",
     "PLAN_INTERACTION_TOOLS",
     "SUBAGENT_MAX_STEPS",
     "TODO_STATUSES",
@@ -66,12 +76,14 @@ __all__ = [
     "close_mcp_connections",
     "gate_for_access",
     "gate_for_mcp",
+    "gate_for_shell",
     "gate_for_web",
     "image_media_type_for_file",
     "is_supported_image_file",
     "is_mcp_tool_name",
     "normalize_tool_output",
     "resolve_tool_path",
+    "temporary_shell_subject_allowed",
     "sandbox_enabled",
     "sandbox_preflight_error",
     "sniff_image_media_type",

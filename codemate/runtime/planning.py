@@ -129,19 +129,20 @@ class PlanModeMixin:
             return False
         # Starting a new planning workflow explicitly replaces any previously
         # approved plan retained for continuation.
-        self.session["workflow_mode"] = PLAN_MODE
-        self.session["plan"] = {
-            "status": "drafting",
-            "title": "",
-            "content": "",
-            "revision_feedback": "",
-            "previous_approval_policy": self.approval_policy,
-            "updated_at": now(),
-        }
-        self.approval_policy = "read_only"
-        self._activate_workflow_context()
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            self.session["workflow_mode"] = PLAN_MODE
+            self.session["plan"] = {
+                "status": "drafting",
+                "title": "",
+                "content": "",
+                "revision_feedback": "",
+                "previous_approval_policy": self.approval_policy,
+                "updated_at": now(),
+            }
+            self.approval_policy = "read_only"
+            self._activate_workflow_context()
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
         return True
 
     def _invalidate_planning_todos(self, *, defer_context=False):
@@ -178,62 +179,66 @@ class PlanModeMixin:
             self.record(message)
 
     def begin_plan_submission(self, title, content):
-        if not self.is_plan_mode():
-            raise ValueError("submit_plan is only available in Plan Mode")
-        plan = self.session.get("plan")
-        if not isinstance(plan, dict):
-            raise ValueError("Plan Mode has no active plan state")
-        plan.update(
-            {
-                "status": "awaiting_approval",
-                "title": str(title).strip(),
-                "content": str(content).strip(),
-                "revision_feedback": "",
-                "updated_at": now(),
-            }
-        )
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            if not self.is_plan_mode():
+                raise ValueError("submit_plan is only available in Plan Mode")
+            plan = self.session.get("plan")
+            if not isinstance(plan, dict):
+                raise ValueError("Plan Mode has no active plan state")
+            plan.update(
+                {
+                    "status": "awaiting_approval",
+                    "title": str(title).strip(),
+                    "content": str(content).strip(),
+                    "revision_feedback": "",
+                    "updated_at": now(),
+                }
+            )
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
 
     def approve_plan(self):
-        plan = self.session.get("plan")
-        if not self.is_plan_mode() or not isinstance(plan, dict):
-            raise ValueError("there is no plan awaiting approval")
-        if plan.get("status") != "awaiting_approval":
-            raise ValueError("the current plan is not awaiting approval")
-        plan["status"] = "approved"
-        plan["updated_at"] = now()
-        self.session["workflow_mode"] = AGENT_MODE
-        self.approval_policy = str(plan.get("previous_approval_policy") or "ask")
-        self._activate_workflow_context()
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            plan = self.session.get("plan")
+            if not self.is_plan_mode() or not isinstance(plan, dict):
+                raise ValueError("there is no plan awaiting approval")
+            if plan.get("status") != "awaiting_approval":
+                raise ValueError("the current plan is not awaiting approval")
+            plan["status"] = "approved"
+            plan["updated_at"] = now()
+            self.session["workflow_mode"] = AGENT_MODE
+            self.approval_policy = str(plan.get("previous_approval_policy") or "ask")
+            self._activate_workflow_context()
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
 
     def revise_plan(self, feedback=""):
-        plan = self.session.get("plan")
-        if not self.is_plan_mode() or not isinstance(plan, dict):
-            raise ValueError("there is no plan to revise")
-        if plan.get("status") != "awaiting_approval":
-            raise ValueError("the current plan is not awaiting revision")
-        plan["status"] = "drafting"
-        plan["revision_feedback"] = str(feedback or "").strip()
-        plan["updated_at"] = now()
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            plan = self.session.get("plan")
+            if not self.is_plan_mode() or not isinstance(plan, dict):
+                raise ValueError("there is no plan to revise")
+            if plan.get("status") != "awaiting_approval":
+                raise ValueError("the current plan is not awaiting revision")
+            plan["status"] = "drafting"
+            plan["revision_feedback"] = str(feedback or "").strip()
+            plan["updated_at"] = now()
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
 
     def exit_plan_mode(self, *, defer_context=False):
-        plan = self.session.get("plan")
-        was_plan_mode = self.is_plan_mode()
-        has_retained_plan = isinstance(plan, dict) and plan.get("status") == "approved"
-        if not was_plan_mode and not has_retained_plan:
-            return False
-        previous = plan.get("previous_approval_policy", "ask") if isinstance(plan, dict) else "ask"
-        self._invalidate_planning_todos(defer_context=defer_context)
-        self.session["workflow_mode"] = AGENT_MODE
-        self.session["plan"] = None
-        if was_plan_mode:
-            self.approval_policy = str(previous or "ask")
-        self._activate_workflow_context()
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            plan = self.session.get("plan")
+            was_plan_mode = self.is_plan_mode()
+            has_retained_plan = isinstance(plan, dict) and plan.get("status") == "approved"
+            if not was_plan_mode and not has_retained_plan:
+                return False
+            previous = plan.get("previous_approval_policy", "ask") if isinstance(plan, dict) else "ask"
+            self._invalidate_planning_todos(defer_context=defer_context)
+            self.session["workflow_mode"] = AGENT_MODE
+            self.session["plan"] = None
+            if was_plan_mode:
+                self.approval_policy = str(previous or "ask")
+            self._activate_workflow_context()
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
         return True

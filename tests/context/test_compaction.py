@@ -6,7 +6,7 @@
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate.runtime.compaction import SUMMARY_WRAPPER_PREFIX
-from codemate.storage import TaskState
+from codemate.storage import PersistenceError, TaskState
 
 
 SUMMARY = """## Working Directory
@@ -87,6 +87,25 @@ def test_history_compaction_failure_retries_three_times_and_preserves_history(tm
     assert agent.session["history"] == original_history
     assert agent.session["history_summary"] == ""
     assert len(agent.model_client.prompts) == 3
+
+
+def test_history_compaction_does_not_retry_model_after_persistence_failure(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path, [ModelResponse.final(SUMMARY)])
+    add_plain_history(agent, 24)
+    original_history = list(agent.session["history"])
+
+    def fail_save(_session):
+        raise PersistenceError("disk full")
+
+    monkeypatch.setattr(agent.session_store, "save", fail_save)
+
+    result = agent.compact_history(reason="manual")
+
+    assert result["status"] == "error"
+    assert "disk full" in result["reason"]
+    assert len(agent.model_client.prompts) == 1
+    assert agent.session["history"] == original_history
+    assert agent.session["history_summary"] == ""
 
 
 def test_history_compaction_keeps_tool_call_result_pairs_in_recent_history(tmp_path):

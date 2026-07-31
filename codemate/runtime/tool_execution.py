@@ -181,7 +181,11 @@ class ToolExecutionMixin:
                 exit_code = int(match.group(1)) if match else 0
                 if exit_code != 0:
                     tool_status = "error"
-                    tool_error_code = "tool_failed"
+                    tool_error_code = (
+                        "tool_timeout"
+                        if raw_output.metadata.get("tool_timeout")
+                        else "tool_failed"
+                    )
             delegate_metadata = dict(getattr(self, "_last_delegate_metadata", {}) or {})
             if name == "delegate" and delegate_metadata:
                 delegate_status = str(delegate_metadata.get("delegate_status", "ok"))
@@ -196,7 +200,8 @@ class ToolExecutionMixin:
                     tool_error_code = "review_failed"
 
             if tool_status == "ok" and name in {"read_file", "write_file", "patch_file"}:
-                record_file_state(self.session, self.root, args["path"])
+                with self._session_lock:
+                    record_file_state(self.session, self.root, args["path"])
             self._last_tool_result_content_blocks = content_blocks
             self._last_tool_result_metadata = {
                 "tool_status": tool_status,
@@ -214,11 +219,13 @@ class ToolExecutionMixin:
             return result
         except Exception as exc:
             security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
+            mcp_outcome_unknown = bool(getattr(exc, "outcome_unknown", False))
             message = f"error: tool {name} failed: {exc}"
             self._last_tool_result_metadata = {
                 "tool_status": "error",
-                "tool_error_code": "tool_failed",
+                "tool_error_code": "mcp_outcome_unknown" if mcp_outcome_unknown else "tool_failed",
                 "security_event_type": security_event_type,
+                "mcp_outcome_unknown": mcp_outcome_unknown,
                 **self.tool_runtime_metadata(name, tool),
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 **self.shell_analysis_metadata(),
@@ -280,7 +287,9 @@ class ToolExecutionMixin:
         path = self.path(args["path"])
         if name == "write_file" and not path.exists():
             return
-        if not has_current_file_state(self.session, self.root, args["path"]):
+        with self._session_lock:
+            is_current = has_current_file_state(self.session, self.root, args["path"])
+        if not is_current:
             raise ValueError(
                 "existing files must be read with read_file before editing; "
                 "grep/list_files results are not enough"

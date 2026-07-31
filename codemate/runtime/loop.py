@@ -6,11 +6,100 @@
 import time
 
 from .. import tools as toolkit
-from ..storage import TaskState
+from ..models import ModelStreamIncompleteError
+from ..storage import (
+    PersistenceError,
+    STATUS_RUNNING,
+    STOP_REASON_MODEL_ERROR,
+    STOP_REASON_PERSISTENCE_ERROR,
+    STOP_REASON_STREAM_INCOMPLETE,
+    STOP_REASON_UNEXPECTED_ERROR,
+    STOP_REASON_USER_INTERRUPTED,
+    TaskState,
+)
 from ..workspace import clip, now
+from .errors import ModelRequestError
 
 
 class RuntimeLoopMixin:
+    def _emit_run_finished(self, task_state, final, run_started_at):
+        """Best-effort terminal trace after durable state and user output succeed."""
+        try:
+            self.emit_trace(
+                task_state,
+                "run_finished",
+                {
+                    "status": task_state.status,
+                    "stop_reason": task_state.stop_reason,
+                    "final_answer": final,
+                    "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+                },
+            )
+        except Exception:
+            pass
+
+    def _finish_failed_run(self, task_state, stop_reason, error, run_started_at):
+        """Best-effort finalization for a run that cannot continue."""
+        if task_state is None or task_state.status != STATUS_RUNNING:
+            return
+        if stop_reason == STOP_REASON_USER_INTERRUPTED:
+            task_state.stop_interrupted()
+        elif stop_reason == STOP_REASON_MODEL_ERROR:
+            task_state.stop_model_error()
+        else:
+            task_state.stop_failed(stop_reason)
+        payload = {
+            "status": task_state.status,
+            "stop_reason": task_state.stop_reason,
+            "error": clip(str(error), 4000),
+            "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+        }
+        try:
+            self.run_store.write_task_state(task_state)
+        except Exception:
+            pass
+        try:
+            self.emit_trace(task_state, "run_finished", payload)
+        except Exception:
+            pass
+
+    def _run_post_completion_maintenance(
+        self,
+        task_state,
+        user_message,
+        final,
+        *,
+        candidate_extracted_this_run,
+    ):
+        """Run optional maintenance without changing an already completed result."""
+        operations = [
+            ("session_title", lambda: self.maybe_generate_session_title(user_message, final)),
+        ]
+        if not candidate_extracted_this_run:
+            operations.append(
+                (
+                    "memory_candidate_extract",
+                    lambda: self.maybe_extract_memory_candidates(
+                        task_state=task_state,
+                        reason="auto",
+                        background=True,
+                    ),
+                )
+            )
+        operations.append(("memory_dream", lambda: self.schedule_dream_if_needed(task_state)))
+        for operation, callback in operations:
+            try:
+                callback()
+            except Exception as exc:
+                try:
+                    self.emit_trace(
+                        task_state,
+                        "maintenance_failed",
+                        {"operation": operation, "error": clip(str(exc), 4000)},
+                    )
+                except Exception:
+                    pass
+
     def _emit_commentary_trace(self, task_state, commentary, *, source):
         """把用户可见的中间进展写入 trace，便于事后复盘 agent 决策过程。"""
         text = str(commentary or "").strip()
@@ -40,14 +129,18 @@ class RuntimeLoopMixin:
             and hasattr(self.model_client, "stream_complete")
         )
         if not use_stream:
-            response = self.model_client.complete(
-                messages,
-                self.max_new_tokens,
-                tools=self.model_tools(),
-                system=system,
-                prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=prompt_cache_retention,
-            )
+            try:
+                response = self.model_client.complete(
+                    messages,
+                    self.max_new_tokens,
+                    tools=self.model_tools(),
+                    system=system,
+                    prompt_cache_key=prompt_cache_key,
+                    prompt_cache_retention=prompt_cache_retention,
+                )
+            except (Exception, KeyboardInterrupt):
+                self.ui.model_end(kind="error", metadata={})
+                raise
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
             completion_metadata.update(dict(getattr(response, "metadata", {}) or {}))
             kind = getattr(response, "kind", "final")
@@ -85,7 +178,7 @@ class RuntimeLoopMixin:
                     break
                 elif kind == "error":
                     raise RuntimeError(str(getattr(event, "text", "") or "model streaming error"))
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             self.ui.stream_end(kind="error")
             self.ui.model_end(kind="error", metadata={})
             raise
@@ -93,7 +186,9 @@ class RuntimeLoopMixin:
         if response is None:
             self.ui.stream_end(kind="error")
             self.ui.model_end(kind="error", metadata={})
-            raise RuntimeError("model stream ended without a completed response")
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: model stream ended without a completed response"
+            )
 
         completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
         completion_metadata.update(stream_metadata)
@@ -145,7 +240,6 @@ class RuntimeLoopMixin:
             self._last_tool_result_content_blocks if content_blocks is None else content_blocks
         )
         tool_result_tokens_added = self.add_tool_result_token_estimate(result)
-        self.ui.tool_result(call.name, args, result, metadata=metadata)
         tool_record = {
             "role": "tool",
             "tool_call_id": call.id,
@@ -158,6 +252,7 @@ class RuntimeLoopMixin:
         self.record(tool_record)
         self.flush_pending_internal_context()
         self.run_store.write_task_state(task_state)
+        self.ui.tool_result(call.name, args, result, metadata=metadata)
         self.emit_trace(
             task_state,
             "tool_executed",
@@ -175,6 +270,52 @@ class RuntimeLoopMixin:
         )
 
     def ask(self, user_message):
+        """Run one user turn and always leave a terminal run state behind."""
+        run_started_at = time.monotonic()
+        try:
+            return self._run_agent_loop(user_message, run_started_at)
+        except KeyboardInterrupt as exc:
+            self._finish_failed_run(
+                self.current_task_state,
+                STOP_REASON_USER_INTERRUPTED,
+                exc or "interrupted by user",
+                run_started_at,
+            )
+            raise
+        except ModelStreamIncompleteError as exc:
+            self._finish_failed_run(
+                self.current_task_state,
+                STOP_REASON_STREAM_INCOMPLETE,
+                exc,
+                run_started_at,
+            )
+            raise
+        except ModelRequestError as exc:
+            self._finish_failed_run(
+                self.current_task_state,
+                STOP_REASON_MODEL_ERROR,
+                exc,
+                run_started_at,
+            )
+            raise
+        except PersistenceError as exc:
+            self._finish_failed_run(
+                self.current_task_state,
+                STOP_REASON_PERSISTENCE_ERROR,
+                exc,
+                run_started_at,
+            )
+            raise RuntimeError(f"Agent persistence failed: {exc}") from exc
+        except Exception as exc:
+            self._finish_failed_run(
+                self.current_task_state,
+                STOP_REASON_UNEXPECTED_ERROR,
+                exc,
+                run_started_at,
+            )
+            raise RuntimeError(f"Agent run failed unexpectedly: {exc}") from exc
+
+    def _run_agent_loop(self, user_message, run_started_at):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
         为什么存在：
@@ -195,9 +336,7 @@ class RuntimeLoopMixin:
         这里就是最关键的入口。
         """
         # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
-        run_started_at = time.monotonic()
         self._current_conversation_id = self.new_conversation_id()
-        self.record({"role": "user", "content": user_message, "created_at": now()})
         task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
         self.current_task_state = task_state
         self.current_run_dir = self.run_store.start_run(task_state)
@@ -209,6 +348,7 @@ class RuntimeLoopMixin:
                 "user_request": clip(user_message, 300),
             },
         )
+        self.record({"role": "user", "content": user_message, "created_at": now()})
         self.retrieve_long_term_memory_for_request(user_message, task_state)
 
         tool_steps = 0
@@ -233,17 +373,8 @@ class RuntimeLoopMixin:
                     task_state.stop_retry_limit(final)
                     self.record({"role": "assistant", "content": final, "created_at": now()})
                     self.run_store.write_task_state(task_state)
-                    self.emit_trace(
-                        task_state,
-                        "run_finished",
-                        {
-                            "status": task_state.status,
-                            "stop_reason": task_state.stop_reason,
-                            "final_answer": final,
-                            "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                        },
-                    )
                     self.ui.final_answer(final)
+                    self._emit_run_finished(task_state, final, run_started_at)
                     return final
                 if compact_result.get("status") == "ok":
                     system, messages, prompt_metadata = self._build_messages_and_metadata(user_message)
@@ -263,12 +394,17 @@ class RuntimeLoopMixin:
                 and getattr(self.model_client, "supports_prompt_cache", False)
             ):
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-            response, completion_metadata, model_duration_ms, _streamed_text_chars = self._complete_model_response(
-                messages,
-                system,
-                prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=None,
-            )
+            try:
+                response, completion_metadata, model_duration_ms, _streamed_text_chars = self._complete_model_response(
+                    messages,
+                    system,
+                    prompt_cache_key=prompt_cache_key,
+                    prompt_cache_retention=None,
+                )
+            except ModelStreamIncompleteError:
+                raise
+            except Exception as exc:
+                raise ModelRequestError(str(exc)) from exc
             token_usage = self.update_token_usage_from_model(completion_metadata)
             if completion_metadata:
                 prompt_metadata.update(completion_metadata)
@@ -412,22 +548,15 @@ class RuntimeLoopMixin:
                 self.record({"role": "assistant", "kind": "final", "content": final, "created_at": now()})
                 task_state.finish_success(final)
                 self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "run_finished",
-                    {
-                        "status": task_state.status,
-                        "stop_reason": task_state.stop_reason,
-                        "final_answer": final,
-                        "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                    },
-                )
-                if not candidate_extracted_this_run:
-                    self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
-                self.schedule_dream_if_needed(task_state)
                 if not completion_metadata.get("streamed_final_answer", False):
                     self.ui.final_answer(final)
-                self.maybe_generate_session_title(user_message, final)
+                self._emit_run_finished(task_state, final, run_started_at)
+                self._run_post_completion_maintenance(
+                    task_state,
+                    user_message,
+                    final,
+                    candidate_extracted_this_run=candidate_extracted_this_run,
+                )
                 return final
 
             self.record(
@@ -447,18 +576,12 @@ class RuntimeLoopMixin:
             task_state.stop_step_limit(final)
         self.record({"role": "assistant", "content": final, "created_at": now()})
         self.run_store.write_task_state(task_state)
-        self.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        if not candidate_extracted_this_run:
-            self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
-        self.schedule_dream_if_needed(task_state)
         self.ui.final_answer(final)
+        self._emit_run_finished(task_state, final, run_started_at)
+        self._run_post_completion_maintenance(
+            task_state,
+            user_message,
+            final,
+            candidate_extracted_this_run=candidate_extracted_this_run,
+        )
         return final

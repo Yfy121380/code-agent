@@ -12,6 +12,7 @@ import re
 import textwrap
 import uuid
 import hashlib
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .. import memory as memorylib
 from ..config import build_permission_rules, ensure_codemate_layout, load_codemate_settings
-from ..context import ContextManager
+from ..context import ContextManager, repair_incomplete_tool_results
 from ..context.token_budget import (
     TokenUsageState,
     budget_status,
@@ -65,13 +66,14 @@ DEFAULT_FEATURE_FLAGS = {
 
 
 def default_temporary_permissions():
-    # 本会话临时权限只记录用户审批时选择的 allow 目录。
+    # 本会话临时权限记录用户审批时选择的 allow 目录和 shell 命令主体。
     # 它不会写回 settings.json，但需要随 session 保存，保证恢复会话后权限一致。
     return {
         "permissions": {
             "read": {"allow": [], "deny": []},
             "write": {"allow": [], "deny": []},
-        }
+        },
+        "shell": {"allow_subjects": []},
     }
 
 
@@ -150,7 +152,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "history_summary": "",
             "workflow_mode": AGENT_MODE,
             "plan": None,
-            "memory_candidate_extract": memorylib.default_candidate_extract_state(),
+            "memory_candidate_checkpoint": "",
             "read_files": {},
             "todos": [],
             "invoked_skills": [],
@@ -162,6 +164,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # 当前 ask() 写入 history 时使用的对话轮次 id。
         # 同一轮里的 user、assistant、tool 消息共享该 id，候选记忆按这个边界提取。
         self._current_conversation_id = None
+        # 主循环和后台记忆任务共享 session；所有“修改并保存”操作通过这把锁提交。
+        self._session_lock = threading.RLock()
+        # 候选提取一次只能处理一批，避免后台提取与 compact 前同步提取重复追加。
+        self._memory_candidate_extract_lock = threading.RLock()
+        self._background_threads = set()
         # 补齐字段
         self._ensure_session_shape()
         # 本会话内临时加入的权限规则，不写回 settings.json。
@@ -268,9 +275,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("title", "")
         self.session.setdefault("title_slug", "")
         self.session.setdefault("updated_at", self.session.get("created_at", now()))
-        self.session["memory_candidate_extract"] = memorylib.normalize_candidate_extract_state(
-            self.session.get("memory_candidate_extract", {})
-        )
+        self.session.setdefault("memory_candidate_checkpoint", "")
         self.session.setdefault("read_files", {})
         self.session.setdefault("todos", [])
         self.session.setdefault("invoked_skills", [])
@@ -280,7 +285,19 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             section = permissions.setdefault(access, {})
             section.setdefault("allow", [])
             section.setdefault("deny", [])
+        shell_permissions = temporary_permissions.setdefault("shell", {})
+        allow_subjects = shell_permissions.setdefault("allow_subjects", [])
+        if not isinstance(allow_subjects, list):
+            allow_subjects = []
+        shell_permissions["allow_subjects"] = list(
+            dict.fromkeys(
+                subject
+                for item in allow_subjects
+                if (subject := str(item or "").strip())
+            )
+        )
         self._ensure_history_message_ids()
+        repair_incomplete_tool_results(self.session)
 
     def _ensure_history_message_ids(self):
         # 持久化消息必须有稳定 id；按 user 消息切分 conversation，
@@ -652,24 +669,26 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         }
         # Keep only the three most recently invoked skills. Their full instructions
         # are restored after history compaction when no recent skill_load remains.
-        invoked_skills = [
-            item
-            for item in self.session.setdefault("invoked_skills", [])
-            if str(item.get("name", "")).strip() != name
-        ]
-        invoked_skills.append(skill)
-        self.session["invoked_skills"] = invoked_skills[-toolkit.MAX_INVOKED_SKILLS:]
+        with self._session_lock:
+            invoked_skills = [
+                item
+                for item in self.session.setdefault("invoked_skills", [])
+                if str(item.get("name", "")).strip() != name
+            ]
+            invoked_skills.append(skill)
+            self.session["invoked_skills"] = invoked_skills[-toolkit.MAX_INVOKED_SKILLS:]
         return skill
 
     def unload_skill(self, name, reason=""):
         name = self.normalize_skill_name(name)
-        invoked_skills = self.session.setdefault("invoked_skills", [])
-        for index, skill in enumerate(invoked_skills):
-            if str(skill.get("name", "")).strip() == name:
-                removed = invoked_skills.pop(index)
-                self.session["invoked_skills"] = invoked_skills
-                removed["reason"] = str(reason or "").strip()
-                return removed
+        with self._session_lock:
+            invoked_skills = self.session.setdefault("invoked_skills", [])
+            for index, skill in enumerate(invoked_skills):
+                if str(skill.get("name", "")).strip() == name:
+                    removed = invoked_skills.pop(index)
+                    self.session["invoked_skills"] = invoked_skills
+                    removed["reason"] = str(reason or "").strip()
+                    return removed
         raise ValueError(f"skill was not invoked: {name}")
 
     def local_now(self):
@@ -725,9 +744,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             if not self._current_conversation_id:
                 self._current_conversation_id = f"turn_{uuid.uuid4().hex[:12]}"
             item["conversation_id"] = self._current_conversation_id
-        self.session["history"].append(item)
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            self.session["history"].append(item)
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
 
     @staticmethod
     def new_conversation_id():
@@ -828,10 +848,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         title = self.normalize_session_title(title)
         if not title:
             raise ValueError("session title cannot be empty")
-        self.session["title"] = title
-        self.session["title_slug"] = self.session_title_slug(title)
-        self.session["updated_at"] = now()
-        self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            self.session["title"] = title
+            self.session["title_slug"] = self.session_title_slug(title)
+            self.session["updated_at"] = now()
+            self.session_path = self.session_store.save(self.session)
         return title
 
     @staticmethod
@@ -992,23 +1013,28 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return payload
 
     def reset(self):
-        if self.is_plan_mode():
-            self.exit_plan_mode()
-        elif isinstance(self.session.get("plan"), dict):
-            self.session["plan"] = None
-        self.session["history"] = []
-        self.session["history_summary"] = ""
-        self.session["read_files"] = {}
-        self.session["todos"] = []
-        self.session["invoked_skills"] = []
-        self.session["updated_at"] = now()
-        self.session_store.save(self.session)
+        with self._session_lock:
+            if self.is_plan_mode():
+                self.exit_plan_mode()
+            elif isinstance(self.session.get("plan"), dict):
+                self.session["plan"] = None
+            self.session["history"] = []
+            self.session["history_summary"] = ""
+            self.session["read_files"] = {}
+            self.session["todos"] = []
+            self.session["invoked_skills"] = []
+            self.session["updated_at"] = now()
+            self.session_store.save(self.session)
 
     def close(self):
         # 统一释放 runtime 持有的外部资源。
         # 目前主要是 MCP 的后台事件循环和 stdio/http/sse 连接，后续如果接入
         # 其他长生命周期资源，也可以继续收口在这里。
-        toolkit.close_mcp_connections(self)
+        try:
+            toolkit.close_mcp_connections(self)
+        finally:
+            for thread in list(self._background_threads):
+                thread.join(timeout=1)
 
     def path(self, raw_path):
         return toolkit.resolve_tool_path(self, raw_path, access="read").path

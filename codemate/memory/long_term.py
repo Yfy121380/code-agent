@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config.paths import codemate_paths
+from ..storage.atomic import atomic_write_json
 from ..workspace import now
 
 LONG_TERM_MEMORY_FILES = {
@@ -123,7 +124,7 @@ def load_dream_state(workspace_root):
 def save_dream_state(workspace_root, state):
     ensure_long_term_memory(workspace_root)
     path = memory_root(workspace_root) / DREAM_STATE_FILENAME
-    path.write_text(json.dumps(dict(state or {}), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, dict(state or {}))
 
 
 @contextmanager

@@ -5,8 +5,10 @@ session.json 负责保存“可恢复的会话状态”；RunStore 负责保存�
 """
 
 import json
-import tempfile
+import threading
 from pathlib import Path
+
+from .atomic import PersistenceError, atomic_write_json
 
 
 def _run_id(value):
@@ -19,6 +21,7 @@ class RunStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._trace_lock = threading.Lock()
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
@@ -40,34 +43,22 @@ class RunStore:
     def write_task_state(self, task_state):
         path = self.task_state_path(task_state)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json_atomic(path, task_state.to_dict())
+        atomic_write_json(path, task_state.to_dict(), sort_keys=True)
         return path
 
     def append_trace(self, task_state, event):
         path = self.trace_path(task_state)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # trace 采用 jsonl 追加写入，原因是 agent 运行过程是流式事件序列，
-        # 逐条落盘比“最后一次性写整份 trace”更稳，也更适合调试。
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True, ensure_ascii=False))
-            handle.write("\n")
+        try:
+            with self._trace_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # trace 采用 jsonl 追加写入；同一 RunStore 的后台维护事件和
+                # 主循环事件必须串行落盘，避免两条 JSON 在写入时交错。
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event, sort_keys=True, ensure_ascii=False))
+                    handle.write("\n")
+        except (OSError, TypeError, ValueError) as exc:
+            raise PersistenceError(f"could not append trace {path}: {exc}") from exc
         return path
 
     def load_task_state(self, task_id):
         return json.loads(self.task_state_path(task_id).read_text(encoding="utf-8"))
-
-    def _write_json_atomic(self, path, payload):
-        # 原子写：先写临时文件，再 replace。
-        # 这样即使中途异常，也不容易留下半截 JSON。
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-        ) as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
-            handle.write("\n")
-            temp_name = handle.name
-        Path(temp_name).replace(path)

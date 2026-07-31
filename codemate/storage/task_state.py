@@ -22,6 +22,9 @@ STOP_REASON_APPROVAL_DENIED = "approval_denied"
 STOP_REASON_DELEGATE_FAILED = "delegate_failed"
 STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
+STOP_REASON_USER_INTERRUPTED = "user_interrupted"
+STOP_REASON_STREAM_INCOMPLETE = "stream_incomplete"
+STOP_REASON_UNEXPECTED_ERROR = "unexpected_error"
 
 
 @dataclass
@@ -83,6 +86,12 @@ class TaskState:
 
     def stop_model_error(self, final_answer=""):
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)
+
+    def stop_failed(self, stop_reason, final_answer=""):
+        return self.stop(stop_reason, status=STATUS_FAILED, final_answer=final_answer)
+
+    def stop_interrupted(self, final_answer=""):
+        return self.stop(STOP_REASON_USER_INTERRUPTED, status=STATUS_STOPPED, final_answer=final_answer)
 
     def finish_success(self, final_answer):
         self.status = STATUS_COMPLETED

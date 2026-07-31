@@ -4,7 +4,9 @@
 重点边界：settings 默认开启、bwrap 命令构造、read deny 覆盖、write allow 绑定、preflight 错误、full 跳过沙箱。
 """
 
-from unittest.mock import patch
+import signal
+import subprocess
+from unittest.mock import Mock, patch
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
 from codemate.config.settings import default_settings
@@ -33,6 +35,14 @@ class AllowOnceUI:
 
     def tool_result(self, name, args, result, metadata=None):
         pass
+
+
+class RememberShellUI(AllowOnceUI):
+    def approval_request(self, name, args, metadata=None):
+        return {
+            "allowed": True,
+            "remember": {"shell_subject": metadata["suggested_shell_subject"]},
+        }
 
 
 def build_agent(tmp_path, approval_policy="auto", ui=None):
@@ -106,12 +116,13 @@ def test_run_shell_uses_bwrap_when_sandbox_enabled(tmp_path):
     agent = build_agent(tmp_path, approval_policy="auto")
 
     with patch("codemate.tools.handlers.sandbox_preflight_error", return_value=""), patch(
-        "codemate.tools.handlers.subprocess.run"
-    ) as fake_run:
-        fake_run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+        "codemate.tools.handlers.subprocess.Popen"
+    ) as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
         result = agent.run_tool("run_shell", {"command": "mkdir logs", "timeout": 20})
 
-    call = fake_run.call_args
+    call = fake_popen.call_args
     assert call.args[0][0].endswith("bwrap")
     assert call.kwargs["shell"] is False
     assert assert_option(call.args[0], "--bind", str(tmp_path.resolve()), str(tmp_path.resolve()))
@@ -126,15 +137,38 @@ def test_allow_once_write_adds_current_shell_path_to_sandbox_only(tmp_path):
     before_rules = tuple(agent.permission_rules.write_allow)
 
     with patch("codemate.tools.handlers.sandbox_preflight_error", return_value=""), patch(
-        "codemate.tools.handlers.subprocess.run"
-    ) as fake_run:
-        fake_run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+        "codemate.tools.handlers.subprocess.Popen"
+    ) as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
         result = agent.run_tool("run_shell", {"command": f"echo hi > {outside_dir / 'out.txt'}", "timeout": 20})
 
-    call = fake_run.call_args
+    call = fake_popen.call_args
     assert "ok" in result
     assert assert_option(call.args[0], "--bind", str(outside_dir.resolve()), str(outside_dir.resolve()))
     assert tuple(agent.permission_rules.write_allow) == before_rules
+
+
+def test_temporary_shell_subject_does_not_add_unapproved_sandbox_write_mount(tmp_path):
+    write_project_settings(tmp_path, sandbox_enabled=True)
+    outside_dir = tmp_path.parent.parent / f"{tmp_path.name}-outside-python-dir"
+    outside_dir.mkdir(exist_ok=True)
+    agent = build_agent(tmp_path, approval_policy="ask", ui=RememberShellUI())
+    write_command = f"python -c \"open('{outside_dir / 'out.txt'}', 'w').write('x')\""
+
+    with patch("codemate.tools.handlers.sandbox_preflight_error", return_value=""), patch(
+        "codemate.tools.handlers.subprocess.Popen"
+    ) as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
+        first = agent.run_tool("run_shell", {"command": "python -c 'print(1)'", "timeout": 20})
+        second = agent.run_tool("run_shell", {"command": write_command, "timeout": 20})
+
+    second_args = fake_popen.call_args_list[1].args[0]
+    assert "ok" in first
+    assert "ok" in second
+    assert agent.temporary_permission_settings["shell"]["allow_subjects"] == ["python"]
+    assert not assert_option(second_args, "--bind", str(outside_dir.resolve()), str(outside_dir.resolve()))
 
 
 def test_run_shell_reports_bwrap_preflight_error(tmp_path):
@@ -154,13 +188,52 @@ def test_full_approval_skips_shell_sandbox(tmp_path):
 
     with patch("codemate.tools.handlers.sandbox_preflight_error") as fake_preflight, patch(
         "codemate.tools.handlers.build_shell_sandbox_command"
-    ) as fake_sandbox_command, patch("codemate.tools.handlers.subprocess.run") as fake_run:
-        fake_run.return_value = type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+    ) as fake_sandbox_command, patch("codemate.tools.handlers.subprocess.Popen") as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
         result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
-    call = fake_run.call_args
+    call = fake_popen.call_args
     assert "ok" in result
     assert call.args[0] == "echo hi"
     assert call.kwargs["shell"] is True
     fake_preflight.assert_not_called()
     fake_sandbox_command.assert_not_called()
+
+
+def test_run_shell_timeout_terminates_process_group(tmp_path):
+    agent = build_agent(tmp_path, approval_policy="full")
+    process = Mock()
+    process.pid = 1234
+    process.returncode = -15
+    process.poll.return_value = None
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired("sleep", 1, output="partial\n", stderr=""),
+        ("partial\n", ""),
+    ]
+
+    with patch("codemate.tools.handlers.subprocess.Popen", return_value=process), patch(
+        "codemate.tools.handlers.os.killpg"
+    ) as killpg:
+        result = agent.run_tool("run_shell", {"command": "sleep 5", "timeout": 1})
+
+    killpg.assert_called_once_with(1234, 15)
+    assert "exit_code: 124" in result
+    assert agent._last_tool_result_metadata["tool_error_code"] == "tool_timeout"
+    assert agent._last_tool_result_metadata["tool_timeout"] is True
+
+
+def test_run_shell_unexpected_failure_terminates_process_group(tmp_path):
+    agent = build_agent(tmp_path, approval_policy="full")
+    process = Mock()
+    process.pid = 1234
+    process.poll.return_value = None
+    process.communicate.side_effect = RuntimeError("pipe failed")
+
+    with patch("codemate.tools.handlers.subprocess.Popen", return_value=process), patch(
+        "codemate.tools.handlers.os.killpg"
+    ) as killpg:
+        result = agent.run_tool("run_shell", {"command": "sleep 5", "timeout": 1})
+
+    killpg.assert_called_once_with(1234, signal.SIGKILL)
+    assert "pipe failed" in result

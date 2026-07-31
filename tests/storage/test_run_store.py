@@ -4,10 +4,14 @@
 重点边界：session/runs 目录布局、会话列表/解析/重命名、trace JSONL 追加、unicode 保留、缺失 final trace 容错。
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 
+import pytest
+
 from codemate.storage import RunStore, SessionStore
-from codemate.storage import TaskState
+from codemate.storage import PersistenceError, TaskState
+from codemate.storage.atomic import atomic_write_text
 
 
 def test_session_store_groups_session_json_and_runs_dir(tmp_path):
@@ -114,3 +118,49 @@ def test_run_store_tolerates_missing_final_trace_only_run(tmp_path):
     store.append_trace(state, {"event": "run_started"})
 
     assert store.trace_path(state.run_id).exists()
+
+
+def test_atomic_text_write_keeps_original_when_replace_fails(tmp_path, monkeypatch):
+    path = tmp_path / "source.py"
+    path.write_text("original\n", encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("codemate.storage.atomic.os.replace", fail_replace)
+
+    with pytest.raises(PersistenceError, match="simulated replace failure"):
+        atomic_write_text(path, "replacement\n")
+
+    assert path.read_text(encoding="utf-8") == "original\n"
+    assert list(tmp_path.glob("source.py.*.tmp")) == []
+
+
+def test_session_store_recovers_last_valid_backup(tmp_path):
+    store = SessionStore(tmp_path / ".codemate" / "sessions")
+    store.save({"id": "session_001", "value": 1})
+    store.save({"id": "session_001", "value": 2})
+    store.path("session_001").write_text('{"id":', encoding="utf-8")
+
+    with pytest.warns(RuntimeWarning, match="Recovered session"):
+        recovered = store.load("session_001")
+
+    assert recovered == {"id": "session_001", "value": 1}
+
+
+def test_trace_appends_remain_valid_under_concurrent_writers(tmp_path):
+    store = RunStore(tmp_path / "runs")
+    state = TaskState.create("task_001", "test", run_id="run_001")
+    store.start_run(state)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(store.append_trace, state, {"index": index})
+            for index in range(100)
+        ]
+        for future in futures:
+            future.result()
+
+    lines = store.trace_path(state).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 100
+    assert {json.loads(line)["index"] for line in lines} == set(range(100))

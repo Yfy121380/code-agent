@@ -9,9 +9,9 @@ import urllib.error
 import urllib.request
 
 from .capabilities import model_capability
-from .common import _extract_usage_cache_details, _image_block_base64, _iter_sse_json, _json_args, _normalize_messages, _normalize_versioned_base_url
+from .common import _extract_usage_cache_details, _image_block_base64, _iter_sse_json, _normalize_messages, _normalize_versioned_base_url
 from .schemas import _tool_specs_to_anthropic
-from .types import ModelResponse, ModelStreamEvent, ModelToolCall
+from .types import ModelResponse, ModelStreamEvent, ModelStreamIncompleteError, ModelToolCall
 
 ANTHROPIC_CACHE_TTLS = {"5m", "1h"}
 
@@ -144,7 +144,17 @@ def _anthropic_stream_response_data(blocks, usage):
             content.append({"type": "text", "text": block.get("text", "")})
         elif block_type == "tool_use":
             input_text = block.get("partial_json", "")
-            input_value = _json_args(input_text) if input_text else dict(block.get("input") or {})
+            if input_text:
+                try:
+                    input_value = json.loads(input_text)
+                except json.JSONDecodeError as exc:
+                    raise ModelStreamIncompleteError(
+                        "stream_incomplete: Anthropic-compatible stream ended with incomplete tool input"
+                    ) from exc
+                if not isinstance(input_value, dict):
+                    raise RuntimeError("Anthropic-compatible tool input must be a JSON object")
+            else:
+                input_value = dict(block.get("input") or {})
             content.append(
                 {
                     "type": "tool_use",
@@ -305,6 +315,7 @@ class AnthropicCompatibleModelClient:
         blocks = {}
         usage = {}
         stop_reason = None
+        message_stopped = False
         try:
             with stream as response:
                 for _event_name, event in _iter_sse_json(response):
@@ -346,14 +357,19 @@ class AnthropicCompatibleModelClient:
                         stop_reason = (event.get("delta", {}) or {}).get("stop_reason")
                         usage.update(event.get("usage") or {})
                     elif event_type == "message_stop":
+                        message_stopped = True
                         break
         except (urllib.error.URLError, RemoteDisconnected) as exc:
-            raise RuntimeError(
-                "Anthropic-compatible streaming response was interrupted.\n"
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: Anthropic-compatible stream was interrupted before message_stop.\n"
                 f"Base URL: {self.base_url}\n"
                 f"Model: {self.model}"
             ) from exc
 
+        if not message_stopped:
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: Anthropic-compatible stream ended without message_stop"
+            )
         data = _anthropic_stream_response_data(blocks, usage)
         response = _extract_anthropic_response(data)
         metadata = dict(response.metadata or {})

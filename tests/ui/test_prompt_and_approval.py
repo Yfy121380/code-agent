@@ -71,6 +71,43 @@ def test_terminal_approval_can_return_session_allow_choice():
     ]
 
 
+def test_terminal_approval_offers_shell_path_and_combined_session_choices():
+    ui = TerminalUI(console=Console(file=StringIO(), force_terminal=False))
+    captured_choices = []
+
+    def fake_menu(choices):
+        captured_choices.extend(choices)
+        return choices[-2][1]
+
+    with patch.object(ui, "approval_menu", fake_menu):
+        decision = ui.approval_request(
+            "run_shell",
+            {"command": "rm /home/user/data/a.txt"},
+            metadata={
+                "risk_level": "high",
+                "approval_access": "write",
+                "suggested_allow_dir": "/home/user/data",
+                "suggested_shell_subject": "rm",
+            },
+        )
+
+    assert decision == {
+        "allowed": True,
+        "remember": {
+            "shell_subject": "rm",
+            "access": "write",
+            "path": "/home/user/data",
+        },
+    }
+    assert [label for label, _decision in captured_choices] == [
+        "Allow once",
+        "Allow all `rm` commands this session",
+        "Allow write for /home/user/data this session",
+        "Allow all `rm` commands and write for /home/user/data this session",
+        "Deny",
+    ]
+
+
 def test_terminal_request_user_input_adds_other_and_returns_custom_answer():
     output = StringIO()
     ui = TerminalUI(console=Console(file=output, force_terminal=False))

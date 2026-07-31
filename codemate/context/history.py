@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 
 from ..tools.constants import WEB_TOOL_NAMES
-from ..workspace import clip
+from ..workspace import clip, now
 from .types import (
     INTERNAL_CONTEXT_MESSAGE_KINDS,
     MAX_RECENT_OBSERVATION_TOOL_RESULTS,
@@ -18,6 +19,65 @@ from .types import (
     RECENT_HISTORY_MIN_MESSAGES,
     SectionRender,
 )
+
+INTERRUPTED_TOOL_RESULT = (
+    "error: execution was interrupted before the tool result was recorded; "
+    "the external side effect, if any, is unknown"
+)
+
+
+def repair_incomplete_tool_results(session):
+    """Insert synthetic results for persisted tool calls interrupted mid-batch."""
+    history = list((session or {}).get("history", []) or [])
+    repaired = 0
+    index = 0
+    while index < len(history):
+        assistant = history[index]
+        if assistant.get("role") != "assistant" or not assistant.get("tool_calls"):
+            index += 1
+            continue
+
+        result_end = index + 1
+        result_ids = set()
+        while result_end < len(history) and history[result_end].get("role") == "tool":
+            result_ids.add(str(history[result_end].get("tool_call_id", "") or ""))
+            result_end += 1
+
+        missing = [
+            call
+            for call in assistant.get("tool_calls", []) or []
+            if str(call.get("id", "") or "") not in result_ids
+        ]
+        conversation_id = str(assistant.get("conversation_id", "") or "")
+        synthetic_results = []
+        for call in missing:
+            call_id = str(call.get("id", "") or "")
+            if not call_id:
+                continue
+            synthetic_results.append(
+                {
+                    "id": f"msg_{uuid.uuid4().hex[:12]}",
+                    "conversation_id": conversation_id,
+                    "role": "tool",
+                    "kind": "interrupted_tool_result",
+                    "tool_call_id": call_id,
+                    "name": str(call.get("name", "") or ""),
+                    "content": INTERRUPTED_TOOL_RESULT,
+                    "interrupted": True,
+                    "outcome_unknown": True,
+                    "created_at": now(),
+                }
+            )
+        if synthetic_results:
+            history[result_end:result_end] = synthetic_results
+            repaired += len(synthetic_results)
+            result_end += len(synthetic_results)
+        index = result_end
+
+    if repaired:
+        session["history"] = history
+        session["updated_at"] = now()
+    return repaired
 
 
 class HistoryContextRenderer:

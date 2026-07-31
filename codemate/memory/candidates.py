@@ -327,29 +327,6 @@ Return JSON only, using exactly this format:
 """
 
 
-def default_candidate_extract_state():
-    return {
-        "last_extracted_conversation_id": "",
-        "last_extracted_at": "",
-        "user_turns_since_last_extract": 0,
-        "chars_since_last_extract": 0,
-    }
-
-
-def normalize_candidate_extract_state(state):
-    state = state if isinstance(state, dict) else {}
-    normalized = default_candidate_extract_state()
-    normalized.update(
-        {
-            "last_extracted_conversation_id": str(state.get("last_extracted_conversation_id", "") or ""),
-            "last_extracted_at": str(state.get("last_extracted_at", "") or ""),
-            "user_turns_since_last_extract": int(state.get("user_turns_since_last_extract", 0) or 0),
-            "chars_since_last_extract": int(state.get("chars_since_last_extract", 0) or 0),
-        }
-    )
-    return normalized
-
-
 def conversations_since_checkpoint(session, include_incomplete=False):
     """按 conversation_id 找到上次提取之后的完整对话。
 
@@ -362,8 +339,7 @@ def conversations_since_checkpoint(session, include_incomplete=False):
         for message in ((session or {}).get("history", []) or [])
         if str(message.get("kind", "")) not in INTERNAL_CONTEXT_MESSAGE_KINDS
     ]
-    state = normalize_candidate_extract_state((session or {}).get("memory_candidate_extract", {}))
-    checkpoint = state["last_extracted_conversation_id"]
+    checkpoint = str((session or {}).get("memory_candidate_checkpoint", "") or "")
 
     grouped = OrderedDict()
     for message in history:
@@ -403,24 +379,25 @@ def conversations_since_checkpoint(session, include_incomplete=False):
     }
 
 
-def update_candidate_extract_counters(session):
+def candidate_extract_status(session):
+    """Compute the pending candidate-memory workload without mutating session."""
     info = conversations_since_checkpoint(session)
     messages = [message for conversation in info["conversations"] for message in conversation["messages"]]
     user_turns = sum(1 for item in messages if item.get("role") == "user")
     chars = sum(len(_message_text_for_count(item)) for item in messages)
-    state = normalize_candidate_extract_state((session or {}).get("memory_candidate_extract", {}))
-    state["user_turns_since_last_extract"] = user_turns
-    state["chars_since_last_extract"] = chars
-    session["memory_candidate_extract"] = state
-    return state
+    return {
+        **info,
+        "user_turns_since_last_extract": user_turns,
+        "chars_since_last_extract": chars,
+        "due": (
+            user_turns >= MEMORY_CANDIDATE_EXTRACT_INTERVAL_TURNS
+            or chars >= MEMORY_CANDIDATE_EXTRACT_MIN_CHARS
+        ),
+    }
 
 
 def should_extract_candidates(session):
-    state = update_candidate_extract_counters(session)
-    return (
-        state["user_turns_since_last_extract"] >= MEMORY_CANDIDATE_EXTRACT_INTERVAL_TURNS
-        or state["chars_since_last_extract"] >= MEMORY_CANDIDATE_EXTRACT_MIN_CHARS
-    )
+    return bool(candidate_extract_status(session)["due"])
 
 
 def extract_candidate_memories(model_client, conversations, max_new_tokens=1200):
@@ -500,14 +477,9 @@ def append_manual_candidate(workspace_root, text):
 
 
 def mark_candidate_extracted(session, conversations):
-    state = normalize_candidate_extract_state((session or {}).get("memory_candidate_extract", {}))
     if conversations:
-        state["last_extracted_conversation_id"] = str(conversations[-1]["id"])
-    state["last_extracted_at"] = now()
-    state["user_turns_since_last_extract"] = 0
-    state["chars_since_last_extract"] = 0
-    session["memory_candidate_extract"] = state
-    return state
+        session["memory_candidate_checkpoint"] = str(conversations[-1]["id"])
+    return str(session.get("memory_candidate_checkpoint", "") or "")
 
 
 def _json_from_text(text):

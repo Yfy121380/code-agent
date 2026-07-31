@@ -116,7 +116,7 @@ temporary_permissions
 - `read_files`：已读取文件的真实绝对路径以及 `mtime_ns + size` 版本指纹。
 - `todos`：当前任务计划。
 - `invoked_skills`：最近调用的三个 skill，用于 compact 后恢复完整指令。
-- `temporary_permissions`：本会话临时允许的读写目录。
+- `temporary_permissions`：本会话临时允许的读写目录和 Shell 命令主体。
 
 这里的关键点是：session 保存的是“继续工作所需的信息”。trace 里可以有大量细节，但恢复会话时不需要把 trace 全部读回来。
 
@@ -217,7 +217,7 @@ Delegate 和 Review 子 agent 会继承父 session 的 temporary permissions，�
 
 ## 10. Temporary Permissions 持久化
 
-临时权限指用户在审批时选择“本会话允许某个目录读/写”。它不会写入 settings.json，但会写入当前 session。
+临时权限包括用户在审批时选择的“本会话允许某个目录读/写”和“本会话允许某类 Shell 命令”。它不会写入 settings.json，但会写入当前 session。
 
 这样设计是因为：
 
@@ -237,12 +237,17 @@ Delegate 和 Review 子 agent 会继承父 session 的 temporary permissions，�
       "write": {
         "allow": ["/abs/path"]
       }
+    },
+    "shell": {
+      "allow_subjects": ["python", "pytest"]
     }
   }
 }
 ```
 
-每次临时权限更新后，会重新聚合权限规则，并保存 session。这样后续普通工具和 shell sandbox 都能使用同一份权限规则。
+每次临时权限更新后都会保存 session。目录权限发生变化时会重新聚合路径规则；单独新增 Shell 主体不需要重建路径规则。恢复会话后，两类临时权限都会继续生效。
+
+Shell 主体权限不等于文件写权限。它只省略同类命令的风险审批，后续路径仍按路径规则判断，sandbox 也不会因为主体被允许而增加新的可写目录。
 
 ## 11. Run 是什么
 
@@ -402,7 +407,7 @@ run_finished
 
 如果用户拒绝审批，工具结果会变成 rejected，并记录 `tool_error_code = approval_denied`。
 
-如果用户选择“本会话允许某目录”，这条临时权限会写入 session 的 `temporary_permissions`，而不是写入 trace 作为主要状态来源。Trace 用于复盘，session 用于恢复。
+如果用户选择“本会话允许某目录”或“本会话允许某类 Shell 命令”，这条临时权限会写入 session 的 `temporary_permissions`，而不是写入 trace 作为主要状态来源。Trace 用于复盘，session 用于恢复。
 
 ## 17. Trace 脱敏
 

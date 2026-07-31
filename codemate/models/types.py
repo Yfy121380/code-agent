@@ -8,6 +8,10 @@ import uuid
 from dataclasses import dataclass, field
 
 
+class ModelStreamIncompleteError(RuntimeError):
+    """A provider stream ended before its required completion event."""
+
+
 @dataclass
 class ModelToolCall:
     id: str

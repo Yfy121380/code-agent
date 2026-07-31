@@ -12,16 +12,13 @@ from tests.helpers import build_agent
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
-    with patch("codemate.tools.subprocess.run") as fake_run:
-        fake_run.return_value = type(
-            "Result",
-            (),
-            {"returncode": 0, "stdout": "toolkit-shell\n", "stderr": ""},
-        )()
+    with patch("codemate.tools.subprocess.Popen") as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("toolkit-shell\n", "")
         shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
 
     assert "toolkit-shell" in shell_result
-    fake_run.assert_called_once()
+    fake_popen.assert_called_once()
     assert agent.tool_run_shell.__func__.__module__ == "codemate.runtime.tool_execution"
 
     with patch("codemate.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:

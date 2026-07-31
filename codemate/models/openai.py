@@ -18,7 +18,7 @@ from .common import (
 )
 from .capabilities import model_capability
 from .schemas import _tool_specs_to_openai, _tool_specs_to_openai_chat
-from .types import ModelResponse, ModelStreamEvent, ModelToolCall
+from .types import ModelResponse, ModelStreamEvent, ModelStreamIncompleteError, ModelToolCall
 
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
 OPENAI_RETRY_DELAYS = (1.0, 3.0, 7.0)
@@ -155,8 +155,6 @@ def _extract_openai_model_response(data, metadata):
 
 
 def _extract_openai_response_from_sse(body_text):
-    last_response = None
-    deltas = []
     for line in body_text.splitlines():
         line = line.strip()
         if not line.startswith("data:"):
@@ -166,31 +164,22 @@ def _extract_openai_response_from_sse(body_text):
             continue
         try:
             event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid JSON in OpenAI-compatible SSE response: {exc}") from exc
         response = event.get("response")
         if isinstance(response, dict):
-            last_response = response
             if event.get("type") == "response.completed":
                 return _extract_openai_text(response), response
         event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-        elif event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text, last_response or {}
-        else:
-            text = _extract_openai_text(event)
-            if text:
-                return text, event
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response), last_response
-    if deltas:
-        return "".join(deltas), last_response or {}
-    return "", {}
+        if event_type == "response.incomplete":
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: OpenAI-compatible response reported response.incomplete"
+            )
+        if event_type == "response.failed":
+            _raise_openai_stream_error(event)
+    raise ModelStreamIncompleteError(
+        "stream_incomplete: OpenAI-compatible response ended without response.completed"
+    )
 
 def _openai_response_content(text, content_blocks=None, supports_images=True):
     content = []
@@ -355,34 +344,6 @@ def _to_openai_chat_messages(messages, system=None, supports_images=True):
     return converted
 
 
-def _openai_stream_fallback_data(text_parts, tool_calls):
-    # 正常 Responses 流会在 response.completed 中给出完整 response。
-    # 这个兜底只处理连接提前结束但已经收集到可用文本或工具参数的情况。
-    output = []
-    text = "".join(text_parts).strip()
-    if text:
-        output.append(
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
-            }
-        )
-    for key, call in tool_calls.items():
-        if not call.get("name"):
-            continue
-        output.append(
-            {
-                "type": "function_call",
-                "id": call.get("id") or key,
-                "call_id": call.get("call_id") or call.get("id") or key,
-                "name": call.get("name"),
-                "arguments": call.get("arguments", "") or "{}",
-            }
-        )
-    return {"output": output, "output_text": text}
-
-
 def _raise_openai_stream_error(event):
     error = event.get("error") if isinstance(event.get("error"), dict) else event
     message = error.get("message") or error.get("code") or "unknown streaming error"
@@ -515,13 +476,19 @@ class OpenAICompatibleModelClient:
         text_parts = []
         tool_calls = {}
         usage = {}
+        completed = False
         try:
             with stream as response:
                 for _event_name, event in _iter_sse_json(response):
                     if event.get("error"):
                         _raise_openai_stream_error(event)
+                    if event.get("type") == "sse.done":
+                        completed = True
+                        continue
                     usage.update(event.get("usage") or {})
                     for choice in event.get("choices", []) or []:
+                        if choice.get("finish_reason") is not None:
+                            completed = True
                         delta = choice.get("delta", {}) or {}
                         text = delta.get("content")
                         if isinstance(text, str) and text:
@@ -538,13 +505,17 @@ class OpenAICompatibleModelClient:
                             if function.get("arguments"):
                                 call["arguments"] = call.get("arguments", "") + function["arguments"]
         except (urllib.error.URLError, RemoteDisconnected) as exc:
-            raise RuntimeError(
-                "OpenAI-compatible chat streaming fallback was interrupted.\n"
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: OpenAI-compatible chat stream was interrupted before completion.\n"
                 f"Base URL: {self.base_url}\n"
                 f"Model: {self.model}\n"
                 f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
+        if not completed:
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: OpenAI-compatible chat stream ended without a finish signal"
+            )
         metadata = {
             "prompt_cache_supported": False,
             "prompt_cache_key": None,
@@ -647,6 +618,12 @@ class OpenAICompatibleModelClient:
                     event_type = event.get("type", "")
                     if event_type == "error" or event.get("error"):
                         _raise_openai_stream_error(event)
+                    if event_type == "response.incomplete":
+                        raise ModelStreamIncompleteError(
+                            "stream_incomplete: OpenAI-compatible response reported response.incomplete"
+                        )
+                    if event_type == "response.failed":
+                        _raise_openai_stream_error(event)
                     if event_type == "response.output_item.added":
                         item = event.get("item", {}) or {}
                         item_id = item.get("id") or event.get("item_id")
@@ -673,14 +650,18 @@ class OpenAICompatibleModelClient:
                         completed_response = event.get("response") or {}
                         break
         except (urllib.error.URLError, RemoteDisconnected) as exc:
-            raise RuntimeError(
-                "OpenAI-compatible streaming response was interrupted.\n"
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: OpenAI-compatible stream was interrupted before response.completed.\n"
                 f"Base URL: {self.base_url}\n"
                 f"Model: {self.model}\n"
                 f"Cause: {_connection_error_detail(exc)}"
             ) from exc
 
-        data = completed_response or _openai_stream_fallback_data(text_parts, tool_calls)
+        if completed_response is None:
+            raise ModelStreamIncompleteError(
+                "stream_incomplete: OpenAI-compatible stream ended without response.completed"
+            )
+        data = completed_response
         if data.get("error"):
             raise RuntimeError(f"OpenAI-compatible streaming error: {data['error']}")
         metadata = {

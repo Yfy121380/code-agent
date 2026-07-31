@@ -3,7 +3,7 @@
 # 启动时读取用户级和项目级 settings.json 中的 mcp.servers 配置，为每个可用
 # server 调用 tools/list，然后把每个 MCP tool 包装成 `mcp__server__tool`
 # 形式的普通工具。MCP 连接运行在独立后台事件循环中，后续工具调用复用
-# 已有 session；如果调用失败，则关闭旧连接并重连重试一次。
+# 已有 session；调用失败后关闭旧连接，但不盲目重试结果未知的远程操作。
 
 import asyncio
 import concurrent.futures
@@ -17,6 +17,17 @@ from ..config import load_codemate_settings
 
 
 MCP_TOOL_PREFIX = "mcp__"
+MCP_STARTUP_TIMEOUT_SECONDS = 5
+MCP_OPERATION_TIMEOUT_SECONDS = 60
+MCP_CLOSE_TIMEOUT_SECONDS = 5
+
+
+class McpToolCallError(RuntimeError):
+    """An MCP call failed after its remote outcome became uncertain."""
+
+    outcome_unknown = True
+
+
 MCP_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -138,7 +149,13 @@ class McpManager:
         self.ready = threading.Event()
         self.thread = threading.Thread(target=self._run_loop, name="codemate-mcp-loop", daemon=True)
         self.thread.start()
-        self.ready.wait()
+        if not self.ready.wait(timeout=MCP_STARTUP_TIMEOUT_SECONDS):
+            self.closed = True
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join(timeout=1)
+            if not self.thread.is_alive():
+                self.loop.close()
+            raise RuntimeError("MCP event loop did not become ready before the startup timeout")
 
     def _run_loop(self):
         asyncio.set_event_loop(self.loop)
@@ -149,25 +166,26 @@ class McpManager:
 
     async def _worker(self):
         while True:
-            async_fn, args, future = await self.queue.get()
+            async_fn, args, timeout, future = await self.queue.get()
             if async_fn is None:
                 future.set_result(None)
                 return
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                result = await async_fn(*args)
+                operation = async_fn(*args)
+                result = await asyncio.wait_for(operation, timeout=timeout)
             except Exception as exc:
                 future.set_exception(exc)
             else:
                 future.set_result(result)
 
-    def run(self, async_fn, *args, timeout=None):
+    def run(self, async_fn, *args, timeout=MCP_OPERATION_TIMEOUT_SECONDS):
         if self.closed:
             raise RuntimeError("MCP manager is closed")
         future = concurrent.futures.Future()
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, (async_fn, args, future))
-        return future.result(timeout=timeout)
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, (async_fn, args, timeout, future))
+        return future.result(timeout=float(timeout) + 1)
 
     async def connect(self, server_name):
         try:
@@ -233,10 +251,14 @@ class McpManager:
         try:
             session = await self.ensure_connected(server_name)
             return await session.call_tool(tool_name, arguments or {})
-        except Exception:
-            await self.close_server(server_name)
-            session = await self.ensure_connected(server_name)
-            return await session.call_tool(tool_name, arguments or {})
+        except Exception as exc:
+            try:
+                await self.close_server(server_name)
+            except Exception:
+                pass
+            raise McpToolCallError(
+                f"MCP tool call failed and was not retried because the remote outcome is unknown: {exc}"
+            ) from exc
 
     async def close_server(self, server_name):
         connection = self.connections.pop(server_name, None)
@@ -259,15 +281,29 @@ class McpManager:
         if self.closed:
             return
         try:
-            self.run(self.close_all)
+            self.run(self.close_all, timeout=MCP_CLOSE_TIMEOUT_SECONDS)
+        except Exception:
+            pass
         finally:
             self.closed = True
             future = concurrent.futures.Future()
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, (None, (), future))
-            future.result(timeout=5)
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=5)
-            self.loop.close()
+            if self.thread.is_alive():
+                try:
+                    self.loop.call_soon_threadsafe(
+                        self.queue.put_nowait,
+                        (None, (), None, future),
+                    )
+                    try:
+                        future.result(timeout=MCP_CLOSE_TIMEOUT_SECONDS)
+                    except Exception:
+                        pass
+                    self.loop.call_soon_threadsafe(self.loop.stop)
+                except RuntimeError:
+                    # 事件循环已提前关闭时无需再次调度清理回调。
+                    pass
+                self.thread.join(timeout=MCP_CLOSE_TIMEOUT_SECONDS)
+            if not self.thread.is_alive():
+                self.loop.close()
 
 
 def get_mcp_manager(agent):
@@ -312,7 +348,14 @@ def discover_mcp_tools(agent):
 
 def run_mcp_tool(agent, tool_info, args):
     manager = get_mcp_manager(agent)
-    result = manager.run(manager.call_tool, tool_info.server.name, tool_info.original_name, args or {})
+    try:
+        result = manager.run(manager.call_tool, tool_info.server.name, tool_info.original_name, args or {})
+    except McpToolCallError:
+        raise
+    except TimeoutError as exc:
+        raise McpToolCallError(
+            "MCP tool call timed out and was not retried because the remote outcome is unknown"
+        ) from exc
     return _result_to_text(result)
 
 

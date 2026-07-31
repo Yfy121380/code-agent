@@ -11,7 +11,7 @@ import urllib.request
 from PIL import Image
 import pytest
 
-from codemate.models import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
+from codemate.models import AnthropicCompatibleModelClient, ModelStreamIncompleteError, OpenAICompatibleModelClient
 from codemate.models.anthropic import _extract_anthropic_response, _to_anthropic_messages
 from codemate.models.capabilities import model_capability
 from codemate.models.openai import (
@@ -38,6 +38,19 @@ class FakeHTTPResponse:
 
     def readline(self):
         return next(self._lines, b"")
+
+
+class InterruptedHTTPResponse(FakeHTTPResponse):
+    def __init__(self, data, *, fail_after_lines, content_type="text/event-stream"):
+        super().__init__(data, content_type=content_type)
+        self._fail_after_lines = fail_after_lines
+        self._read_count = 0
+
+    def readline(self):
+        if self._read_count >= self._fail_after_lines:
+            raise urllib.error.URLError("connection reset")
+        self._read_count += 1
+        return super().readline()
 
 
 def test_openai_responses_commentary_only_is_not_final():
@@ -475,6 +488,35 @@ def test_openai_responses_streaming_yields_text_delta_and_done_response(monkeypa
     assert client.last_completion_metadata["input_tokens"] == 2
 
 
+def test_openai_stream_without_response_completed_is_rejected(monkeypatch):
+    body = (
+        'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+        'data: {"type":"response.output_text.done","text":"partial"}\n\n'
+    )
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: FakeHTTPResponse(body, content_type="text/event-stream"),
+    )
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="response.completed"):
+        list(client.stream_complete("hello", 100))
+
+
+def test_openai_interrupted_stream_is_reported_as_incomplete(monkeypatch):
+    body = 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: InterruptedHTTPResponse(body, fail_after_lines=2),
+    )
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="stream_incomplete"):
+        list(client.stream_complete("hello", 100))
+
+
 def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
     captured = {}
     body = "\n\n".join(
@@ -523,6 +565,64 @@ def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
     assert client.last_completion_metadata["cache_creation_input_tokens"] == 10
     assert client.last_completion_metadata["output_tokens"] == 8
     assert client.last_completion_metadata["stop_reason"] == "tool_use"
+
+
+def test_anthropic_stream_without_message_stop_is_rejected(monkeypatch):
+    body = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+        ]
+    ) + "\n\n"
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: FakeHTTPResponse(body, content_type="text/event-stream"),
+    )
+    client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="message_stop"):
+        list(client.stream_complete("hello", 100))
+
+
+def test_anthropic_interrupted_stream_is_reported_as_incomplete(monkeypatch):
+    body = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        ]
+    ) + "\n\n"
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: InterruptedHTTPResponse(body, fail_after_lines=4),
+    )
+    client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="stream_incomplete"):
+        list(client.stream_complete("hello", 100))
+
+
+def test_anthropic_stream_with_incomplete_tool_input_is_rejected(monkeypatch):
+    body = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+            'event: message_stop\ndata: {"type":"message_stop"}',
+        ]
+    ) + "\n\n"
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: FakeHTTPResponse(body, content_type="text/event-stream"),
+    )
+    client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="incomplete tool input"):
+        list(client.stream_complete("hello", 100))
 
 
 def test_anthropic_streaming_final_text_is_unphased_until_done(monkeypatch):

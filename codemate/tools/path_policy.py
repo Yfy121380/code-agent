@@ -112,6 +112,21 @@ def _deny_for_access(access, decision):
     raise ToolPolicyError(message, code=code, security_event_type="permission_denied")
 
 
+def _enforce_write_denies(agent, decisions):
+    """Apply deny-first semantics before any shell risk approval."""
+    for decision in decisions:
+        if _rule_hit(agent, "write", decision) == "deny":
+            _deny_for_access("write", decision)
+
+
+def temporary_shell_subject_allowed(agent, subject):
+    """Check the session-scoped shell command-family allowlist."""
+    temporary = getattr(agent, "temporary_permission_settings", {}) or {}
+    shell = temporary.get("shell", {}) if isinstance(temporary, dict) else {}
+    allowed = shell.get("allow_subjects", []) if isinstance(shell, dict) else []
+    return str(subject or "") in {str(item) for item in allowed or []}
+
+
 def resolve_tool_path(agent, raw_path, access="read"):
     """解析工具路径并做不可绕过的硬边界校验。
 
@@ -191,16 +206,45 @@ def gate_for_access(agent, access, path_decisions=()):
 
     if access == "unknown":
         # 未知 shell 命令可能读写文件、访问网络或启动子进程，full 才直接放行。
+        _enforce_write_denies(agent, decisions)
         if policy == "full":
             return _gate("allow", "unknown_shell_full", decisions, "write")
         return _gate("ask", "unknown_shell", decisions, "write")
 
     if access == "dangerous":
+        _enforce_write_denies(agent, decisions)
         if policy == "full":
             return _gate("allow", "dangerous_shell_full", decisions, "write")
         return _gate("ask", "dangerous_shell", decisions, "write")
 
     raise ValueError(f"unknown access kind: {access}")
+
+
+def gate_for_shell(agent, analysis, path_decisions=()):
+    """Combine shell risk approval, temporary subjects, and path policy."""
+    decisions = tuple(path_decisions or ())
+    access = str(getattr(analysis, "kind", "unknown") or "unknown")
+    if access == "read":
+        return gate_for_access(agent, "read", decisions)
+
+    risk_gate = gate_for_access(
+        agent,
+        access if access in {"dangerous", "unknown"} else "write",
+        decisions,
+    )
+    if risk_gate.action != "ask":
+        return risk_gate
+
+    subject = str(getattr(analysis, "approval_subject", "") or "")
+    if not subject or not temporary_shell_subject_allowed(agent, subject):
+        return risk_gate
+
+    # A remembered command family removes only command-risk approval. Explicit
+    # paths still pass through write rules; no-path commands remain constrained
+    # by the sandbox's existing write mounts.
+    if decisions:
+        return gate_for_access(agent, "write", decisions)
+    return _gate("allow", "shell_subject_allowed_for_session", decisions, "write")
 
 
 def gate_for_mcp(agent):

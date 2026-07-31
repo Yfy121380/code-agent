@@ -165,13 +165,28 @@ class HistoryCompactionMixin:
         original_summary = str(self.session.get("history_summary", "") or "")
         last_error = ""
         attempts = 0
+        summary = None
         for attempts in range(1, MAX_COMPACT_RETRIES + 1):
             try:
-                summary = self._run_compact_model(history_to_compact, original_summary)
-                self._validate_history_summary(summary)
-                self.session["history_summary"] = self.normalize_history_summary(summary)
-                self.session["history"] = self._restore_compact_context(recent_history)
-                self.session_path = self.session_store.save(self.session)
+                candidate_summary = self._run_compact_model(history_to_compact, original_summary)
+                self._validate_history_summary(candidate_summary)
+                summary = candidate_summary
+                break
+            except Exception as exc:
+                last_error = str(exc)
+
+        if summary is not None:
+            try:
+                with self._session_lock:
+                    self.session["history_summary"] = self.normalize_history_summary(summary)
+                    self.session["history"] = self._restore_compact_context(recent_history)
+                    self.session_path = self.session_store.save(self.session)
+            except Exception as exc:
+                last_error = str(exc)
+                with self._session_lock:
+                    self.session["history"] = original_history
+                    self.session["history_summary"] = original_summary
+            else:
                 self.reset_token_usage()
                 result = {
                     "status": "ok",
@@ -188,12 +203,7 @@ class HistoryCompactionMixin:
                 self._emit_compact_trace(task_state, "history_compact", result)
                 self.ui.compact_end(status="ok", metadata=result)
                 return result
-            except Exception as exc:
-                last_error = str(exc)
 
-        self.session["history"] = original_history
-        self.session["history_summary"] = original_summary
-        self.session_path = self.session_store.save(self.session)
         result = {
             "status": "error",
             "reason": last_error or "compact_failed",

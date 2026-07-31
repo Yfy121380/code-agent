@@ -5,7 +5,11 @@
 import json
 from pathlib import Path
 import re
+import threading
+import warnings
 from datetime import datetime
+
+from .atomic import PersistenceError, atomic_write_json, atomic_write_text
 
 
 def _title_slug(text):
@@ -19,12 +23,16 @@ class SessionStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
 
     def session_dir(self, session_id):
         return self.root / str(session_id)
 
     def path(self, session_id):
         return self.session_dir(session_id) / "session.json"
+
+    def backup_path(self, session_id):
+        return self.session_dir(session_id) / "session.json.bak"
 
     def runs_dir(self, session_id):
         return self.session_dir(session_id) / "runs"
@@ -36,12 +44,41 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
+        backup_path = self.backup_path(session["id"])
+        try:
+            with self._write_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.is_file():
+                    previous_text = path.read_text(encoding="utf-8")
+                    try:
+                        json.loads(previous_text)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        atomic_write_text(backup_path, previous_text)
+                atomic_write_json(path, session)
+        except PersistenceError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise PersistenceError(f"could not save session {session.get('id', '')!r}: {exc}") from exc
         return path
 
     def load(self, session_id):
-        return json.loads(self.path(session_id).read_text(encoding="utf-8"))
+        path = self.path(session_id)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as primary_error:
+            backup_path = self.backup_path(session_id)
+            try:
+                recovered = json.loads(backup_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raise primary_error
+            warnings.warn(
+                f"Recovered session {session_id!r} from {backup_path.name} because session.json was unreadable.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return recovered
 
     def latest(self):
         sessions = self.list_sessions()
@@ -59,7 +96,7 @@ class SessionStore:
             if path.parent.name.startswith(("dream-", "delegate-", "review-")):
                 continue
             try:
-                session = json.loads(path.read_text(encoding="utf-8"))
+                session = self.load(path.parent.name)
             except (OSError, json.JSONDecodeError):
                 continue
             session_id = str(session.get("id") or path.parent.name)

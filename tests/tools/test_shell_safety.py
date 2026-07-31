@@ -8,10 +8,42 @@ import shlex
 import subprocess
 import sys
 import os
+import json
 
 from unittest.mock import patch
 
-from tests.helpers import build_agent
+from codemate import FakeModelClient, MiniAgent
+from tests.helpers import build_agent, build_workspace
+
+
+class ShellApprovalUI:
+    """Choose a session shell grant, optionally combined with a path grant."""
+
+    def __init__(self, *, combine_path=False, allowed=True):
+        self.combine_path = combine_path
+        self.allowed = allowed
+        self.calls = []
+
+    def approval_request(self, name, args, metadata=None):
+        metadata = dict(metadata or {})
+        self.calls.append({"name": name, "args": dict(args or {}), "metadata": metadata})
+        if not self.allowed:
+            return {"allowed": False}
+        remember = {"shell_subject": metadata["suggested_shell_subject"]}
+        if self.combine_path:
+            remember.update(
+                {
+                    "access": metadata["approval_access"],
+                    "path": metadata["suggested_allow_dir"],
+                }
+            )
+        return {"allowed": True, "remember": remember}
+
+    def tool_start(self, name, args, risk_level=""):
+        pass
+
+    def tool_result(self, name, args, result, metadata=None):
+        pass
 
 
 def test_read_shell_command_allows_valid_workspace_paths_in_read_only_policy(tmp_path):
@@ -135,6 +167,133 @@ def test_python_inline_code_is_dangerous_without_path_glob_rejection(tmp_path):
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
     assert agent._last_tool_result_metadata["shell_paths"] == []
     assert agent._last_tool_result_metadata["shell_has_glob"] is False
+
+
+def test_temporary_shell_subject_persists_and_skips_later_risk_approval(tmp_path):
+    first_ui = ShellApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=first_ui)
+
+    first = agent.run_tool("run_shell", {"command": "python -c 'print(1)'", "timeout": 20})
+    session_id = agent.session["id"]
+    saved = json.loads(agent.session_store.path(session_id).read_text(encoding="utf-8"))
+
+    resumed_ui = ShellApprovalUI(allowed=False)
+    resumed = MiniAgent(
+        model_client=FakeModelClient([]),
+        workspace=build_workspace(tmp_path),
+        session_store=agent.session_store,
+        session=agent.session_store.load(session_id),
+        approval_policy="ask",
+        ui=resumed_ui,
+    )
+    second = resumed.run_tool("run_shell", {"command": "python -c 'print(2)'", "timeout": 20})
+
+    assert "exit_code: 0" in first
+    assert "exit_code: 0" in second
+    assert saved["temporary_permissions"]["shell"]["allow_subjects"] == ["python"]
+    assert len(first_ui.calls) == 1
+    assert first_ui.calls[0]["metadata"]["suggested_shell_subject"] == "python"
+    assert resumed_ui.calls == []
+
+
+def test_temporary_shell_subject_does_not_cover_a_different_subject(tmp_path):
+    approval_ui = ShellApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=approval_ui)
+
+    first = agent.run_tool("run_shell", {"command": "python -c 'print(1)'", "timeout": 20})
+    approval_ui.allowed = False
+    second = agent.run_tool("run_shell", {"command": "python3 -c 'print(2)'", "timeout": 20})
+
+    assert "exit_code: 0" in first
+    assert second == "error: approval denied for run_shell"
+    assert len(approval_ui.calls) == 2
+    assert approval_ui.calls[1]["metadata"]["suggested_shell_subject"] == "python3"
+
+
+def test_compound_shell_with_multiple_non_read_subjects_has_no_session_subject_option(tmp_path):
+    approval_ui = ShellApprovalUI(allowed=False)
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=approval_ui)
+
+    result = agent.run_tool(
+        "run_shell",
+        {"command": "python -c 'print(1)' && pytest --version", "timeout": 20},
+    )
+
+    assert result == "error: approval denied for run_shell"
+    assert len(approval_ui.calls) == 1
+    assert approval_ui.calls[0]["metadata"]["shell_approval_subject"] == ""
+    assert "suggested_shell_subject" not in approval_ui.calls[0]["metadata"]
+
+
+def test_risky_shell_with_path_can_remember_subject_and_directory_together(tmp_path):
+    approval_ui = ShellApprovalUI(combine_path=True)
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=approval_ui)
+
+    result = agent.run_tool("run_shell", {"command": "mkdir logs", "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert approval_ui.calls[0]["metadata"]["suggested_shell_subject"] == "mkdir"
+    assert approval_ui.calls[0]["metadata"]["suggested_allow_dir"] == str(tmp_path.resolve())
+    assert agent.temporary_permission_settings["shell"]["allow_subjects"] == ["mkdir"]
+
+
+def test_combined_shell_and_path_grant_is_reused_for_later_command(tmp_path):
+    (tmp_path / "first.txt").write_text("one\n", encoding="utf-8")
+    (tmp_path / "second.txt").write_text("two\n", encoding="utf-8")
+    approval_ui = ShellApprovalUI(combine_path=True)
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=approval_ui)
+
+    first = agent.run_tool("run_shell", {"command": "rm first.txt", "timeout": 20})
+    second = agent.run_tool("run_shell", {"command": "rm second.txt", "timeout": 20})
+
+    assert "exit_code: 0" in first
+    assert "exit_code: 0" in second
+    assert not (tmp_path / "first.txt").exists()
+    assert not (tmp_path / "second.txt").exists()
+    assert len(approval_ui.calls) == 1
+    assert agent.temporary_permission_settings["shell"]["allow_subjects"] == ["rm"]
+    assert agent.temporary_permission_settings["permissions"]["write"]["allow"] == [
+        str(tmp_path.resolve())
+    ]
+
+
+def test_write_deny_precedes_temporary_shell_subject(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "file.txt").write_text("keep\n", encoding="utf-8")
+    (tmp_path / ".codemate").mkdir(exist_ok=True)
+    (tmp_path / ".codemate" / "settings.json").write_text(
+        '{"mcp":{"servers":{}},"permissions":{"read":{"allow":[],"deny":[]},'
+        '"write":{"allow":[],"deny":["blocked"]}}}\n',
+        encoding="utf-8",
+    )
+    approval_ui = ShellApprovalUI()
+    agent = build_agent(tmp_path, [], approval_policy="ask", ui=approval_ui)
+    agent.add_temporary_shell_permission("rm")
+
+    result = agent.run_tool("run_shell", {"command": "rm blocked/file.txt", "timeout": 20})
+
+    assert "write denied by permission rules" in result
+    assert (blocked / "file.txt").exists()
+    assert approval_ui.calls == []
+
+
+def test_read_only_precedes_temporary_shell_subject(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    agent.add_temporary_shell_permission("python")
+
+    result = agent.run_tool("run_shell", {"command": "python -c 'print(1)'", "timeout": 20})
+
+    assert result == "error: write operations are blocked in read-only mode"
+
+
+def test_hard_block_precedes_temporary_shell_subject(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="ask")
+    agent.add_temporary_shell_permission("reboot")
+
+    result = agent.run_tool("run_shell", {"command": "reboot", "timeout": 20})
+
+    assert "shell command is blocked even in full approval mode: reboot" in result
 
 def test_python_py_compile_shell_command_stays_read(tmp_path):
     (tmp_path / "test.py").write_text("print('hi')\n", encoding="utf-8")

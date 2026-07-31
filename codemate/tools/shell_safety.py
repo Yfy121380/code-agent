@@ -30,6 +30,7 @@ class ShellCommandAnalysis:
     has_dynamic_expansion: bool = False
     blocked: bool = False
     error: str = ""
+    approval_subject: str = ""
 
     def to_metadata(self):
         return {
@@ -41,6 +42,7 @@ class ShellCommandAnalysis:
             "shell_has_redirection": self.has_redirection,
             "shell_has_dynamic_expansion": self.has_dynamic_expansion,
             "shell_blocked": self.blocked,
+            "shell_approval_subject": self.approval_subject,
         }
 
 
@@ -287,6 +289,17 @@ def analyze_shell_command(agent, command):
     analysis.paths = _dedupe([path for path in analysis.paths if str(path).strip()])
     analysis.reasons = _dedupe(analysis.reasons)
     analysis.has_glob = any(_has_glob(path) for path in analysis.paths)
+
+    # Session-scoped command approval is deliberately narrow: only one
+    # non-read subject may be remembered. Compound write-like commands must
+    # continue to use one-off approval instead of granting several families.
+    non_read_subjects = [
+        subject
+        for subject in analysis.subjects
+        if _subject_kind(subject)[0] != "read"
+    ]
+    if len(non_read_subjects) == 1 and len(non_read_subjects[0]) <= 128:
+        analysis.approval_subject = non_read_subjects[0]
 
     for raw_path in analysis.paths:
         if analysis.kind == "dangerous" and _is_blocked_dangerous_target(raw_path):

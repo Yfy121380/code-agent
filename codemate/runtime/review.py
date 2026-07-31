@@ -130,7 +130,7 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
 
     Good finding:
 
-    ### [Problem 1] Approval restoration can overwrite a newer policy
+    ### [P1] Approval restoration can overwrite a newer policy
     `codemate/runtime/planning.py:...`
 
     Resuming an approved plan restores the stale policy saved when Plan Mode
@@ -138,7 +138,7 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
 
     Good pre-existing finding:
 
-    ### [Pre-existing][Problem 2] Cancelled plan todos remain active
+    ### [Pre-existing][P2] Cancelled plan todos remain active
     `codemate/tools/handlers.py:...`
 
     This predates the current patch but directly affects the reviewed plan

@@ -3,6 +3,7 @@
 # 具体 memory 文件格式放在 memory 包中，这里只协调 runtime 状态、trace 和线程。
 # 这样主 agent loop 不需要关心候选 JSONL、dream lock、召回失败降级等细节。
 
+import copy
 import threading
 import uuid
 import hashlib
@@ -11,9 +12,7 @@ from datetime import datetime
 
 from .. import memory as memorylib
 from ..memory.constants import (
-    MEMORY_CANDIDATE_EXTRACT_INTERVAL_TURNS,
     MEMORY_CANDIDATE_EXTRACT_MAX_RETRIES,
-    MEMORY_CANDIDATE_EXTRACT_MIN_CHARS,
 )
 from ..memory import dream as dreamlib
 from ..memory import long_term as longterm
@@ -38,23 +37,30 @@ class DreamMixin:
             self.long_term_memory_status = "skipped_runtime_mode"
             return
 
-        memory_files = memorylib.read_long_term_memory(self.root)
-        recent_messages = self.context_manager.history_renderer.recent_messages_for_retrieval(max_messages=10, tool_result_chars=300)
-        cache_payload = json.dumps(
-            {
-                "user_message": str(user_message),
-                "memory_files": memory_files,
-                "recent_messages": recent_messages,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
-        if self._long_term_memory_cache_key == cache_key:
-            return
-
-        self.emit_trace(task_state, "memory_retrieval_started", {"memory_hash": cache_key, "recent_messages": len(recent_messages)})
+        cache_key = ""
         try:
+            memory_files = memorylib.read_long_term_memory(self.root)
+            recent_messages = self.context_manager.history_renderer.recent_messages_for_retrieval(
+                max_messages=10,
+                tool_result_chars=300,
+            )
+            cache_payload = json.dumps(
+                {
+                    "user_message": str(user_message),
+                    "memory_files": memory_files,
+                    "recent_messages": recent_messages,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+            if self._long_term_memory_cache_key == cache_key:
+                return
+            self.emit_trace(
+                task_state,
+                "memory_retrieval_started",
+                {"memory_hash": cache_key, "recent_messages": len(recent_messages)},
+            )
             result = memorylib.retrieve_long_term_memory(
                 self.model_client,
                 self.root,
@@ -66,8 +72,12 @@ class DreamMixin:
             self.relevant_long_term_memory = []
             self.long_term_memory_status = "failed"
             metadata = {"error": str(exc), "memory_hash": cache_key}
-            self.emit_trace(task_state, "memory_retrieval_failed", metadata)
-            self._long_term_memory_cache_key = cache_key
+            try:
+                self.emit_trace(task_state, "memory_retrieval_failed", metadata)
+            except Exception:
+                pass
+            if cache_key:
+                self._long_term_memory_cache_key = cache_key
             return
 
         selected = list(result.get("selected", []) or [])
@@ -96,13 +106,9 @@ class DreamMixin:
         if self.runtime_mode != "agent":
             return {"status": "skipped", "reason": "runtime_mode"}
 
-        state = memorylib.update_candidate_extract_counters(self.session)
-        due = (
-            state["user_turns_since_last_extract"] >= MEMORY_CANDIDATE_EXTRACT_INTERVAL_TURNS
-            or state["chars_since_last_extract"] >= MEMORY_CANDIDATE_EXTRACT_MIN_CHARS
-        )
-        if not force and not due:
-            self.session_path = self.session_store.save(self.session)
+        with self._session_lock:
+            state = memorylib.candidate_extract_status(self.session)
+        if not force and not state["due"]:
             return {
                 "status": "skipped",
                 "reason": "not_due",
@@ -111,21 +117,35 @@ class DreamMixin:
             }
 
         if background:
-            if self._memory_candidate_extract_running:
-                return {"status": "skipped", "reason": "already_running"}
-            self._memory_candidate_extract_running = True
+            with self._session_lock:
+                if self._memory_candidate_extract_running:
+                    return {"status": "skipped", "reason": "already_running"}
+                self._memory_candidate_extract_running = True
 
             def run_background():
                 try:
-                    self.extract_memory_candidates_once(task_state=task_state, reason=reason)
+                    self.extract_memory_candidates_once(
+                        task_state=task_state,
+                        reason=reason,
+                    )
                 finally:
-                    self._memory_candidate_extract_running = False
+                    with self._session_lock:
+                        self._memory_candidate_extract_running = False
+                        self._background_threads.discard(threading.current_thread())
 
             thread = threading.Thread(
                 target=run_background,
                 daemon=True,
             )
-            thread.start()
+            with self._session_lock:
+                self._background_threads.add(thread)
+            try:
+                thread.start()
+            except Exception:
+                with self._session_lock:
+                    self._background_threads.discard(thread)
+                    self._memory_candidate_extract_running = False
+                raise
             if task_state is not None:
                 self.emit_trace(
                     task_state,
@@ -138,61 +158,83 @@ class DreamMixin:
                 )
             return {"status": "scheduled", "reason": reason}
 
-        return self.extract_memory_candidates_once(task_state=task_state, reason=reason)
+        return self.extract_memory_candidates_once(
+            task_state=task_state,
+            reason=reason,
+        )
 
     def extract_memory_candidates_once(self, task_state=None, reason="auto"):
-        info = memorylib.conversations_since_checkpoint(self.session)
-        conversations = list(info["conversations"])
-        if not conversations:
-            memorylib.update_candidate_extract_counters(self.session)
-            self.session_path = self.session_store.save(self.session)
-            result = {
-                "status": "skipped",
-                "reason": "no_complete_conversations",
-                "checkpoint_missing": bool(info.get("checkpoint_missing")),
-            }
-            if task_state is not None:
-                self.emit_trace(task_state, "memory_candidate_extract", result)
-            return result
-
-        client = self.model_client.fork() if hasattr(self.model_client, "fork") else self.model_client
-        attempts = 0
-        last_error = ""
-        for attempts in range(1, MEMORY_CANDIDATE_EXTRACT_MAX_RETRIES + 1):
-            try:
-                candidates = memorylib.extract_candidate_memories(
-                    client,
-                    conversations,
-                    max_new_tokens=min(self.max_new_tokens, 1200),
-                )
-                write_result = memorylib.append_candidate_memories(self.root, candidates)
-                state = memorylib.mark_candidate_extracted(self.session, conversations)
-                self.session_path = self.session_store.save(self.session)
+        """Extract and persist the next complete conversation batch exactly once."""
+        with self._memory_candidate_extract_lock:
+            with self._session_lock:
+                info = memorylib.conversations_since_checkpoint(self.session)
+                conversations = copy.deepcopy(info["conversations"])
+            if not conversations:
                 result = {
-                    "status": "ok",
-                    "reason": reason,
-                    "attempts": attempts,
-                    "candidate_count": len(candidates),
-                    "candidate_file": write_result["path"],
+                    "status": "skipped",
+                    "reason": "no_complete_conversations",
                     "checkpoint_missing": bool(info.get("checkpoint_missing")),
-                    "last_extracted_conversation_id": state["last_extracted_conversation_id"],
                 }
                 if task_state is not None:
                     self.emit_trace(task_state, "memory_candidate_extract", result)
                 return result
-            except Exception as exc:
-                last_error = str(exc)
 
-        result = {
-            "status": "error",
-            "reason": reason,
-            "attempts": attempts,
-            "error": last_error or "candidate_memory_extract_failed",
-            "checkpoint_missing": bool(info.get("checkpoint_missing")),
-        }
-        if task_state is not None:
-            self.emit_trace(task_state, "memory_candidate_extract_failed", result)
-        return result
+            client = self.model_client.fork() if hasattr(self.model_client, "fork") else self.model_client
+            attempts = 0
+            last_error = ""
+            candidates = None
+            for attempts in range(1, MEMORY_CANDIDATE_EXTRACT_MAX_RETRIES + 1):
+                try:
+                    candidates = memorylib.extract_candidate_memories(
+                        client,
+                        conversations,
+                        max_new_tokens=min(self.max_new_tokens, 1200),
+                    )
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+
+            if candidates is None:
+                result = {
+                    "status": "error",
+                    "reason": reason,
+                    "attempts": attempts,
+                    "error": last_error or "candidate_memory_extract_failed",
+                    "checkpoint_missing": bool(info.get("checkpoint_missing")),
+                }
+                if task_state is not None:
+                    self.emit_trace(task_state, "memory_candidate_extract_failed", result)
+                return result
+
+            try:
+                write_result = memorylib.append_candidate_memories(self.root, candidates)
+                with self._session_lock:
+                    checkpoint = memorylib.mark_candidate_extracted(self.session, conversations)
+                    self.session_path = self.session_store.save(self.session)
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "reason": reason,
+                    "attempts": attempts,
+                    "error": str(exc),
+                    "checkpoint_missing": bool(info.get("checkpoint_missing")),
+                }
+                if task_state is not None:
+                    self.emit_trace(task_state, "memory_candidate_extract_failed", result)
+                return result
+
+            result = {
+                "status": "ok",
+                "reason": reason,
+                "attempts": attempts,
+                "candidate_count": len(candidates),
+                "candidate_file": write_result["path"],
+                "checkpoint_missing": bool(info.get("checkpoint_missing")),
+                "last_extracted_conversation_id": checkpoint,
+            }
+            if task_state is not None:
+                self.emit_trace(task_state, "memory_candidate_extract", result)
+            return result
 
     def schedule_dream_if_needed(self, task_state):
         # 自动 dream 只做轻量触发判断；真正整理放到后台线程，避免阻塞当前回答。
@@ -205,8 +247,22 @@ class DreamMixin:
         self.emit_trace(task_state, "dream_scheduled", {"reason": reason})
 
     def start_dream_background(self, reason="manual"):
-        thread = threading.Thread(target=self.run_dream_once, kwargs={"reason": reason, "foreground": False}, daemon=True)
-        thread.start()
+        def run_background():
+            try:
+                self.run_dream_once(reason=reason, foreground=False)
+            finally:
+                with self._session_lock:
+                    self._background_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run_background, daemon=True)
+        with self._session_lock:
+            self._background_threads.add(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._session_lock:
+                self._background_threads.discard(thread)
+            raise
         return thread
 
     def run_dream_once(self, reason="manual", foreground=True):
@@ -232,8 +288,10 @@ class DreamMixin:
                     "runtime_mode": "dream",
                     "reason": str(reason),
                 }
+                fork_model_client = getattr(self.model_client, "fork", None)
+                model_client = fork_model_client() if callable(fork_model_client) else self.model_client
                 child = self.__class__(
-                    model_client=self.model_client,
+                    model_client=model_client,
                     workspace=self.workspace,
                     session_store=self.session_store,
                     session=dream_session,
@@ -264,7 +322,10 @@ class DreamMixin:
                     timezone_name=self.timezone_name,
                     ui=self.ui if foreground else NullUI(),
                 )
-                child.ask(dreamlib.dream_prompt(candidate_batch))
+                try:
+                    child.ask(dreamlib.dream_prompt(candidate_batch))
+                finally:
+                    child.close()
                 if getattr(child.current_task_state, "stop_reason", "") != STOP_REASON_FINAL_ANSWER_RETURNED:
                     reason_text = getattr(child.current_task_state, "stop_reason", "") or "unknown"
                     dreamlib.mark_dream_failed(self.root, status=reason_text)

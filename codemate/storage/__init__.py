@@ -2,6 +2,7 @@
 
 from .run_store import RunStore
 from .session_store import SessionStore
+from .atomic import PersistenceError
 from .task_state import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -16,12 +17,16 @@ from .task_state import (
     STOP_REASON_RETRY_LIMIT_REACHED,
     STOP_REASON_STEP_LIMIT_REACHED,
     STOP_REASON_TOOL_TIMEOUT,
+    STOP_REASON_STREAM_INCOMPLETE,
+    STOP_REASON_UNEXPECTED_ERROR,
+    STOP_REASON_USER_INTERRUPTED,
     TaskState,
 )
 
 __all__ = [
     "RunStore",
     "SessionStore",
+    "PersistenceError",
     "TaskState",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
@@ -36,4 +41,7 @@ __all__ = [
     "STOP_REASON_RETRY_LIMIT_REACHED",
     "STOP_REASON_STEP_LIMIT_REACHED",
     "STOP_REASON_TOOL_TIMEOUT",
+    "STOP_REASON_STREAM_INCOMPLETE",
+    "STOP_REASON_UNEXPECTED_ERROR",
+    "STOP_REASON_USER_INTERRUPTED",
 ]

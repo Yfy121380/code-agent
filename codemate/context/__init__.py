@@ -4,7 +4,16 @@
 # 包内模块分别负责分层组装、历史处理、token 预算观察和共享数据结构。
 
 from .manager import ContextManager
+from .history import repair_incomplete_tool_results
 from .token_budget import TokenUsageState, budget_status, format_budget_report
 from .types import MessageBuild, SectionRender
 
-__all__ = ["ContextManager", "MessageBuild", "SectionRender", "TokenUsageState", "budget_status", "format_budget_report"]
+__all__ = [
+    "ContextManager",
+    "MessageBuild",
+    "SectionRender",
+    "TokenUsageState",
+    "budget_status",
+    "format_budget_report",
+    "repair_incomplete_tool_results",
+]

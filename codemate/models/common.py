@@ -81,12 +81,14 @@ def _iter_sse_json(response):
         if not data_lines:
             return None
         payload = "\n".join(data_lines).strip()
-        if not payload or payload == "[DONE]":
+        if not payload:
             return None
+        if payload == "[DONE]":
+            return event_name, {"type": "sse.done"}
         try:
             data = json.loads(payload)
-        except json.JSONDecodeError:
-            return None
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid JSON in SSE event: {exc}") from exc
         return event_name, data
 
     while True:

@@ -19,7 +19,7 @@ from .constants import (
     WEB_TOOL_NAMES,
 )
 from .mcp import is_mcp_tool_name
-from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_web, resolve_tool_path
+from .path_policy import ToolGate, ToolPolicyError, gate_for_access, gate_for_mcp, gate_for_shell, gate_for_web, resolve_tool_path
 from .shell_safety import analyze_shell_command
 from .images import path_has_image_extension
 from .todos import normalize_todos
@@ -346,11 +346,7 @@ def validate_tool(agent, name, args):
             raise ValueError(analysis.error)
         access = "read" if analysis.kind == "read" else "write"
         path_decisions = [resolve_tool_path(agent, path, access=access) for path in analysis.paths if str(path).strip() != "-"]
-        if analysis.kind == "dangerous":
-            return gate_for_access(agent, "dangerous", path_decisions)
-        if analysis.kind == "unknown":
-            return gate_for_access(agent, "unknown", path_decisions)
-        return gate_for_access(agent, access, path_decisions)
+        return gate_for_shell(agent, analysis, path_decisions)
 
     if name == "write_file":
         decision = resolve_tool_path(agent, args["path"], access="write")

@@ -293,15 +293,27 @@ Allow write for /some/dir this session
 Deny
 ```
 
+Shell 命令还可以按规范化后的命令主体临时授权：
+
+```text
+Allow once
+Allow all `python` commands this session
+Allow write for /some/dir this session
+Allow all `python` commands and write for /some/dir this session
+Deny
+```
+
 `Allow once` 只允许当前工具调用执行一次，不修改会话权限。
 
-`Allow read/write for ... this session` 会把具体目录加入当前 session 的 `temporary_permissions`，并立即重新构建聚合权限规则。临时权限会保存到 session 中，所以恢复会话后权限行为保持一致。
+`Allow read/write for ... this session` 会把具体目录加入当前 session 的 `temporary_permissions`，并立即重新构建聚合权限规则。`Allow all ... commands this session` 则保存 shell 分析得到的规范主体，例如 `python`、`pytest` 或 `git push`。临时权限会保存到 session 中，所以恢复会话后权限行为保持一致。
 
-临时权限只存目录：
+目录临时权限遵循：
 
 - 如果审批对象是文件，临时 allow 目录是文件的父目录。
 - 如果审批对象是目录，临时 allow 目录就是该目录。
 - 如果一次工具调用涉及多个不同目录，则不会提供单个目录的快捷 allow 选项。
+
+Shell 主体临时权限只在命令中恰好存在一个非读取主体时提供。它只消除该命令类别后续的风险审批，不会跳过 read/write deny、路径审批、`read_only`、硬拒绝命令或沙箱。复合命令包含多个非读取主体时，不提供类别授权，避免一次审批扩大到多个命令家族。
 
 临时权限不会写回 settings.json。它只服务当前会话，避免一次临时审批永久改变全局配置。
 
@@ -698,6 +710,7 @@ has_glob
 has_redirection
 has_dynamic_expansion
 blocked
+approval_subject
 ```
 
 如果 `blocked=true`，直接拒绝。
@@ -715,6 +728,8 @@ unknown/dangerous 的特点是：
 - 其他策略下 ask。
 
 read/risky 则继续结合路径规则和 approval policy 判断。也就是说，普通文件读写和 read/risky shell 更依赖 read/write allow/deny；unknown/dangerous shell 更依赖用户确认和 sandbox 兜底。
+
+如果当前 session 已临时允许 `approval_subject`，runtime 只跳过命令风险这一层。命令中能识别出的路径仍重新经过 write gate；无法静态识别的脚本内部写入仍受沙箱已有可写挂载限制。deny 和 `read_only` 在临时主体权限之前生效。
 
 ## 15. 沙箱的作用
 

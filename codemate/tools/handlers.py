@@ -2,7 +2,9 @@
 
 import copy
 import json
+import os
 import re
+import signal
 import shutil
 import subprocess
 import textwrap
@@ -11,8 +13,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..workspace import IGNORED_PATH_NAMES, now
 from ..memory.long_term import is_memory_path
+from ..storage.atomic import atomic_append_text, atomic_write_text
 from .constants import BINARY_SNIFF_BYTES, LIST_FILE_LINE_COUNT_MAX_BYTES, TODO_STATUSES
 from .images import image_media_type_for_file, path_has_image_extension, prepare_image_read_result, sniff_image_media_type
+from .results import ToolRunOutput
 from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
 from .todos import format_todo_plan, normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
@@ -282,6 +286,22 @@ def tool_grep(agent, args):
     return _tool_grep_fallback(agent, pattern, path, mode, args)
 
 
+def _stop_shell_process(process, sig):
+    """Signal the shell process group, falling back to the direct child."""
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except OSError:
+            pass
+    if sig == signal.SIGKILL:
+        process.kill()
+    else:
+        process.terminate()
+
+
 def tool_run_shell(agent, args):
     # shell 命令实际执行入口。
     # 风险识别和审批在 runtime/validators 中已经完成，这里只负责在受控环境中运行命令。
@@ -309,24 +329,52 @@ def tool_run_shell(agent, args):
             ).strip()
         run_args = build_shell_sandbox_command(agent, command)
         shell = False
-    result = subprocess.run(
+    process = subprocess.Popen(
         run_args,
         cwd=agent.root,
         shell=shell,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+        start_new_session=os.name == "posix",
         # 这里传入的是过滤后的环境变量，而不是直接继承整个父 shell 环境，
         # 目的是减少敏感信息被意外带进命令执行环境的风险。
         env=agent.shell_env(),
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _stop_shell_process(process, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            _stop_shell_process(process, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        stdout = stdout if stdout is not None else (exc.stdout or "")
+        stderr = stderr if stderr is not None else (exc.stderr or "")
+        return ToolRunOutput(
+            content=textwrap.dedent(
+                f"""\
+                exit_code: 124
+                stdout:
+                {str(stdout).strip() or "(empty)"}
+                stderr:
+                {str(stderr).strip() or "(empty)"}
+                command timed out after {timeout} seconds
+                """
+            ).strip(),
+            metadata={"tool_timeout": True, "timeout_seconds": timeout},
+        )
+    except BaseException:
+        _stop_shell_process(process, signal.SIGKILL)
+        raise
     return textwrap.dedent(
         f"""\
-        exit_code: {result.returncode}
+        exit_code: {process.returncode}
         stdout:
-        {result.stdout.strip() or "(empty)"}
+        {stdout.strip() or "(empty)"}
         stderr:
-        {result.stderr.strip() or "(empty)"}
+        {stderr.strip() or "(empty)"}
         """
     ).strip()
 
@@ -337,10 +385,9 @@ def tool_write_file(agent, args):
     mode = str(args.get("mode", "overwrite"))
     path.parent.mkdir(parents=True, exist_ok=True)
     if mode == "append":
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(content)
+        atomic_append_text(path, content)
         return f"appended {_display_path(agent, path)} ({len(content)} chars)"
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
     return f"wrote {_display_path(agent, path)} ({len(content)} chars)"
 
 
@@ -357,7 +404,7 @@ def tool_patch_file(agent, args):
     count = text.count(old_text)
     if count != 1:
         raise ValueError(f"old_text must occur exactly once, found {count}")
-    path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
+    atomic_write_text(path, text.replace(old_text, str(args["new_text"]), 1))
     return f"patched {_display_path(agent, path)}"
 
 
@@ -366,7 +413,8 @@ def tool_todo_write(agent, args):
     # 当所有 phase 都完成时直接清空，避免已经结束的计划继续影响后续任务。
     todos = normalize_todos(args.get("todos"))
     if not todos:
-        agent.session["todos"] = []
+        with agent._session_lock:
+            agent.session["todos"] = []
         return "todos updated: todo list cleared."
     phase_counts = {status: sum(1 for phase in todos if phase["status"] == status) for status in TODO_STATUSES}
     task_count = sum(len(phase["tasks"]) for phase in todos)
@@ -375,9 +423,11 @@ def tool_todo_write(agent, args):
         for status in TODO_STATUSES
     }
     if phase_counts["completed"] == len(todos):
-        agent.session["todos"] = []
+        with agent._session_lock:
+            agent.session["todos"] = []
         return f"todos updated: all phases completed; todo list cleared ({len(todos)} phases, {task_count} tasks)."
-    agent.session["todos"] = todos
+    with agent._session_lock:
+        agent.session["todos"] = todos
     return (
         f"todos updated: {len(todos)} phases, {task_count} tasks, "
         f"{phase_counts['in_progress']} phase in_progress, {task_counts['in_progress']} task in_progress, "
@@ -441,7 +491,9 @@ def tool_submit_plan(agent, args):
 
 
 def tool_skill_load(agent, args):
-    skill = agent.load_skill(args.get("name"))
+    with agent._session_lock:
+        skill = agent.load_skill(args.get("name"))
+        agent.session_path = agent.session_store.save(agent.session)
     if getattr(agent, "current_task_state", None) is not None:
         agent.emit_trace(
             agent.current_task_state,
@@ -451,7 +503,6 @@ def tool_skill_load(agent, args):
                 "root": skill["root"],
             },
         )
-    agent.session_store.save(agent.session)
     return (
         f"Skill loaded: {skill['name']}\n"
         f"Root: {skill['root']}\n\n"
@@ -461,7 +512,9 @@ def tool_skill_load(agent, args):
 
 
 def tool_skill_unload(agent, args):
-    removed = agent.unload_skill(args.get("name"), reason=args.get("reason", ""))
+    with agent._session_lock:
+        removed = agent.unload_skill(args.get("name"), reason=args.get("reason", ""))
+        agent.session_path = agent.session_store.save(agent.session)
     reason = str(removed.get("reason", "")).strip()
     if getattr(agent, "current_task_state", None) is not None:
         agent.emit_trace(
@@ -473,7 +526,6 @@ def tool_skill_unload(agent, args):
                 "reason": reason,
             },
         )
-    agent.session_store.save(agent.session)
     return f"skill unloaded: {removed['name']}" + (f" ({reason})" if reason else "")
 
 

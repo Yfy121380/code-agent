@@ -294,7 +294,7 @@ Shell 工具会先分析命令：
 - Allow read/write for a specific directory this session。
 - Deny。
 
-选择本会话允许后，Runtime 会保存临时目录权限并重新聚合规则。
+选择本会话允许后，Runtime 会保存临时目录权限或 Shell 命令主体。目录变化会触发路径规则重新聚合；Shell 主体只影响后续命令风险审批。
 
 ### 4.5 Runtime 额外约束
 

@@ -5,11 +5,14 @@
 """
 
 from dataclasses import dataclass
+import asyncio
 from unittest.mock import patch
+
+import pytest
 
 from codemate import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
 from codemate.config import ensure_codemate_layout
-from codemate.tools.mcp import McpConnection, McpManager, McpServerConfig, McpToolInfo
+from codemate.tools.mcp import McpConnection, McpManager, McpServerConfig, McpToolCallError, McpToolInfo
 
 
 def build_agent(tmp_path, outputs=None, **kwargs):
@@ -200,19 +203,16 @@ def test_mcp_manager_reuses_session_for_list_and_call():
     assert transport_cm.exit_count == 1
 
 
-def test_mcp_manager_reconnects_once_after_call_failure():
+def test_mcp_manager_does_not_retry_call_after_remote_failure():
     config = McpServerConfig(name="notes", transport="http", url="http://localhost:3000/mcp")
     manager = McpManager([config])
     first = FakeSession(fail_once=True)
-    second = FakeSession()
-    sessions = [first, second]
-    transport_cms = [FakeContextManager(None), FakeContextManager(None)]
-    session_cms = [FakeContextManager(None), FakeContextManager(None)]
+    sessions = [first]
+    transport_cm = FakeContextManager(None)
+    session_cm = FakeContextManager(None)
 
     async def fake_connect(server_name):
         session = sessions.pop(0)
-        transport_cm = transport_cms[0 if session is first else 1]
-        session_cm = session_cms[0 if session is first else 1]
         connection = McpConnection(transport_cm=transport_cm, session_cm=session_cm, session=session)
         manager.connections[server_name] = connection
         return connection
@@ -220,14 +220,25 @@ def test_mcp_manager_reconnects_once_after_call_failure():
     manager.connect = fake_connect  # type: ignore[method-assign]
 
     try:
-        result = manager.run(manager.call_tool, "notes", "create", {"title": "demo"})
+        with pytest.raises(McpToolCallError, match="was not retried"):
+            manager.run(manager.call_tool, "notes", "create", {"title": "demo"})
     finally:
         manager.close()
 
-    assert result == "called"
     assert first.calls == [("create", {"title": "demo"})]
-    assert second.calls == [("create", {"title": "demo"})]
-    assert session_cms[0].exit_count == 1
-    assert transport_cms[0].exit_count == 1
-    assert session_cms[1].exit_count == 1
-    assert transport_cms[1].exit_count == 1
+    assert sessions == []
+    assert session_cm.exit_count == 1
+    assert transport_cm.exit_count == 1
+
+
+def test_mcp_manager_bounds_async_operation_time():
+    manager = McpManager([])
+
+    async def hang():
+        await asyncio.sleep(1)
+
+    try:
+        with pytest.raises(TimeoutError):
+            manager.run(hang, timeout=0.01)
+    finally:
+        manager.close()

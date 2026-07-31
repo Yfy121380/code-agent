@@ -286,14 +286,36 @@ class TerminalUI(NullUI):
         self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=title, border_style="yellow"))
         access = str(metadata.get("approval_access", "") or "").strip()
         allow_dir = str(metadata.get("suggested_allow_dir", "") or "").strip()
+        shell_subject = str(metadata.get("suggested_shell_subject", "") or "").strip()
         choices = [
             ("Allow once", {"allowed": True}),
         ]
+        if shell_subject:
+            choices.append(
+                (
+                    f"Allow all `{shell_subject}` commands this session",
+                    {"allowed": True, "remember": {"shell_subject": shell_subject}},
+                )
+            )
         if access in {"read", "write"} and allow_dir:
             choices.append(
                 (
                     f"Allow {access} for {allow_dir} this session",
                     {"allowed": True, "remember": {"access": access, "path": allow_dir}},
+                )
+            )
+        if shell_subject and access in {"read", "write"} and allow_dir:
+            choices.append(
+                (
+                    f"Allow all `{shell_subject}` commands and {access} for {allow_dir} this session",
+                    {
+                        "allowed": True,
+                        "remember": {
+                            "shell_subject": shell_subject,
+                            "access": access,
+                            "path": allow_dir,
+                        },
+                    },
                 )
             )
         choices.append(("Deny", {"allowed": False}))

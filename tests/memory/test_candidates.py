@@ -5,6 +5,7 @@
 """
 
 import json
+import threading
 
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import memory as memorylib
@@ -71,14 +72,14 @@ def test_candidate_extraction_appends_jsonl_and_updates_session_checkpoint(tmp_p
 
     assert result["status"] == "ok"
     assert result["candidate_count"] == 1
-    assert agent.session["memory_candidate_extract"]["last_extracted_conversation_id"] == conversation_id
+    assert agent.session["memory_candidate_checkpoint"] == conversation_id
     candidate_file = memorylib.candidate_log_path(agent.root)
     rows = [json.loads(line) for line in candidate_file.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["type"] == "feedback_workflow"
     assert rows[0]["memory"] == "用户希望代码修改前先讨论方案，确认后再动手实现。"
     assert "source_conversation_start" not in rows[0]
     saved = agent.session_store.load(agent.session["id"])
-    assert saved["memory_candidate_extract"]["last_extracted_conversation_id"] == conversation_id
+    assert saved["memory_candidate_checkpoint"] == conversation_id
 
 
 def test_candidate_checkpoint_survives_session_resume(tmp_path):
@@ -95,7 +96,7 @@ def test_candidate_checkpoint_survives_session_resume(tmp_path):
         feature_flags={"memory_dream": False, "session_title": False},
     )
 
-    assert resumed.session["memory_candidate_extract"]["last_extracted_conversation_id"] == conversation_id
+    assert resumed.session["memory_candidate_checkpoint"] == conversation_id
     assert memorylib.conversations_since_checkpoint(resumed.session)["conversations"] == []
 
 
@@ -119,7 +120,7 @@ def test_candidate_extraction_fails_after_three_invalid_outputs_without_checkpoi
 
     assert result["status"] == "error"
     assert result["attempts"] == 3
-    assert agent.session["memory_candidate_extract"]["last_extracted_conversation_id"] == ""
+    assert agent.session["memory_candidate_checkpoint"] == ""
     assert not memorylib.candidate_log_path(agent.root).exists()
     assert memorylib.conversations_since_checkpoint(agent.session)["conversations"][0]["id"] == conversation_id
 
@@ -130,7 +131,8 @@ def test_candidate_extraction_is_due_after_five_user_turns(tmp_path):
         add_completed_conversation(agent, f"message {index}")
 
     assert memorylib.should_extract_candidates(agent.session) is True
-    assert agent.session["memory_candidate_extract"]["user_turns_since_last_extract"] == 5
+    assert memorylib.candidate_extract_status(agent.session)["user_turns_since_last_extract"] == 5
+    assert agent.session["memory_candidate_checkpoint"] == ""
 
 
 def test_restored_skill_and_todo_context_do_not_count_as_user_turns(tmp_path):
@@ -156,10 +158,10 @@ def test_restored_skill_and_todo_context_do_not_count_as_user_turns(tmp_path):
     add_completed_conversation(agent, "real user request")
 
     info = memorylib.conversations_since_checkpoint(agent.session)
-    memorylib.update_candidate_extract_counters(agent.session)
+    status = memorylib.candidate_extract_status(agent.session)
 
     assert [item["id"] for item in info["conversations"]] == [agent._current_conversation_id]
-    assert agent.session["memory_candidate_extract"]["user_turns_since_last_extract"] == 1
+    assert status["user_turns_since_last_extract"] == 1
 
 
 def test_candidate_extraction_is_due_after_large_new_history(tmp_path):
@@ -167,7 +169,62 @@ def test_candidate_extraction_is_due_after_large_new_history(tmp_path):
     add_completed_conversation(agent, "x" * 50_001)
 
     assert memorylib.should_extract_candidates(agent.session) is True
-    assert agent.session["memory_candidate_extract"]["chars_since_last_extract"] >= 50_000
+    assert memorylib.candidate_extract_status(agent.session)["chars_since_last_extract"] >= 50_000
+
+
+def test_candidate_due_check_does_not_persist_derived_counters(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    add_completed_conversation(agent, "one short request")
+
+    def fail_save(_session):
+        raise AssertionError("not-due candidate checks must not save session")
+
+    monkeypatch.setattr(agent.session_store, "save", fail_save)
+
+    result = agent.maybe_extract_memory_candidates(reason="test", background=False)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "not_due"
+
+
+def test_sync_candidate_extract_waits_for_background_batch(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    for index in range(5):
+        add_completed_conversation(agent, f"message {index}")
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def extract_once(*_args, **_kwargs):
+        calls.append("extract")
+        started.set()
+        assert release.wait(timeout=2)
+        return []
+
+    monkeypatch.setattr(memorylib, "extract_candidate_memories", extract_once)
+
+    scheduled = agent.maybe_extract_memory_candidates(reason="auto", background=True)
+    assert scheduled["status"] == "scheduled"
+    assert started.wait(timeout=2)
+
+    result_holder = {}
+    waiter = threading.Thread(
+        target=lambda: result_holder.setdefault(
+            "result",
+            agent.maybe_extract_memory_candidates(
+                reason="before_compact",
+                background=False,
+                force=True,
+            ),
+        )
+    )
+    waiter.start()
+    release.set()
+    waiter.join(timeout=2)
+
+    assert calls == ["extract"]
+    assert result_holder["result"]["status"] == "skipped"
+    assert result_holder["result"]["reason"] == "no_complete_conversations"
 
 
 def test_compact_extracts_candidates_before_history_is_rewritten(tmp_path):

@@ -285,6 +285,8 @@ Warning: target path is outside the current workspace.
 审批菜单支持：
 
 - `Allow once`
+- 对 Shell 命令临时允许规范化后的命令类别，例如 `Allow all python commands this session`
+- 同时记住 Shell 类别和本次目录权限的组合选项
 - `Allow read for <dir> this session`
 - `Allow write for <dir> this session`
 - `Deny`
