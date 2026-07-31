@@ -337,7 +337,7 @@ Anthropic 则通常把进展文本和 `tool_use` 放在同一个 assistant conte
 
 - `kind = commentary` 表示独立中间进展。
 - `kind = tool_calls` 且 `text` 非空，表示工具调用附带中间进展。
-- `kind = final` 表示最终回答。
+- `kind = final` 表示最终回答；如果同一次 OpenAI response 在 final 前还包含 commentary，则保存在独立的 `commentary_text` 中。
 
 因此，commentary 的协议差异只存在于 Model Client 边界，UI 和 runtime 始终使用同一套语义。
 
@@ -354,6 +354,10 @@ Runtime 只消费这三个统一事件，不直接读取 OpenAI 或 Anthropic �
 OpenAI Responses API 的主要文本事件是 `response.output_text.delta`，工具参数事件是 `response.function_call_arguments.delta/done`，最终以 `response.completed` 中的完整 response 为准。这样可以避免只靠 delta 拼接时漏掉 usage、phase 或完整工具调用信息。
 
 Anthropic Messages API 的主要文本事件是 `content_block_delta` 中的 `text_delta`，工具参数来自 `input_json_delta`。由于工具参数是分片 JSON，Model Client 必须等流结束后再把它组装成完整 `tool_use`，然后返回 `ModelResponse(kind="tool_calls")`。
+
+OpenAI Responses 的 delta 可以携带 `commentary` 或 `final_answer` phase，终端会据此选择 commentary 或普通正文样式。Anthropic 和 OpenAI Chat Completions 的 delta 没有 phase，因此终端不再尝试提前判断文本类别：所有可见 assistant 文本都先显示统一的 `◆ Codemate` 标识，再按原有 Markdown 流式渲染。这样不需要在响应结束后重放正文，也不会因 provider 是否提供 phase 而缺少标识。
+
+Runtime 分别记录“commentary 是否已经流式展示”和“final 是否已经流式展示”，不能只用总流式字符数判断。否则如果模型先流出 commentary、最终正文只出现在 completed response 中，最终回答会被错误跳过。
 
 这个设计保持了一个关键边界：**流式输出只影响终端展示，工具审批、工具执行、history 存储和上下文压缩仍然只处理完整消息**。
 
@@ -382,11 +386,32 @@ Codemate 内部工具统一使用：
 
 ## 11. Usage 和请求元数据
 
+### Prompt 缓存
+
+OpenAI 和 Anthropic 使用不同的缓存控制方式。OpenAI 请求携带稳定的 `prompt_cache_key`；Anthropic 没有对应的 key，而是在可缓存内容上设置 `cache_control`。
+
+Anthropic provider 默认启用缓存，当前使用 5 分钟 TTL。请求同时设置两层缓存边界：
+
+```text
+tools
+system + explicit cache_control
+messages
+request-level automatic cache_control
+```
+
+system 上的显式断点用于稳定缓存工具定义和系统提示词；请求级自动缓存继续在增长的消息历史中选择可复用前缀。这样既能复用稳定 prefix，也能在长工具循环中逐步扩大缓存命中范围。
+
+缓存只在 runtime 为主 agent 请求提供稳定 `prompt_cache_key` 时启用。Compact、记忆提取、记忆召回、标题生成等一次性模型请求不携带该键，因此不会为了几乎不会复用的输入创建缓存。DeepSeek 虽然复用 Anthropic-compatible 协议适配器，但默认不发送 Anthropic 缓存字段。
+
+Client 还保留 1 小时 TTL 支持，但默认不启用。并发子 agent 通过 `fork()` 创建 client 时会继承缓存开关和 TTL。
+
+### Usage 归一化
+
 不同接口对 token 使用量的字段命名不一致：
 
 - OpenAI 常见为 `input_tokens` / `output_tokens`，兼容接口也可能使用 `prompt_tokens` / `completion_tokens`。
 - 缓存 token 可能位于 `input_tokens_details` 或 `prompt_tokens_details`。
-- Anthropic 通常直接提供 `input_tokens` / `output_tokens`。
+- Anthropic 将未缓存输入、缓存创建和缓存读取分别放在 `input_tokens`、`cache_creation_input_tokens` 和 `cache_read_input_tokens`。
 
 适配层将它们统一为：
 
@@ -394,9 +419,11 @@ Codemate 内部工具统一使用：
 - `output_tokens`
 - `total_tokens`
 - `cached_tokens`
+- `cache_creation_input_tokens`
+- `uncached_input_tokens`
 - `cache_hit`
 
-Runtime 可以据此更新上下文预算，而不需要判断当前使用的是哪一种 provider。
+Anthropic 的 `input_tokens` 在归一化后是三类输入 token 之和，而 `uncached_input_tokens` 保留接口原始的未缓存部分。Runtime 因而能用完整输入规模更新上下文预算，不会因为大量 cache read 而低估当前上下文。
 
 ## 12. Runtime 如何消费响应
 

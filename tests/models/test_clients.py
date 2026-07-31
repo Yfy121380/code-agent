@@ -88,6 +88,32 @@ def test_openai_responses_commentary_and_tool_call_are_parsed_together():
     assert response.tool_calls[0].args == {"path": "README.md"}
 
 
+def test_openai_responses_final_preserves_commentary_from_same_response():
+    response = _extract_openai_model_response(
+        {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "验证已经完成。"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "修改已通过测试。"}],
+                },
+            ]
+        },
+        metadata={},
+    )
+
+    assert response.kind == "final"
+    assert response.commentary_text == "验证已经完成。"
+    assert response.text == "修改已通过测试。"
+
+
 def test_openai_input_keeps_commentary_before_tool_calls():
     messages = _to_openai_input(
         [
@@ -313,10 +339,81 @@ def test_anthropic_effort_is_added_for_claude_but_not_deepseek(monkeypatch):
 
     assert claude.supports_images is True
     assert deepseek.supports_images is False
+    assert claude.supports_prompt_cache is True
+    assert deepseek.supports_prompt_cache is False
     assert payloads[0]["output_config"] == {"effort": "high"}
     assert "output_config" not in payloads[1]
+    assert "cache_control" not in payloads[0]
+    assert "cache_control" not in payloads[1]
     assert "thinking" not in payloads[0]
     assert "thinking" not in payloads[1]
+
+
+def test_anthropic_prompt_cache_marks_system_and_automatic_breakpoint(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 20,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 900,
+                    "output_tokens": 5,
+                },
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = AnthropicCompatibleModelClient(
+        "claude-sonnet-4-6",
+        "https://example.test/v1",
+        "",
+        None,
+        30,
+    )
+
+    response = client.complete(
+        "hello",
+        8192,
+        system="stable system prompt",
+        prompt_cache_key="stable-prefix",
+    )
+
+    assert captured["payload"]["cache_control"] == {"type": "ephemeral"}
+    assert captured["payload"]["system"] == [
+        {
+            "type": "text",
+            "text": "stable system prompt",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert response.metadata["input_tokens"] == 1020
+    assert response.metadata["uncached_input_tokens"] == 20
+    assert response.metadata["cache_creation_input_tokens"] == 100
+    assert response.metadata["cached_tokens"] == 900
+    assert response.metadata["total_tokens"] == 1025
+    assert response.metadata["cache_hit"] is True
+
+
+def test_anthropic_prompt_cache_configuration_is_preserved_by_fork():
+    client = AnthropicCompatibleModelClient(
+        "claude-sonnet-4-6",
+        "https://example.test/v1",
+        "",
+        None,
+        30,
+        prompt_cache=True,
+        prompt_cache_ttl="1h",
+    )
+
+    child = client.fork()
+
+    assert child.supports_prompt_cache is True
+    assert child.prompt_cache_ttl == "1h"
 
 
 def test_anthropic_effort_and_structured_output_share_output_config(monkeypatch):
@@ -382,7 +479,7 @@ def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
     captured = {}
     body = "\n\n".join(
         [
-            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":1}}}',
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"output_tokens":1}}}',
             'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
             'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我先读取。"}}',
             'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
@@ -402,9 +499,18 @@ def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     client = AnthropicCompatibleModelClient("claude-sonnet-4-6", "https://example.test/v1", "", None, 30)
 
-    events = list(client.stream_complete("hello", 100, tools=[{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]))
+    events = list(
+        client.stream_complete(
+            "hello",
+            100,
+            tools=[{"name": "read_file", "description": "", "input_schema": {"type": "object"}}],
+            system="stable system prompt",
+            prompt_cache_key="stable-prefix",
+        )
+    )
 
     assert captured["payload"]["stream"] is True
+    assert captured["payload"]["cache_control"] == {"type": "ephemeral"}
     assert events[0].kind == "text_delta"
     assert events[0].text == "我先读取。"
     assert events[-1].kind == "done"
@@ -412,5 +518,43 @@ def test_anthropic_streaming_yields_text_delta_and_done_response(monkeypatch):
     assert events[-1].response.text == "我先读取。"
     assert events[-1].response.tool_calls[0].id == "toolu_1"
     assert events[-1].response.tool_calls[0].args == {"path": "README.md"}
+    assert client.last_completion_metadata["input_tokens"] == 114
+    assert client.last_completion_metadata["cached_tokens"] == 100
+    assert client.last_completion_metadata["cache_creation_input_tokens"] == 10
     assert client.last_completion_metadata["output_tokens"] == 8
     assert client.last_completion_metadata["stop_reason"] == "tool_use"
+
+
+def test_anthropic_streaming_final_text_is_unphased_until_done(monkeypatch):
+    body = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":1}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Final response."}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}',
+            'event: message_stop\ndata: {"type":"message_stop"}',
+        ]
+    ) + "\n\n"
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: FakeHTTPResponse(body, content_type="text/event-stream"),
+    )
+    client = AnthropicCompatibleModelClient(
+        "deepseek-v4-pro",
+        "https://example.test/v1",
+        "",
+        None,
+        30,
+    )
+
+    events = list(client.stream_complete("hello", 100))
+
+    assert events[0].kind == "text_delta"
+    assert events[0].phase is None
+    assert events[-1].kind == "done"
+    assert events[-1].response.kind == "final"
+    assert events[-1].response.text == "Final response."
+    assert client.last_completion_metadata["stop_reason"] == "end_turn"

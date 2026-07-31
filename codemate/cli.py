@@ -129,6 +129,7 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            prompt_cache=True,
         )
     if provider == "deepseek":
         model = _effective_model(args, provider)
@@ -140,6 +141,7 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            prompt_cache=False,
         )
 
     model = _effective_model(args, provider)

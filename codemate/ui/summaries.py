@@ -9,9 +9,9 @@ import json
 
 
 MAX_PREVIEW_LINES = 18
-MAX_RESULT_LINES = 40
-MAX_LINE_CHARS = 160
-SHELL_STREAM_EDGE_LINES = 4
+MAX_RESULT_LINES = 4
+MAX_LINE_CHARS = 40
+SHELL_STREAM_EDGE_LINES = 2
 COMPACT_RESULT_TOOLS = {"list_files", "read_file", "grep", "web_search", "web_extract", "web_research"}
 
 
@@ -197,7 +197,7 @@ def summarize_read_tool_result(name, result, metadata=None):
 
 def _edge_lines(text, edge_lines=SHELL_STREAM_EDGE_LINES):
     # run_shell 输出常常很长，终端只展示开头和结尾。
-    # 完整 stdout/stderr 仍保留在工具结果、history 和 trace 中。
+    # 统一工具结果上限内的 stdout/stderr 仍保留在 history 和 trace 中。
     lines = str(text or "").splitlines()
     if not lines:
         return ["(empty)"]
@@ -250,7 +250,7 @@ def summarize_shell_result(result, metadata=None):
 
 
 def summarize_tool_result(name, result, metadata=None):
-    """把工具结果压成终端可读摘要，完整结果仍保留在 history 和 trace 中。"""
+    """把工具结果压成终端摘要，不改变已进入 history 和 trace 的结果。"""
     metadata = dict(metadata or {})
     result = str(result or "")
     lines = []

@@ -248,18 +248,18 @@ def test_run_shell_terminal_summary_keeps_stdout_and_stderr_edges():
     assert "status: error" in summary
     assert "exit_code: 1" in summary
     assert "out-1" in summary
-    assert "out-4" in summary
-    assert "out-5" not in summary
-    assert "out-7" not in summary
-    assert "out-8" in summary
+    assert "out-2" in summary
+    assert "out-3" not in summary
+    assert "out-9" not in summary
+    assert "out-10" in summary
     assert "out-11" in summary
     assert "err-1" in summary
-    assert "err-4" in summary
-    assert "err-5" not in summary
-    assert "err-7" not in summary
-    assert "err-8" in summary
+    assert "err-2" in summary
+    assert "err-3" not in summary
+    assert "err-9" not in summary
+    assert "err-10" in summary
     assert "err-11" in summary
-    assert summary.count("... omitted 3 lines ...") == 2
+    assert summary.count("... omitted 7 lines ...") == 2
 
 
 def test_delegate_terminal_summary_shows_tasks_and_result_metadata():

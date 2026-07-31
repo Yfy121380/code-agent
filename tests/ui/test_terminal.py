@@ -4,7 +4,8 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from codemate.ui.terminal import COMMENTARY_STYLE, FINAL_ANSWER_MARKER_STYLE, TerminalUI
+from codemate.ui.summaries import summarize_tool_result
+from codemate.ui.terminal import COMMENTARY_STYLE, TerminalUI
 
 
 class RecordingConsole:
@@ -58,8 +59,29 @@ def test_rejected_shell_result_shows_policy_error_instead_of_empty_streams():
     rendered = [item["objects"][0].plain for item in console.printed]
     assert rendered == [
         "  ↳ rejected · run_shell",
-        "    error: write operations are blocked in read-only mode",
+        "    error: write operations are blocked i...",
     ]
+
+
+def test_generic_tool_result_is_limited_to_four_short_lines():
+    summary = summarize_tool_result(
+        "custom_tool",
+        "\n".join(
+            [
+                "a" * 80,
+                "second",
+                "third",
+                "fourth",
+                "fifth",
+            ]
+        ),
+        {"tool_status": "ok"},
+    )
+
+    lines = summary.splitlines()
+    assert lines[1] == ("a" * 37) + "..."
+    assert lines[2:5] == ["second", "third", "fourth"]
+    assert lines[5] == "... (1 more lines)"
 
 
 def test_commentary_and_final_render_as_unframed_markdown_with_marker():
@@ -69,14 +91,17 @@ def test_commentary_and_final_render_as_unframed_markdown_with_marker():
     ui.commentary("**Progress**")
     ui.final_answer("**Done**")
 
-    commentary = console.printed[0]["objects"][0]
-    marker = console.printed[1]["objects"][0]
-    final = console.printed[2]["objects"][0]
+    commentary_marker = console.printed[0]["objects"][0]
+    commentary = console.printed[1]["objects"][0]
+    final_marker = console.printed[2]["objects"][0]
+    final = console.printed[3]["objects"][0]
+    assert isinstance(commentary_marker, Text)
+    assert commentary_marker.plain == "◆ Codemate"
     assert isinstance(commentary, Markdown)
     assert commentary.style == COMMENTARY_STYLE
-    assert isinstance(marker, Text)
-    assert marker.plain == "◆ Final answer"
-    assert marker.style == FINAL_ANSWER_MARKER_STYLE
+    assert isinstance(final_marker, Text)
+    assert final_marker.plain == commentary_marker.plain
+    assert final_marker.style == commentary_marker.style
     assert isinstance(final, Markdown)
     assert final.style == "none"
 

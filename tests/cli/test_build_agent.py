@@ -74,6 +74,25 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
         agent = mini_cli.build_agent(args)
         assert "CODEMATE_DEEPSEEK_API_KEY" in agent.secret_env_summary()["secret_env_names"]
+        assert agent.model_client.kwargs["prompt_cache"] is False
+
+
+def test_cli_anthropic_provider_enables_prompt_cache_by_default(tmp_path):
+    class DummyModelClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    args = mini_cli.build_arg_parser().parse_args(
+        ["--cwd", str(tmp_path), "--provider", "anthropic"]
+    )
+    with patch.dict(os.environ, isolated_env(tmp_path), clear=True), patch(
+        "codemate.cli.AnthropicCompatibleModelClient",
+        DummyModelClient,
+    ):
+        client = mini_cli._build_model_client(args)
+
+    assert client.kwargs["prompt_cache"] is True
+
 
 def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
     class DummyModelClient:

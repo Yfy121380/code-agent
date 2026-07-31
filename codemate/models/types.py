@@ -33,6 +33,7 @@ class ModelResponse:
     tool_calls: list[ModelToolCall] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     raw: dict | None = None
+    commentary_text: str = ""
 
     @classmethod
     def commentary(cls, text, metadata=None, raw=None):
@@ -44,12 +45,13 @@ class ModelResponse:
         )
 
     @classmethod
-    def final(cls, text, metadata=None, raw=None):
+    def final(cls, text, metadata=None, raw=None, commentary_text=""):
         return cls(
             kind="final",
             text=str(text or ""),
             metadata=dict(metadata or {}),
             raw=raw,
+            commentary_text=str(commentary_text or ""),
         )
 
     @classmethod

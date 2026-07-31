@@ -6,7 +6,7 @@
 
 from PIL import Image
 
-from codemate import ModelResponse
+from codemate import ModelResponse, ModelStreamEvent
 from tests.helpers import build_agent
 
 
@@ -124,6 +124,59 @@ def test_runtime_streams_text_but_records_complete_final_message(tmp_path):
     assert len(assistant_messages) == 1
     assert assistant_messages[0]["kind"] == "final"
     assert assistant_messages[0]["content"] == "done"
+
+
+def test_runtime_non_stream_final_preserves_and_displays_leading_commentary(tmp_path):
+    ui = RecordingUI()
+    response = ModelResponse.final(
+        "done",
+        commentary_text="I verified the affected behavior.",
+    )
+    agent = build_agent(tmp_path, [response], ui=ui, stream=False)
+
+    result = agent.ask("finish the task")
+
+    assert result == "done"
+    assert ui.commentary_messages == ["I verified the affected behavior."]
+    assert ui.final_messages == ["done"]
+    assistant_messages = [
+        item for item in agent.session["history"] if item.get("role") == "assistant"
+    ]
+    assert [item["kind"] for item in assistant_messages] == ["commentary", "final"]
+
+
+def test_runtime_does_not_treat_streamed_commentary_as_streamed_final(tmp_path):
+    class CommentaryThenFinalClient:
+        model = "gpt-5.5"
+        supports_streaming = True
+        supports_images = False
+        supports_prompt_cache = False
+        supports_tools = True
+        supports_session_title = False
+        last_completion_metadata = {}
+
+        def stream_complete(self, messages, max_new_tokens, **kwargs):
+            del messages, max_new_tokens, kwargs
+            response = ModelResponse.final(
+                "Final body.",
+                commentary_text="Progress update.",
+            )
+            yield ModelStreamEvent.text_delta(
+                "Progress update.",
+                phase="commentary",
+            )
+            yield ModelStreamEvent.done(response)
+
+    ui = RecordingUI()
+    agent = build_agent(tmp_path, [], ui=ui)
+    agent.model_client = CommentaryThenFinalClient()
+
+    result = agent.ask("finish the task")
+
+    assert result == "Final body."
+    assert ui.streamed == [{"text": "Progress update.", "phase": "commentary"}]
+    assert ui.commentary_messages == []
+    assert ui.final_messages == ["Final body."]
 
 
 def test_runtime_streams_tool_commentary_before_executing_complete_tool_call(tmp_path):

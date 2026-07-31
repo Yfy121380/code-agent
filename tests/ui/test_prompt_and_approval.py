@@ -131,6 +131,23 @@ def test_terminal_plan_review_collects_revision_feedback():
     assert "Plan title" in output.getvalue()
 
 
+def test_terminal_plan_review_renders_complete_plan():
+    output = StringIO()
+    ui = TerminalUI(console=Console(file=output, force_terminal=False, width=120))
+    plan = "# Plan\n\n" + "\n".join(f"- Complete plan item {index}" for index in range(1, 21))
+
+    def approve(choices, **_kwargs):
+        return choices[0][1]
+
+    with patch.object(ui, "_selection_menu", approve):
+        result = ui.plan_review("Long plan", plan)
+
+    rendered = output.getvalue()
+    assert result == {"decision": "approved"}
+    assert "Complete plan item 1" in rendered
+    assert "Complete plan item 20" in rendered
+
+
 def test_terminal_plan_review_reprompts_for_empty_revision_feedback():
     output = StringIO()
     ui = TerminalUI(console=Console(file=output, force_terminal=False))

@@ -26,7 +26,8 @@ TOOL_CALL_STYLE = "#b0b0b0"
 TOOL_RESULT_STYLE = "#b0b0b0"
 TOOL_DETAIL_STYLE = "#999999"
 TOOL_ERROR_STYLE = "#d6a85f"
-FINAL_ANSWER_MARKER_STYLE = "#e5e7eb"
+ASSISTANT_MARKER_STYLE = "#e5e7eb"
+ASSISTANT_MARKER_TEXT = "◆ Codemate"
 
 
 class NullUI:
@@ -90,7 +91,7 @@ class TerminalUI(NullUI):
     def __init__(self, console=None):
         self.console = console or Console()
         self._stream_phase = ""
-        self._stream_final_marker_printed = False
+        self._stream_marker_printed = False
         self._stream_renderer = MarkdownStreamRenderer(self.console)
 
     def approval_menu(self, choices):
@@ -174,13 +175,12 @@ class TerminalUI(NullUI):
         # 流式文本是正式输出，但 Markdown 需要分块渲染：
         # renderer 会先缓冲未完成语法块，history/trace 仍保存完整原文。
         self._stream_phase = str(phase or "")
-        self._stream_final_marker_printed = False
+        self._stream_marker_printed = False
         self._stream_renderer.reset()
 
-    def _print_final_answer_marker(self):
-        # 最终回答提示只属于终端展示，不进入 history/trace；
-        # 让 final answer 和之前的 commentary、工具输出更容易区分。
-        self.console.print(Text("◆ Final answer", style=FINAL_ANSWER_MARKER_STYLE))
+    def _print_assistant_marker(self):
+        # Commentary 和 final 使用同一标识，避免依赖 provider-specific phase。
+        self.console.print(Text(ASSISTANT_MARKER_TEXT, style=ASSISTANT_MARKER_STYLE))
 
     def stream_delta(self, text, phase=""):
         text = str(text or "")
@@ -190,16 +190,18 @@ class TerminalUI(NullUI):
         if phase:
             if self._stream_phase and phase != self._stream_phase:
                 self._stream_renderer.finish(phase=self._stream_phase)
+                self._stream_marker_printed = False
             self._stream_phase = target_phase
-        if target_phase == "final_answer" and not self._stream_final_marker_printed:
-            self._print_final_answer_marker()
-            self._stream_final_marker_printed = True
+        if not self._stream_marker_printed:
+            self._print_assistant_marker()
+            self._stream_marker_printed = True
         self._stream_renderer.write(text, phase=self._stream_phase)
 
     def stream_end(self, kind="", metadata=None):
         del kind, metadata
         self._stream_renderer.finish(phase=self._stream_phase)
         self._stream_phase = ""
+        self._stream_marker_printed = False
 
     def compact_start(self, reason=""):
         suffix = f" ({reason})" if reason else ""
@@ -233,6 +235,7 @@ class TerminalUI(NullUI):
     def commentary(self, text):
         text = str(text or "").strip()
         if text:
+            self._print_assistant_marker()
             self.console.print(Markdown(text, style=COMMENTARY_STYLE))
 
     def tool_start(self, name, args, risk_level=""):
@@ -369,5 +372,5 @@ class TerminalUI(NullUI):
         text = str(text or "").strip()
         if not text:
             return
-        self._print_final_answer_marker()
+        self._print_assistant_marker()
         self.console.print(Markdown(text))

@@ -128,10 +128,16 @@ def _as_model_response(output):
         if output.get("kind") == "tool_calls":
             return ModelResponse.from_tool_calls(output.get("tool_calls", []), text=output.get("text", ""), raw=output)
         if output.get("kind") == "final":
-            return ModelResponse.final(output.get("text", ""), raw=output)
+            return ModelResponse.final(
+                output.get("text", ""),
+                raw=output,
+                commentary_text=output.get("commentary_text", ""),
+            )
         if output.get("name"):
             return ModelResponse.tool_call(output.get("name"), output.get("args", {}), call_id=output.get("id"), raw=output)
     return ModelResponse.final(str(output or ""))
+
+
 def _json_args(value):
     if isinstance(value, dict):
         return dict(value)
@@ -142,16 +148,35 @@ def _json_args(value):
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
 def _extract_usage_cache_details(data):
     usage = data.get("usage") or {}
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
     input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
+    cache_creation_input_tokens = 0
+
+    # Anthropic reports uncached, cache-creation, and cache-read input separately.
+    # Runtime needs their sum to estimate the actual context size for compaction.
+    if "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
+        uncached_input_tokens = int(input_tokens or 0)
+        cached_tokens = int(usage.get("cache_read_input_tokens") or 0)
+        cache_creation_input_tokens = int(usage.get("cache_creation_input_tokens") or 0)
+        input_tokens = uncached_input_tokens + cached_tokens + cache_creation_input_tokens
+    else:
+        uncached_input_tokens = None
+
+    total_tokens = usage.get("total_tokens")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = int(input_tokens) + int(output_tokens)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": usage.get("total_tokens"),
+        "total_tokens": total_tokens,
         "cached_tokens": cached_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
         "cache_hit": cached_tokens > 0,
     }

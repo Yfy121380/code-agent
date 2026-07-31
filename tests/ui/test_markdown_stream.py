@@ -9,7 +9,7 @@ from rich.text import Text
 
 from codemate.ui import TerminalUI
 from codemate.ui.markdown_stream import COMMENTARY_STYLE, MarkdownStreamRenderer
-from codemate.ui.terminal import FINAL_ANSWER_MARKER_STYLE
+from codemate.ui.terminal import ASSISTANT_MARKER_STYLE, ASSISTANT_MARKER_TEXT
 
 
 class RecordingConsole:
@@ -100,15 +100,20 @@ def test_terminal_stream_flushes_pending_text_when_phase_changes():
 
     renderables = [item["objects"][0] for item in console.printed]
     markdown_objects = [item for item in renderables if isinstance(item, Markdown)]
-    markers = [item for item in renderables if isinstance(item, Text) and item.plain == "◆ Final answer"]
+    markers = [
+        item
+        for item in renderables
+        if isinstance(item, Text) and item.plain == ASSISTANT_MARKER_TEXT
+    ]
     assert [item.markup for item in markdown_objects] == ["progress without blank", "final text"]
     assert [item.style for item in markdown_objects] == [COMMENTARY_STYLE, "none"]
-    assert len(markers) == 1
-    assert markers[0].style == FINAL_ANSWER_MARKER_STYLE
-    assert renderables.index(markers[0]) < renderables.index(markdown_objects[1])
+    assert len(markers) == 2
+    assert all(marker.style == ASSISTANT_MARKER_STYLE for marker in markers)
+    assert renderables.index(markers[0]) < renderables.index(markdown_objects[0])
+    assert renderables.index(markers[1]) < renderables.index(markdown_objects[1])
 
 
-def test_terminal_stream_final_marker_is_printed_once_for_multiple_final_deltas():
+def test_terminal_stream_assistant_marker_is_printed_once_for_one_phase():
     console = RecordingConsole()
     ui = TerminalUI(console=console)
 
@@ -116,12 +121,52 @@ def test_terminal_stream_final_marker_is_printed_once_for_multiple_final_deltas(
     ui.stream_delta("Final", phase="final_answer")
     ui.stream_delta(" answer\n\n", phase="final_answer")
     ui.stream_end(kind="final")
+    assert len(console.printed) == 2
 
     renderables = [item["objects"][0] for item in console.printed]
-    markers = [item for item in renderables if isinstance(item, Text) and item.plain == "◆ Final answer"]
+    markers = [
+        item
+        for item in renderables
+        if isinstance(item, Text) and item.plain == ASSISTANT_MARKER_TEXT
+    ]
     markdown_objects = [item for item in renderables if isinstance(item, Markdown)]
     assert len(markers) == 1
     assert [item.markup for item in markdown_objects] == ["Final answer"]
+
+
+def test_terminal_unphased_stream_uses_common_marker_and_commits_immediately():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.stream_start()
+    ui.stream_delta("DeepSeek final paragraph.\n\n")
+
+    renderables = [item["objects"][0] for item in console.printed]
+    assert isinstance(renderables[0], Text)
+    assert renderables[0].plain == ASSISTANT_MARKER_TEXT
+    assert isinstance(renderables[1], Markdown)
+    assert renderables[1].markup == "DeepSeek final paragraph."
+    assert renderables[1].style == "none"
+
+    ui.stream_end(kind="final")
+    assert len(console.printed) == 2
+
+
+def test_terminal_unphased_tool_text_uses_the_same_common_marker():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.stream_start()
+    ui.stream_delta("I found the entry point and will inspect its callers.\n\n")
+    ui.stream_end(kind="tool_calls")
+
+    renderables = [item["objects"][0] for item in console.printed]
+    assert len(renderables) == 2
+    assert isinstance(renderables[0], Text)
+    assert renderables[0].plain == ASSISTANT_MARKER_TEXT
+    assert isinstance(renderables[1], Markdown)
+    assert renderables[1].style == "none"
+    assert renderables[1].markup == "I found the entry point and will inspect its callers."
 
 
 def test_terminal_live_preview_updates_before_markdown_block_finishes():
@@ -142,3 +187,38 @@ def test_terminal_live_preview_updates_before_markdown_block_finishes():
 
     assert live.stopped is True
     assert rendered_markup(console) == ["Streaming text"]
+
+
+def test_terminal_unphased_stream_uses_normal_live_rendering():
+    RecordingLive.instances = []
+    console = RecordingConsole()
+    console.is_terminal = True
+    ui = TerminalUI(console=console)
+    ui._stream_renderer = MarkdownStreamRenderer(console, live_factory=RecordingLive)
+
+    ui.stream_start()
+    ui.stream_delta("Streaming")
+    ui.stream_delta(" without phase")
+
+    live = RecordingLive.instances[0]
+    assert live.started is True
+    assert [item.markup for item in live.renderables] == [
+        "Streaming",
+        "Streaming without phase",
+    ]
+    assert rendered_markup(console) == []
+    markers = [
+        item["objects"][0]
+        for item in console.printed
+        if isinstance(item["objects"][0], Text)
+    ]
+    assert [marker.plain for marker in markers] == [ASSISTANT_MARKER_TEXT]
+
+    ui.stream_end(kind="final")
+
+    assert live.stopped is True
+    renderables = [item["objects"][0] for item in console.printed]
+    assert isinstance(renderables[0], Text)
+    assert renderables[0].plain == ASSISTANT_MARKER_TEXT
+    assert isinstance(renderables[1], Markdown)
+    assert renderables[1].markup == "Streaming without phase"

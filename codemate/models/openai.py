@@ -143,7 +143,12 @@ def _extract_openai_model_response(data, metadata):
             raw=data,
         )
     if texts["final"]:
-        return ModelResponse.final(texts["final"], metadata=metadata, raw=data)
+        return ModelResponse.final(
+            texts["final"],
+            metadata=metadata,
+            raw=data,
+            commentary_text=texts["commentary"],
+        )
     if texts["commentary"]:
         return ModelResponse.commentary(texts["commentary"], metadata=metadata, raw=data)
     return ModelResponse.final(texts["fallback"] or _extract_openai_text(data), metadata=metadata, raw=data)

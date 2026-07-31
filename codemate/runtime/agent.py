@@ -967,7 +967,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 "prompt_cache_key": self.prefix_state.hash,
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "tool_signature": self.prefix_state.tool_signature,
-                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
+                "prompt_cache_supported": (
+                    self.feature_enabled("prompt_cache")
+                    and bool(getattr(self.model_client, "supports_prompt_cache", False))
+                ),
             }
         )
         metadata["context_budget"] = self.context_budget_status()

@@ -228,12 +228,12 @@ CLI/UI 的展示原则是：**正文优先，工具事件退到第二视觉层�
 
 2. 结果展示时压缩 stdout/stderr：
 
-- stdout 前 4 行。
-- stdout 后 4 行。
-- stderr 前 4 行。
-- stderr 后 4 行。
+- stdout 前 2 行。
+- stdout 后 2 行。
+- stderr 前 2 行。
+- stderr 后 2 行。
 
-如果中间有很多行，会显示 omitted 行数。完整 shell 输出仍然保存在工具结果、history 和 trace 中。
+如果中间有很多行，会显示 omitted 行数。统一工具结果上限内的 shell 输出仍保存在 history 和 trace 中。
 
 ### write_file
 

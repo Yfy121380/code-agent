@@ -57,6 +57,8 @@ class RuntimeLoopMixin:
         response = None
         stream_metadata = {}
         streamed_text_chars = 0
+        streamed_phase_chars = {"commentary": 0, "final_answer": 0}
+        streamed_unphased_chars = 0
         self.ui.stream_start()
         try:
             for event in self.model_client.stream_complete(
@@ -71,7 +73,12 @@ class RuntimeLoopMixin:
                 if kind == "text_delta":
                     delta = str(getattr(event, "text", "") or "")
                     streamed_text_chars += len(delta)
-                    self.ui.stream_delta(delta, phase=getattr(event, "phase", ""))
+                    phase = str(getattr(event, "phase", "") or "")
+                    if phase in streamed_phase_chars:
+                        streamed_phase_chars[phase] += len(delta)
+                    else:
+                        streamed_unphased_chars += len(delta)
+                    self.ui.stream_delta(delta, phase=phase)
                 elif kind == "done":
                     response = getattr(event, "response", None)
                     stream_metadata.update(dict(getattr(event, "metadata", {}) or {}))
@@ -93,6 +100,17 @@ class RuntimeLoopMixin:
         completion_metadata.update(dict(getattr(response, "metadata", {}) or {}))
         completion_metadata["streamed_text_chars"] = streamed_text_chars
         kind = getattr(response, "kind", "final")
+        only_unphased_text = streamed_unphased_chars > 0 and not any(
+            streamed_phase_chars.values()
+        )
+        completion_metadata["streamed_commentary"] = (
+            streamed_phase_chars["commentary"] > 0
+            or (kind in {"commentary", "tool_calls"} and only_unphased_text)
+        )
+        completion_metadata["streamed_final_answer"] = (
+            streamed_phase_chars["final_answer"] > 0
+            or (kind == "final" and only_unphased_text)
+        )
         self.ui.stream_end(kind=kind, metadata=completion_metadata)
         self.ui.model_end(kind=kind, metadata=completion_metadata)
         return response, completion_metadata, int((time.monotonic() - model_started_at) * 1000), streamed_text_chars
@@ -240,9 +258,12 @@ class RuntimeLoopMixin:
                 },
             )
             prompt_cache_key = None
-            if getattr(self.model_client, "supports_prompt_cache", False):
+            if (
+                self.feature_enabled("prompt_cache")
+                and getattr(self.model_client, "supports_prompt_cache", False)
+            ):
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-            response, completion_metadata, model_duration_ms, streamed_text_chars = self._complete_model_response(
+            response, completion_metadata, model_duration_ms, _streamed_text_chars = self._complete_model_response(
                 messages,
                 system,
                 prompt_cache_key=prompt_cache_key,
@@ -278,7 +299,7 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
-                if not streamed_text_chars:
+                if not completion_metadata.get("streamed_commentary", False):
                     self.ui.commentary(commentary)
                 self._emit_commentary_trace(task_state, commentary, source="commentary")
                 self.record({"role": "assistant", "kind": "commentary", "content": commentary, "created_at": now()})
@@ -304,7 +325,7 @@ class RuntimeLoopMixin:
                 commentary = str(getattr(response, "text", "") or "")
                 if commentary.strip():
                     commentary = commentary.strip()
-                    if not streamed_text_chars:
+                    if not completion_metadata.get("streamed_commentary", False):
                         self.ui.commentary(commentary)
                     self._emit_commentary_trace(task_state, commentary, source="tool_calls")
                 self.record(
@@ -366,6 +387,28 @@ class RuntimeLoopMixin:
                     )
                     self.run_store.write_task_state(task_state)
                     continue
+                final_commentary = str(
+                    getattr(response, "commentary_text", "") or ""
+                ).strip()
+                if final_commentary:
+                    if (
+                        not completion_metadata.get("streamed_commentary", False)
+                        and not completion_metadata.get("streamed_final_answer", False)
+                    ):
+                        self.ui.commentary(final_commentary)
+                    self._emit_commentary_trace(
+                        task_state,
+                        final_commentary,
+                        source="final",
+                    )
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "kind": "commentary",
+                            "content": final_commentary,
+                            "created_at": now(),
+                        }
+                    )
                 self.record({"role": "assistant", "kind": "final", "content": final, "created_at": now()})
                 task_state.finish_success(final)
                 self.run_store.write_task_state(task_state)
@@ -382,7 +425,7 @@ class RuntimeLoopMixin:
                 if not candidate_extracted_this_run:
                     self.maybe_extract_memory_candidates(task_state=task_state, reason="auto", background=True)
                 self.schedule_dream_if_needed(task_state)
-                if not streamed_text_chars:
+                if not completion_metadata.get("streamed_final_answer", False):
                     self.ui.final_answer(final)
                 self.maybe_generate_session_title(user_message, final)
                 return final

@@ -13,6 +13,16 @@ from .common import _extract_usage_cache_details, _image_block_base64, _iter_sse
 from .schemas import _tool_specs_to_anthropic
 from .types import ModelResponse, ModelStreamEvent, ModelToolCall
 
+ANTHROPIC_CACHE_TTLS = {"5m", "1h"}
+
+
+def _cache_control(ttl):
+    """构造 Anthropic cache_control；5 分钟是 API 的默认 TTL。"""
+    cache_control = {"type": "ephemeral"}
+    if ttl == "1h":
+        cache_control["ttl"] = ttl
+    return cache_control
+
 
 def _assistant_content_blocks(message):
     # codemate 默认不启用 thinking，只回放 Anthropic 需要的可见文本和 tool_use。
@@ -153,7 +163,16 @@ def _raise_anthropic_stream_error(event):
 
 
 class AnthropicCompatibleModelClient:
-    def __init__(self, model, base_url, api_key, temperature, timeout):
+    def __init__(
+        self,
+        model,
+        base_url,
+        api_key,
+        temperature,
+        timeout,
+        prompt_cache=None,
+        prompt_cache_ttl="5m",
+    ):
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
@@ -163,32 +182,60 @@ class AnthropicCompatibleModelClient:
         self.supports_streaming = self.capabilities.supports_streaming
         self.supports_images = self.capabilities.supports_images
         self.supports_reasoning = self.capabilities.supports_reasoning
-        self.supports_prompt_cache = False
+        if prompt_cache_ttl not in ANTHROPIC_CACHE_TTLS:
+            raise ValueError("prompt_cache_ttl must be '5m' or '1h'")
+        if prompt_cache is None:
+            prompt_cache = str(model or "").lower().startswith("claude-")
+        self.supports_prompt_cache = bool(prompt_cache)
+        self.prompt_cache_ttl = prompt_cache_ttl
         self.supports_tools = True
         self.last_completion_metadata = {}
 
     def fork(self):
         """为并发子 agent 创建独立客户端实例，避免 last_completion_metadata 互相覆盖。"""
-        return type(self)(self.model, self.base_url, self.api_key, self.temperature, self.timeout)
+        return type(self)(
+            self.model,
+            self.base_url,
+            self.api_key,
+            self.temperature,
+            self.timeout,
+            prompt_cache=self.supports_prompt_cache,
+            prompt_cache_ttl=self.prompt_cache_ttl,
+        )
 
-    def stream_complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
-        """流式调用 Anthropic Messages API，并在结束时返回完整 ModelResponse。
-
-        Anthropic 的文本和工具调用都以 content block 分片返回。这里实时转发
-        text_delta 给 UI，但工具参数必须累积到 message_stop 后再解析。
-        """
-        del prompt_cache_key, prompt_cache_retention
-        self.last_completion_metadata = {}
+    def _build_payload(
+        self,
+        messages,
+        max_new_tokens,
+        tools,
+        system,
+        structured_output,
+        stream,
+        cache_enabled,
+    ):
+        """构造共享的 Anthropic 请求，并在启用时标记稳定前缀和自动缓存。"""
         payload = {
             "model": self.model,
             "messages": _to_anthropic_messages(_normalize_messages(messages), supports_images=self.supports_images),
             "max_tokens": max_new_tokens,
-            "stream": True,
+            "stream": stream,
         }
-        if system:
+        if cache_enabled:
+            cache_control = _cache_control(self.prompt_cache_ttl)
+            payload["cache_control"] = cache_control
+            if system:
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": str(system),
+                        "cache_control": cache_control,
+                    }
+                ]
+        elif system:
             payload["system"] = str(system)
         if tools:
             payload["tools"] = _tool_specs_to_anthropic(tools)
+
         output_config = {}
         if self.supports_reasoning and self.capabilities.anthropic_effort:
             output_config["effort"] = self.capabilities.anthropic_effort
@@ -201,6 +248,25 @@ class AnthropicCompatibleModelClient:
             payload["output_config"] = output_config
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        return payload
+
+    def stream_complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
+        """流式调用 Anthropic Messages API，并在结束时返回完整 ModelResponse。
+
+        Anthropic 的文本和工具调用都以 content block 分片返回。这里实时转发
+        text_delta 给 UI，但工具参数必须累积到 message_stop 后再解析。
+        """
+        del prompt_cache_retention
+        self.last_completion_metadata = {}
+        payload = self._build_payload(
+            messages,
+            max_new_tokens,
+            tools,
+            system,
+            structured_output,
+            stream=True,
+            cache_enabled=self.supports_prompt_cache and bool(prompt_cache_key),
+        )
 
         headers = {
             "Content-Type": "application/json",
@@ -298,30 +364,17 @@ class AnthropicCompatibleModelClient:
         yield ModelStreamEvent.done(response, metadata=metadata)
 
     def complete(self, messages, max_new_tokens, tools=None, system=None, prompt_cache_key=None, prompt_cache_retention=None, structured_output=None):
-        del prompt_cache_key, prompt_cache_retention
+        del prompt_cache_retention
         self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "messages": _to_anthropic_messages(_normalize_messages(messages), supports_images=self.supports_images),
-            "max_tokens": max_new_tokens,
-            "stream": False,
-        }
-        if system:
-            payload["system"] = str(system)
-        if tools:
-            payload["tools"] = _tool_specs_to_anthropic(tools)
-        output_config = {}
-        if self.supports_reasoning and self.capabilities.anthropic_effort:
-            output_config["effort"] = self.capabilities.anthropic_effort
-        if structured_output:
-            output_config["format"] = {
-                "type": "json_schema",
-                "schema": dict(structured_output.get("schema") or {}),
-            }
-        if output_config:
-            payload["output_config"] = output_config
-        if self.temperature is not None:
-            payload["temperature"] = self.temperature
+        payload = self._build_payload(
+            messages,
+            max_new_tokens,
+            tools,
+            system,
+            structured_output,
+            stream=False,
+            cache_enabled=self.supports_prompt_cache and bool(prompt_cache_key),
+        )
 
         headers = {
             "Content-Type": "application/json",
