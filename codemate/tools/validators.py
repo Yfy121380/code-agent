@@ -416,14 +416,11 @@ def validate_tool(agent, name, args):
         return ToolGate("allow", "delegate_read_only")
 
     if name == "review":
-        task = args.get("task")
-        if not isinstance(task, str):
-            raise ValueError("task must be a string")
-        task = task.strip()
-        if not task:
-            raise ValueError("task must not be empty")
-        if len(task) > 20_000:
-            raise ValueError("task must contain at most 20000 characters")
-        if set(args).difference({"task"}):
-            raise ValueError("review only accepts the task argument")
-        return ToolGate("allow", "review_read_only")
+        if set(args).difference({"target"}):
+            raise ValueError("review only accepts the target argument")
+        target = args.get("target", "")
+        if not isinstance(target, str):
+            raise ValueError("target must be a string")
+        if len(target.strip()) > 20_000:
+            raise ValueError("target must contain at most 20000 characters")
+        return ToolGate("allow", "review")

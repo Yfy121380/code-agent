@@ -1,8 +1,8 @@
 """Independent code-review child runtime.
 
-The review tool starts one fresh read-only CodeMate instance. The child sees a
-review-specific system prompt and the explicit review objective, but none of
-the parent's conversation history or memory-maintenance features.
+The review tool starts one fresh CodeMate instance with a review-specific
+prompt and tool set. It inherits the parent's approval policy and temporary
+permissions, but not the parent's conversation history or memory features.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import uuid
 from ..tools.constants import SUBAGENT_MAX_STEPS
 from ..ui import NullUI
 from ..workspace import now
+from .errors import ModelRequestError
 
 
 REVIEW_ALLOWED_TOOLS = {
@@ -24,18 +25,15 @@ REVIEW_ALLOWED_TOOLS = {
     "todo_write",
     "todo_list",
 }
+REVIEW_EVIDENCE_TOOLS = {"list_files", "read_file", "grep", "run_shell"}
 
 MANUAL_REVIEW_REQUEST = textwrap.dedent(
     """\
     Review the current code changes.
 
-    Use the review tool as the only tool call. Build a concrete review task from
-    the requirements, approved plan, and implementation context already present
-    in this conversation. Include the intended behavior, important constraints,
-    deliberate interface or behavior changes, behavior explicitly required to
-    remain stable, and relevant concerns. Do not invent preservation
-    requirements merely because an old behavior exists. If the original
-    implementation intent is unavailable, say so in the review task.
+    Use the review tool as the only tool call. If the user supplied a concrete
+    review focus, pass it as the optional target. Otherwise omit the target
+    instead of inventing one.
 
     After the review tool returns, independently verify each reported finding
     against the user's requirements, deliberate design decisions, and the actual
@@ -44,7 +42,20 @@ MANUAL_REVIEW_REQUEST = textwrap.dedent(
     after this verification. Treat unsupported, intent-dependent, or
     contradicted findings as unconfirmed rather than established defects. Do
     not modify files unless the user separately asks you to address them. Use
-    the language of the surrounding conversation for the review task and answer.
+    the language of the surrounding conversation for the target and answer.
+    """
+).strip()
+
+
+REVIEW_FINALIZATION_RECOVERY_REQUEST = textwrap.dedent(
+    """\
+    The previous response was interrupted.
+
+    Do not continue investigating and do not call tools. Using only the
+    evidence already collected in this review, return the final review report
+    now. Follow the required finding format. If no actionable finding was
+    established, say so clearly and mention any remaining validation
+    uncertainty.
     """
 ).strip()
 
@@ -56,101 +67,156 @@ def manual_review_request(focus=""):
         return MANUAL_REVIEW_REQUEST
     return (
         f"{MANUAL_REVIEW_REQUEST}\n\n"
-        "User-requested review focus:\n"
+        "User-requested review target:\n"
         f"{focus}"
     )
 
 
 REVIEW_SYSTEM_PROMPT = textwrap.dedent(
     """\
-    You are an independent code reviewer working inside a local repository.
+    You are a code reviewer working inside a local repository.
 
-    Review the current code changes against the objective provided in the user
-    request. Investigate the repository thoroughly enough to understand the
-    affected subsystem, identify concrete issues, and return an actionable
-    review. Do not modify files or implement fixes.
+    Review the current code changes, investigate the affected code paths,
+    validate concrete risks when practical, and return an actionable review.
+    Do not modify project source files or implement fixes.
 
-    ## Investigation
+    The current changes are the primary review scope. If you discover a concrete
+    pre-existing issue while investigating related code, report it and mark it
+    as Pre-existing. Do not expand into unrelated repository areas merely to
+    search for additional issues.
 
-    - Begin by inspecting Git status and all staged, unstaged, and untracked changes.
-    - Use run_shell only for read-only repository inspection such as Git status,
-      diff, log, and metadata queries.
-    - Do not draw conclusions from an isolated diff hunk.
-    - Understand the relevant subsystem and behavior contract before judging the implementation.
-    - Inspect related classes, functions, callers, callees, shared abstractions,
-      state transitions, tests, configuration, documentation, and similar implementations.
-    - Determine what should change and what existing behavior must remain stable.
-    - Check whether the change belongs at the chosen ownership boundary or merely
-      works around a visible symptom.
-    - Scale investigation to the reviewed change, but do not stop at the first
-      plausible explanation or issue.
-    - Before reporting a finding, confirm that the execution path is reachable
-      and nearby code does not already handle it.
+    ## Review process
 
-    ## Progress updates
+    Follow these phases in order. Adapt the specific files, searches, and
+    validation commands to the changes being reviewed.
 
-    - Use commentary to report meaningful review progress.
-    - After substantial investigation phases, summarize the evidence, its
-      implications, and what will be checked next.
-    - Do not emit commentary before every simple read or search.
-    - Preserve important findings in commentary because old tool results may
-      later be cleared.
+    ### Phase 1: Inspect the change scope
 
-    ## Findings
+    - Inspect Git status.
+    - Inspect all relevant staged, unstaged, and untracked project changes.
+    - Ignore Codemate-generated runtime metadata such as `.codemate/` unless
+      the optional review target explicitly concerns Codemate configuration,
+      skills, or other `.codemate` contents.
+    - Determine which files, interfaces, state transitions, and behavior paths
+      are affected.
+    - If there are no changes, inspect the optional review target when it
+      identifies a concrete scope.
+    - If neither changes nor a concrete target are available, report that there
+      is nothing to review.
 
-    Report concrete, actionable issues affecting correctness, security,
-    performance, or maintainability.
+    ### Phase 2: Understand the surrounding behavior
 
-    Current changes are the primary scope. You may also report pre-existing
-    issues when they are concrete and directly related to the reviewed
-    subsystem. Mark them as `Pre-existing`.
+    - Read the complete context around changed code rather than judging isolated
+      diff hunks.
+    - Inspect relevant callers, callees, shared abstractions, tests,
+      configuration, documentation, and similar implementations.
+    - Identify existing repository conventions and behavior contracts.
+    - Determine whether the change is implemented at the correct ownership
+      boundary or merely works around a visible symptom.
 
-    Do not report unsupported speculation, subjective style preferences,
-    ordinary lint findings, vague test requests, or unrelated repository
-    problems. Prefer no finding over low-signal feedback.
+    Use repository evidence to determine:
 
-    Do not assume every previous interface or behavior must remain unchanged.
-    A compatibility finding must be grounded in the review objective, repository
-    contract, or a concrete caller that still depends on the old behavior. If a
-    concern depends on whether a change was deliberate and the objective does
-    not establish that intent, report it as uncertainty rather than a confirmed
-    actionable finding.
+    - What behavior the change appears intended to alter.
+    - What related behavior should remain stable.
+    - Which defaults, optional parameters, alternate branches, error paths,
+      compatibility paths, and state transitions may be affected.
+    - Whether the implementation handles the underlying case or only one visible
+      example.
 
-    ## Output
+    You are not given the original user request. Do not invent missing
+    requirements or assume that every previous behavior must remain unchanged.
+    When repository evidence is insufficient to determine intent, describe the
+    uncertainty instead of reporting a confirmed defect.
 
-    Return normal Markdown in the language used by the review objective. Put
-    findings first and order them by severity.
+    ### Phase 3: Investigate and validate concrete risks
 
-    For each finding, identify the file and line or function, explain the
-    concrete failure scenario and impact, and provide a concise correction
-    direction when useful.
+    Check for:
 
-    If no actionable issues are found, say so directly and briefly, then mention
-    meaningful validation gaps or remaining uncertainty.
+    - Incorrect logic or behavior.
+    - Regressions and compatibility problems.
+    - Missing boundary handling and broken error paths.
+    - Inconsistent state, lifecycle, concurrency, or persistence behavior.
+    - Security vulnerabilities.
+    - Meaningful performance regressions.
+    - Concrete maintainability problems such as duplicated behavior, broken
+      abstraction boundaries, or inconsistent use of established project
+      patterns.
+    - Risks related to the optional review target.
+
+    The optional review target is an investigation focus, not an established
+    fact, requirement, or defect. Verify it against the diff and repository
+    evidence. Do not restrict the review to the target when other concrete
+    issues are found.
+
+    Before reporting a finding:
+
+    - Confirm that the affected execution path is reachable.
+    - Check whether upstream validation, nearby code, or downstream recovery
+      already handles the case.
+    - Check whether tests, documentation, comments, or project conventions
+      identify the behavior as intentional.
+    - Establish a concrete trigger scenario and practical impact.
+    - Do not report an interpretation as a defect when the intended behavior is
+      ambiguous and repository evidence does not establish it. Continue
+      investigating when practical; if the ambiguity cannot be resolved,
+      describe it as an uncertainty rather than an actionable finding.
+
+    Run focused tests, builds, static checks, or minimal behavior reproductions
+    when they materially improve confidence. Use available tools and follow the
+    active permission policy. Do not intentionally modify project source files.
+
+    ### Phase 4: Filter and report findings
+
+    Do not report:
+
+    - Subjective style preferences.
+    - Unsupported speculation.
+    - Theoretical concerns without a concrete trigger or impact.
+    - Vague requests for additional tests without identifying missing behavior.
+    - Issues unrelated to the reviewed changes and their surrounding code.
+
+    A pre-existing issue may still be reported when it is concrete, reachable,
+    actionable, and directly related to the code path being investigated.
+
+    Return normal Markdown. Put findings first and order them by severity.
+
+    For every finding:
+
+    - Include a concise priority-bearing title.
+    - Identify the file and line or function.
+    - Explain the concrete trigger scenario.
+    - Explain the resulting behavior and impact.
+    - Give a concise correction direction when useful.
+    - Use the `Pre-existing` label when the issue was not introduced by the
+      current changes.
 
     Good finding:
 
-    ### [P1] Approval restoration can overwrite a newer policy
-    `codemate/runtime/planning.py:...`
+    ### [P1] Restoring saved state overwrites a newer policy
+    `path/to/runtime.py:120`
 
-    Resuming an approved plan restores the stale policy saved when Plan Mode
-    began. Use one authoritative source during restoration.
+    Resuming the operation restores a policy captured before the user changed
+    the current setting. The stale value therefore replaces the newer policy.
+    Restore from the current authoritative state or avoid persisting this value.
 
     Good pre-existing finding:
 
-    ### [Pre-existing][P2] Cancelled plan todos remain active
-    `codemate/tools/handlers.py:...`
+    ### [Pre-existing][P2] Cancelled operations retain active task state
+    `path/to/tasks.py:85`
 
-    This predates the current patch but directly affects the reviewed plan
-    lifecycle. Cancelling clears the plan while leaving its active todo state
-    available to later requests.
+    The cancellation path clears the operation but leaves its active task record
+    available to subsequent requests. Clear both pieces of state in the same
+    lifecycle transition.
 
-    Bad findings:
+    Do not produce findings such as:
 
     - This function is too long.
     - There may be a race condition.
     - More tests should be added.
     - The naming could be clearer.
+
+    If no actionable issues are found, say so directly. Then briefly identify
+    any meaningful validation gaps or remaining uncertainty.
     """
 ).strip()
 
@@ -158,8 +224,9 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
 class _ReviewChildUI(NullUI):
     """Forward review progress and compact tool events to the parent UI."""
 
-    def __init__(self, parent_ui):
-        self.parent_ui = parent_ui
+    def __init__(self, parent_agent):
+        self.parent_agent = parent_agent
+        self.parent_ui = parent_agent.ui
         self._started_tools = []
 
     def commentary(self, text):
@@ -191,26 +258,44 @@ class _ReviewChildUI(NullUI):
         if callable(callback):
             callback(name, args, result, metadata=metadata)
 
+    def approval_request(self, name, args, metadata=None):
+        """Bubble child approvals and persist session grants in the parent."""
+        callback = getattr(self.parent_ui, "approval_request", None)
+        if not callable(callback):
+            return {"allowed": False}
+        decision = callback(name, args, metadata=metadata)
+        if (
+            isinstance(decision, dict)
+            and decision.get("allowed")
+            and decision.get("remember")
+        ):
+            self.parent_agent.add_temporary_approval(decision["remember"])
+        return decision
+
 
 def review_system_prompt():
     """Return the stable system prompt used by every review child."""
     return REVIEW_SYSTEM_PROMPT
 
 
-def _review_request(task):
+def _review_request(target=""):
+    target = str(target or "").strip()
+    target_text = target or (
+        "No specific target was provided. Perform a general review of the current changes."
+    )
     return textwrap.dedent(
         f"""\
-        Review objective:
-        {task}
+        Optional review target:
 
-        Review the current staged, unstaged, and untracked changes against this
-        objective. Investigate the relevant surrounding code and return the
-        final review.
+        {target_text}
+
+        Review all relevant current staged, unstaged, and untracked project
+        changes. Follow the required review phases and return the final review.
         """
     ).strip()
 
 
-def _review_child_session(agent, task):
+def _review_child_session(agent, target):
     timestamp = now()
     return {
         "id": f"review-{agent.session['id']}-{uuid.uuid4().hex[:6]}",
@@ -226,15 +311,26 @@ def _review_child_session(agent, task):
         "invoked_skills": [],
         "temporary_permissions": copy.deepcopy(agent.session.get("temporary_permissions", {})),
         "review_parent_session": agent.session.get("id", ""),
-        "review_task": task,
+        "review_target": target,
     }
 
 
-def run_review(agent, task):
-    """Run one serial read-only review and return a report for the parent agent."""
+def _has_collected_review_evidence(child):
+    """Return whether a failed review already recorded investigation results."""
+    for item in child.session.get("history", []):
+        if item.get("role") != "tool" or item.get("name") not in REVIEW_EVIDENCE_TOOLS:
+            continue
+        content = str(item.get("content", "") or "").lstrip().lower()
+        if not content.startswith("status: rejected"):
+            return True
+    return False
+
+
+def run_review(agent, target=""):
+    """Run one serial review under the parent's effective approval policy."""
     from .agent import CodeMate
 
-    task = str(task or "").strip()
+    target = str(target or "").strip()
     start = getattr(agent.ui, "review_start", None)
     if callable(start):
         start()
@@ -243,6 +339,8 @@ def run_review(agent, task):
     status = "error"
     report = ""
     error = ""
+    recovery_attempted = False
+    recovery_succeeded = False
     try:
         fork_model_client = getattr(agent.model_client, "fork", None)
         model_client = fork_model_client() if callable(fork_model_client) else agent.model_client
@@ -251,8 +349,8 @@ def run_review(agent, task):
             model_client=model_client,
             workspace=agent.workspace,
             session_store=agent.session_store,
-            session=_review_child_session(agent, task),
-            approval_policy="read_only",
+            session=_review_child_session(agent, target),
+            approval_policy=agent.approval_policy,
             max_steps=SUBAGENT_MAX_STEPS,
             max_new_tokens=agent.max_new_tokens,
             depth=child_depth,
@@ -267,13 +365,24 @@ def run_review(agent, task):
                 "memory_dream": False,
                 "session_title": False,
             },
-            ui=_ReviewChildUI(agent.ui),
+            ui=_ReviewChildUI(agent),
             allowed_tools=REVIEW_ALLOWED_TOOLS,
             runtime_mode="review",
             stream=False,
             timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
         )
-        report = child.ask(_review_request(task))
+        try:
+            report = child.ask(_review_request(target))
+        except ModelRequestError:
+            if not _has_collected_review_evidence(child):
+                raise
+            recovery_attempted = True
+            # The retry is a report-only pass over the existing child history.
+            # Removing the registry enforces the no-tool recovery boundary.
+            child.allowed_tools = set()
+            child.tools = {}
+            report = child.ask(REVIEW_FINALIZATION_RECOVERY_REQUEST)
+            recovery_succeeded = True
         stop_reason = str(getattr(child.current_task_state, "stop_reason", "") or "")
         if stop_reason == "step_limit_reached":
             status = "step_limit"
@@ -295,6 +404,8 @@ def run_review(agent, task):
             "review_report_chars": len(report),
             "review_session_id": child.session.get("id", "") if child is not None else "",
             "review_run_dir": str(getattr(child, "current_run_dir", "") or "") if child is not None else "",
+            "review_recovery_attempted": recovery_attempted,
+            "review_recovery_succeeded": recovery_succeeded,
         }
         agent._last_review_metadata = metadata
         end = getattr(agent.ui, "review_end", None)

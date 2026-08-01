@@ -28,7 +28,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     fake_delegate.assert_called_once()
 
     with patch("codemate.tools.tool_review", return_value="toolkit-review") as fake_review:
-        review_result = agent.tool_review({"task": "Review the current changes."})
+        review_result = agent.tool_review({"target": "Check the current changes."})
 
     assert review_result == "toolkit-review"
     fake_review.assert_called_once()

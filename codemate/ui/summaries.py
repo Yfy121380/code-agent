@@ -148,7 +148,8 @@ def summarize_tool_call(name, args):
             lines.append("  (no tasks)")
         return "\n".join(lines)
     if name == "review":
-        return f"review\n  task: {_clip_line(args.get('task', ''), 160)}"
+        target = _clip_line(args.get("target", ""), 160)
+        return f"review\n  target: {target or '(general review)'}"
     return f"{name}\n  args: {compact_json(args)}"
 
 

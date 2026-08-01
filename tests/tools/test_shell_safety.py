@@ -13,6 +13,7 @@ import json
 from unittest.mock import patch
 
 from codemate import FakeModelClient, MiniAgent
+from codemate.tools.shell_safety import _prepare_heredocs
 from tests.helpers import build_agent, build_workspace
 
 
@@ -167,6 +168,151 @@ def test_python_inline_code_is_dangerous_without_path_glob_rejection(tmp_path):
     assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
     assert agent._last_tool_result_metadata["shell_paths"] == []
     assert agent._last_tool_result_metadata["shell_has_glob"] is False
+
+
+def test_python_quoted_heredoc_allows_multiline_code_with_python_quotes(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="full")
+    command = (
+        "python - <<'PY'\n"
+        "value = '''hello\n"
+        "'s worlds\n"
+        "'''\n"
+        "print(value.strip())\n"
+        "PY"
+    )
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "hello\n's worlds" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "dangerous"
+    assert agent._last_tool_result_metadata["shell_reasons"] == ["dangerous_command"]
+
+
+def test_quoted_heredoc_body_does_not_affect_shell_risk_analysis(tmp_path):
+    marker = tmp_path / "must-not-exist"
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    command = f"""cat <<'EOF'
+$(touch {marker}) > out.txt *.py
+EOF"""
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert f"$(touch {marker}) > out.txt *.py" in result
+    assert not marker.exists()
+    assert not (tmp_path / "out.txt").exists()
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+    assert agent._last_tool_result_metadata["shell_paths"] == []
+    assert agent._last_tool_result_metadata["shell_has_dynamic_expansion"] is False
+    assert agent._last_tool_result_metadata["shell_has_redirection"] is False
+    assert agent._last_tool_result_metadata["shell_has_glob"] is False
+
+
+def test_unquoted_heredoc_command_substitution_remains_risky(tmp_path):
+    marker = tmp_path / "must-not-exist"
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    command = f"""cat <<EOF
+$(touch {marker})
+EOF"""
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert result == "error: write operations are blocked in read-only mode"
+    assert not marker.exists()
+    assert agent._last_tool_result_metadata["shell_kind"] == "risky"
+    assert agent._last_tool_result_metadata["shell_has_dynamic_expansion"] is True
+
+
+def test_quoted_heredoc_preserves_outer_output_redirection(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+    command = """cat <<'EOF' > output.txt
+hello
+EOF"""
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert (tmp_path / "output.txt").read_text(encoding="utf-8") == "hello\n"
+    assert agent._last_tool_result_metadata["shell_kind"] == "risky"
+    assert agent._last_tool_result_metadata["shell_has_redirection"] is True
+    assert agent._last_tool_result_metadata["shell_paths"] == ["output.txt"]
+
+
+def test_multiple_quoted_heredocs_preserve_following_command_boundary(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    command = """cat <<'FIRST' <<'SECOND'
+first body
+FIRST
+second body
+SECOND
+printf 'done\\n'"""
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "second body" in result
+    assert "done" in result
+    assert agent._last_tool_result_metadata["shell_subjects"] == ["cat", "printf"]
+
+
+def test_unterminated_heredoc_is_rejected_before_execution(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="full")
+
+    result = agent.run_tool(
+        "run_shell",
+        {"command": "cat <<'EOF'\nmissing terminator", "timeout": 20},
+    )
+
+    assert "unterminated here-document: expected delimiter 'EOF'" in result
+    assert agent._last_tool_result_metadata["tool_status"] == "rejected"
+    assert agent._last_tool_result_metadata["tool_error_code"] == "invalid_arguments"
+    assert "shell_parse_error" in agent._last_tool_result_metadata["shell_reasons"]
+
+
+def test_heredoc_scanner_preserves_here_strings():
+    command = "cat <<< 'literal input'"
+
+    shell_command, expandable_body = _prepare_heredocs(command)
+
+    assert shell_command == command
+    assert expandable_body == ""
+
+
+def test_heredoc_scanner_ignores_shell_arithmetic_left_shifts():
+    commands = [
+        "echo $((1 << 2))",
+        '((value = 1 << 2)); echo "$value"',
+        "value=$((\n1 << 2\n)); echo $value",
+    ]
+
+    for command in commands:
+        shell_command, expandable_body = _prepare_heredocs(command)
+        assert shell_command == command
+        assert expandable_body == ""
+
+
+def test_heredoc_scanner_ignores_operators_inside_multiline_shell_quotes(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    command = "printf 'literal\n<<EOF\nnot a heredoc\n'"
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "<<EOF" in result
+    assert "not a heredoc" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
+
+
+def test_tab_stripping_quoted_heredoc_uses_its_indented_delimiter(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="read_only")
+    command = "cat <<-'EOF'\n\tbody\n\tEOF"
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert "exit_code: 0" in result
+    assert "body" in result
+    assert agent._last_tool_result_metadata["shell_kind"] == "read"
 
 
 def test_temporary_shell_subject_persists_and_skips_later_risk_approval(tmp_path):

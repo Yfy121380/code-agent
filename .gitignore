@@ -13,15 +13,17 @@ uv.lock
 *.egg-info/
 build/
 dist/
+node_modules/
 
 # Test and lint caches
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-vscode-extension/
 docs/case-studies/
 docs/case_records/
+.vscode/
+vscode-extension/
 
 # Temporary files
 .mini-coding-agent

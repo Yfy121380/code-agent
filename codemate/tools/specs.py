@@ -706,25 +706,24 @@ REVIEW_TOOL_SPEC = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "task": {
+            "target": {
                 "type": "string",
                 "description": (
-                    "Describe the intended behavior of the changes, important "
-                    "constraints, deliberate behavior changes, explicitly "
-                    "preserved behavior, and specific review concerns."
+                    "Optional area, behavior, risk, or subsystem to examine more "
+                    "closely during the review."
                 ),
             },
         },
-        "required": ["task"],
+        "required": [],
         "additionalProperties": False,
     },
     "risky": False,
     "description": """
 Launch an independent reviewer for the current staged, unstaged, and untracked code changes.
 
-Use the review tool after non-trivial changes or when the user requests a review. The task must explain the intended behavior, important constraints, deliberate interface or behavior changes, behavior explicitly required to remain stable, and relevant concerns. Do not assume an old behavior must be preserved without support from the user's requirements, an approved plan, or a repository contract. If the original intent is unavailable, state that in the task.
+The optional target describes an area, behavior, risk, or subsystem that deserves closer inspection. It is a focus rather than an established requirement or defect. Omit it when there is no concrete focus instead of inventing one.
 
-The reviewer examines the diff and relevant surrounding code, callers, tests, and project conventions. It does not modify files and returns an actionable Markdown review, including related pre-existing issues when relevant.
+The reviewer examines the diff and relevant surrounding code, callers, tests, and project conventions. It does not modify project source files and returns an actionable Markdown review, including related pre-existing issues when relevant.
 
 Call the review tool by itself and wait for its result. Do not repeat the review unless the changes have materially changed.
 """.strip(),

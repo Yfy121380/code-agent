@@ -123,12 +123,12 @@ def test_review_uses_dedicated_progress_status_and_hides_generic_tool_start():
     console = RecordingConsole()
     ui = TerminalUI(console=console)
 
-    ui.tool_start("review", {"task": "Review the current changes."})
+    ui.tool_start("review", {"target": "Check the current changes."})
     ui.review_start()
     ui.review_end(status="ok", metadata={"review_report_chars": 321})
     ui.tool_result(
         "review",
-        {"task": "Review the current changes."},
+        {"target": "Check the current changes."},
         "review_status: ok\nreview_report:\nNo findings.",
         {"tool_status": "ok", "review_status": "ok", "review_report_chars": 321},
     )

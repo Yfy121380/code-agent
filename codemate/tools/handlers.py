@@ -738,7 +738,7 @@ def tool_review(agent, args):
     """Route one independent code review into the dedicated child runtime."""
     from ..runtime.review import run_review
 
-    return run_review(agent, args["task"])
+    return run_review(agent, args.get("target", ""))
 
 
 _TOOL_RUNNERS = {
