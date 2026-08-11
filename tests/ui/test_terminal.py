@@ -2,7 +2,6 @@
 
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.text import Text
 
 from codemate.ui.summaries import summarize_tool_result
@@ -156,7 +155,7 @@ def test_model_usage_is_rendered_after_non_stream_final_answer():
     assert renderables[-1].plain == "    model  52.2k input · 7.7k cached · 105 output"
 
 
-def test_edit_tool_result_renders_existing_bounded_change_preview():
+def test_edit_tool_result_renders_change_counts_without_diff_body():
     console = RecordingConsole()
     ui = TerminalUI(console=console)
 
@@ -177,4 +176,6 @@ def test_edit_tool_result_renders_existing_bounded_change_preview():
 
     renderables = [item["objects"][0] for item in console.printed]
     assert any(isinstance(item, Text) and item.plain == "      Δ app.py  +1 -1" for item in renderables)
-    assert any(isinstance(item, Syntax) and "+new" in item.code for item in renderables)
+    rendered = "\n".join(str(item) for item in renderables)
+    assert "-old" not in rendered
+    assert "+new" not in rendered

@@ -362,7 +362,7 @@ class TerminalUI(NullUI):
         return f"truncated {original} → {returned} chars"
 
     def _render_change_preview(self, raw_preview):
-        """显示 runtime 已生成的有界 diff，不重新读取或比较文件。"""
+        """显示已有变更统计，不把彩色 diff 正文铺到终端。"""
         if not isinstance(raw_preview, dict):
             return
         path = str(raw_preview.get("path", "") or "").strip()
@@ -375,21 +375,6 @@ class TerminalUI(NullUI):
         heading.append(f"  +{additions}", style=SUCCESS_STYLE)
         heading.append(f" -{deletions}", style=ERROR_STYLE)
         self.console.print(heading)
-        diff = str(raw_preview.get("diff", "") or "")
-        if diff:
-            self.console.print(
-                Syntax(
-                    diff,
-                    "diff",
-                    theme="ansi_dark",
-                    background_color="default",
-                    padding=(0, 2),
-                    word_wrap=False,
-                )
-            )
-            return
-        message = str(raw_preview.get("message", "") or "No textual preview available.")
-        self.console.print(Text(f"        {message}", style=TOOL_DETAIL_STYLE))
 
     def approval_request(self, name, args, metadata=None):
         metadata = dict(metadata or {})
