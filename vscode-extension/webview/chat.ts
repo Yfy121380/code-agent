@@ -33,8 +33,20 @@ interface TurnView {
   processBody: HTMLElement;
   thinking?: HTMLElement;
   final?: HTMLElement;
+  finalArticle?: HTMLElement;
   retryButton?: HTMLButtonElement;
   changes?: HTMLElement;
+}
+
+/** 用户针对一条已完成最终回答创建的待发送批注。 */
+interface ResponseAnnotation {
+  id: string;
+  source_message_id: string;
+  source_content_hash: string;
+  selected_text: string;
+  surrounding_text: string;
+  comment: string;
+  anchor_top?: number;
 }
 
 /** 用户已选择、但尚未发送给 Agent 的编辑器上下文。 */
@@ -125,6 +137,8 @@ let lastFinalText = '';
 let runtimeMenu: HTMLElement | undefined;
 let runtimeMenuTrigger: HTMLButtonElement | undefined;
 let attachments: EditorAttachment[] = [];
+let pendingAnnotations: ResponseAnnotation[] = [];
+let annotationAction: HTMLElement | undefined;
 let attachmentMenuOpen = false;
 let attachmentPending = false;
 let compactView: CompactView | undefined;
@@ -170,6 +184,7 @@ function setPage(page: 'home' | 'chat'): void {
   chatPage.hidden = page !== 'chat';
   if (page === 'home') {
     clearRetryMode();
+    clearPendingAnnotations();
     setRunning(true);
     vscode.postMessage({ type: 'listSessions' });
   } else {
@@ -183,6 +198,7 @@ function setPage(page: 'home' | 'chat'): void {
  */
 function setRunning(value: boolean): void {
   running = value;
+  if (value) hideAnnotationAction();
   input.disabled = value;
   newTaskInput.disabled = value;
   sendButton.hidden = value;
@@ -408,7 +424,7 @@ function openRenameDialog(sessionId: string, currentTitle: string): void {
  * 为一轮对话创建稳定的 DOM 容器。
  * commentary 和工具过程放在可折叠 Process 区域中，最终回答单独渲染在其下方。
  */
-function createTurn(id: string, requestText: string): TurnView {
+function createTurn(id: string, requestText: string, rawAnnotations: unknown = []): TurnView {
   const root = document.createElement('section');
   root.className = 'turn';
   root.dataset.turnId = id;
@@ -422,8 +438,9 @@ function createTurn(id: string, requestText: string): TurnView {
   userHeader.append(label);
   const userContent = document.createElement('div');
   userContent.className = 'message-content';
-  renderMarkdown(userContent, requestText);
+  if (requestText) renderMarkdown(userContent, requestText);
   user.append(userHeader, userContent);
+  appendSentAnnotations(user, rawAnnotations);
 
   const process = document.createElement('details');
   process.className = 'turn-process';
@@ -489,7 +506,68 @@ function ensureFinal(turn: TurnView): HTMLElement {
   article.append(label, content);
   turn.root.append(article);
   turn.final = content;
+  turn.finalArticle = article;
   return content;
+}
+
+/** 将后端确认的持久化消息标识绑定到最终回答，使其可以安全创建批注。 */
+function bindFinalMessage(turn: TurnView, rawMessage: unknown): void {
+  const message = asRecord(rawMessage);
+  const messageId = String(message.id || '');
+  const contentHash = String(message.content_hash || '');
+  if (!messageId || !contentHash) return;
+  ensureFinal(turn);
+  if (!turn.finalArticle) return;
+  turn.finalArticle.dataset.messageId = messageId;
+  turn.finalArticle.dataset.contentHash = contentHash;
+  turn.finalArticle.dataset.conversationId = String(message.conversation_id || turn.id);
+  turn.finalArticle.classList.add('annotatable');
+}
+
+/** 在历史用户消息下显示已经发送的批注，但不暴露注入给模型的内部提示词。 */
+function appendSentAnnotations(user: HTMLElement, rawAnnotations: unknown): void {
+  if (!Array.isArray(rawAnnotations) || rawAnnotations.length === 0) return;
+  const container = document.createElement('details');
+  container.className = 'sent-annotations';
+  const summary = document.createElement('summary');
+  const icon = document.createElement('span');
+  icon.className = 'sent-annotations-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const count = document.createElement('span');
+  count.textContent = `${rawAnnotations.length} 条批注`;
+  summary.append(icon, count);
+  const list = document.createElement('div');
+  list.className = 'sent-annotations-list';
+  for (const [index, raw] of rawAnnotations.entries()) {
+    const annotation = asRecord(raw);
+    const card = document.createElement('section');
+    card.className = 'sent-annotation';
+    const number = document.createElement('span');
+    number.className = 'sent-annotation-number';
+    number.textContent = `${index + 1}.`;
+    const body = document.createElement('div');
+    body.className = 'sent-annotation-body';
+    const selectionLabel = document.createElement('div');
+    selectionLabel.className = 'sent-annotation-label';
+    selectionLabel.textContent = '所选文本：';
+    const selection = document.createElement('blockquote');
+    selection.textContent = String(annotation.selected_text || '');
+    selection.setAttribute('aria-label', `Selected response text ${index + 1}`);
+    body.append(selectionLabel, selection);
+    const comment = String(annotation.comment || '');
+    if (comment) {
+      const commentLabel = document.createElement('div');
+      commentLabel.className = 'sent-annotation-label';
+      commentLabel.textContent = '用户评论：';
+      const commentText = document.createElement('p');
+      commentText.textContent = comment;
+      body.append(commentLabel, commentText);
+    }
+    card.append(number, body);
+    list.append(card);
+  }
+  container.append(summary, list);
+  user.append(container);
 }
 
 /** 渲染默认折叠的工具调用，并保存引用以等待对应结果事件。 */
@@ -649,7 +727,8 @@ function renderHistory(rawHistory: unknown, rawChangeSets: unknown = state.chang
       continue;
     }
     if (role === 'user') {
-      turn = turns.get(conversationId) || createTurn(conversationId, content);
+      turn = turns.get(conversationId)
+        || createTurn(conversationId, content, item.response_annotations);
       continue;
     }
     turn = turn || turns.get(conversationId);
@@ -669,6 +748,7 @@ function renderHistory(rawHistory: unknown, rawChangeSets: unknown = state.chang
       }
     } else if (role === 'assistant' && content) {
       renderMarkdown(ensureFinal(turn), content);
+      if (kind === 'final') bindFinalMessage(turn, item);
       lastFinalText = content.trim();
     } else if (role === 'tool') {
       appendToolResult({
@@ -711,6 +791,8 @@ function appendStandaloneMessage(label: string, text: string, error = false): vo
 
 /** 打开其他会话前清空聊天 DOM 以及全部 ID 到视图的缓存。 */
 function resetTranscript(): void {
+  clearPendingAnnotations();
+  hideAnnotationAction();
   messages.replaceChildren();
   streams.clear();
   tools.clear();
@@ -743,7 +825,8 @@ function handleBackendEvent(event: BackendEvent): void {
       break;
     case 'run_started': {
       const id = String(event.request_id || `turn-${Date.now()}`);
-      activeTurn = createTurn(id, String(event.text || ''));
+      activeTurn = createTurn(id, String(event.text || ''), event.response_annotations);
+      clearPendingAnnotations();
       lastFinalText = '';
       connectionLabel.textContent = 'Working';
       setRunning(true);
@@ -917,6 +1000,11 @@ function finishRun(event: BackendEvent): void {
     lastFinalText = final;
   }
   if (activeTurn) {
+    const completedMessages = Array.isArray(event.messages) ? event.messages : [];
+    const finalMessage = completedMessages
+      .map(asRecord)
+      .find((item) => item.role === 'assistant' && item.kind === 'final');
+    if (finalMessage) bindFinalMessage(activeTurn, finalMessage);
     if (event.change_set && typeof event.change_set === 'object') {
       renderChangeSet(activeTurn, asRecord(event.change_set));
     }
@@ -938,7 +1026,8 @@ function finishRun(event: BackendEvent): void {
 function updateRetryAction(): void {
   for (const turn of turns.values()) turn.retryButton?.remove();
   const retry = asRecord(state.retry);
-  if (!retry.available || running || turns.size === 0) return;
+  // 新批注依赖当前最终回答；重试会恢复到该回答产生前，二者不能同时提交。
+  if (!retry.available || running || pendingAnnotations.length > 0 || turns.size === 0) return;
   const latest = Array.from(turns.values()).at(-1);
   if (!latest) return;
   const header = latest.root.querySelector('.message-header');
@@ -952,6 +1041,8 @@ function updateRetryAction(): void {
   button.addEventListener('click', () => {
     retryMode = true;
     input.value = String(retry.user_request || latest.requestText);
+    pendingAnnotations = normalizeAnnotations(retry.response_annotations);
+    renderPendingAnnotations();
     input.dataset.retry = 'true';
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
@@ -1190,7 +1281,9 @@ function disableButtons(container: ParentNode): void {
 
 /** 重新计算发送可用性、文本框高度和补全菜单状态。 */
 function updateComposers(): void {
-  sendButton.disabled = running || attachmentPending || input.value.trim().length === 0;
+  sendButton.disabled = running
+    || attachmentPending
+    || (input.value.trim().length === 0 && pendingAnnotations.length === 0);
   newTaskButton.disabled = running || newTaskInput.value.trim().length === 0;
   resizeTextarea(input, 180);
   resizeTextarea(newTaskInput, 220);
@@ -1206,14 +1299,15 @@ function resizeTextarea(element: HTMLTextAreaElement, maxHeight: number): void {
 /** 将当前输入作为普通请求或 checkpoint 重试请求发送。 */
 function sendMessage(): void {
   const text = input.value.trim();
-  if (!text || running) return;
+  if ((!text && pendingAnnotations.length === 0) || running) return;
   setRunning(true);
   connectionLabel.textContent = 'Starting';
-  if (text === '/compact') showCompactStart();
+  if (text === '/compact' && pendingAnnotations.length === 0) showCompactStart();
   vscode.postMessage({
     type: retryMode ? 'retryRequest' : 'sendMessage',
     text,
     attachments: attachments.map((item) => ({ ...item })),
+    responseAnnotations: pendingAnnotations.map(({ anchor_top: _anchorTop, ...item }) => item),
   });
   retryMode = false;
   delete input.dataset.retry;
@@ -1283,6 +1377,10 @@ function startNewTask(): void {
  */
 function updateCommandMenu(): void {
   const query = input.value;
+  if (pendingAnnotations.length > 0) {
+    hideCommandMenu();
+    return;
+  }
   const attachmentMatch = query.match(/(^|\s)@(selection|file|problems)?$/i);
   if (attachmentMatch) {
     const token = String(attachmentMatch[2] || '').toLowerCase();
@@ -1410,6 +1508,211 @@ function renderAttachmentChips(): void {
 function clearAttachments(): void {
   attachments = [];
   renderAttachmentChips();
+}
+
+/** 将后端或 checkpoint 中的批注转换成 Webview 可编辑的本地结构。 */
+function normalizeAnnotations(rawAnnotations: unknown): ResponseAnnotation[] {
+  if (!Array.isArray(rawAnnotations)) return [];
+  return rawAnnotations.slice(0, 10).map((raw, index) => {
+    const item = asRecord(raw);
+    return {
+      id: String(item.id || `annotation-${index + 1}`),
+      source_message_id: String(item.source_message_id || ''),
+      source_content_hash: String(item.source_content_hash || ''),
+      selected_text: String(item.selected_text || ''),
+      surrounding_text: String(item.surrounding_text || item.selected_text || ''),
+      comment: String(item.comment || ''),
+      anchor_top: Number.isFinite(Number(item.anchor_top))
+        ? Number(item.anchor_top)
+        : undefined,
+    };
+  }).filter((item) => item.source_message_id && item.source_content_hash && item.selected_text);
+}
+
+/** 重绘批注编号气泡，并同步发送与重试控件状态。 */
+function renderPendingAnnotations(): void {
+  removeAnnotationMarkers();
+  renderAnnotationMarkers();
+  updateComposers();
+  updateRetryAction();
+}
+
+/** 请求被后端接受或切换会话时清空尚未发送的批注。 */
+function clearPendingAnnotations(): void {
+  pendingAnnotations = [];
+  hideAnnotationAction();
+  removeAnnotationMarkers();
+  updateComposers();
+}
+
+/** 为每条待发送批注创建一个编号气泡，点击后可修改评论或删除。 */
+function renderAnnotationMarkers(): void {
+  for (const [index, annotation] of pendingAnnotations.entries()) {
+    const article = finalArticleByMessageId(annotation.source_message_id);
+    if (!article) continue;
+    const marker = document.createElement('button');
+    marker.type = 'button';
+    marker.className = 'annotation-marker';
+    marker.textContent = String(index + 1);
+    marker.title = `Edit annotation ${index + 1}`;
+    marker.setAttribute('aria-label', `Edit annotation ${index + 1}`);
+    marker.style.top = `${annotation.anchor_top ?? 34 + index * 32}px`;
+    marker.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openAnnotationEditor(annotation, marker.getBoundingClientRect());
+    });
+    article.append(marker);
+  }
+}
+
+/** 清除旧气泡，避免重绘或会话切换后留下重复标记。 */
+function removeAnnotationMarkers(): void {
+  for (const marker of messages.querySelectorAll('.annotation-marker')) marker.remove();
+}
+
+/** 根据持久化消息 ID 找到批注所属的最终回答节点。 */
+function finalArticleByMessageId(messageId: string): HTMLElement | undefined {
+  return Array.from(messages.querySelectorAll<HTMLElement>('.final-message.annotatable'))
+    .find((article) => article.dataset.messageId === messageId);
+}
+
+const ANNOTATION_BLOCK_SELECTOR = 'p, li, blockquote, pre, h1, h2, h3, h4, h5, h6, td, th';
+
+/** 根据当前 DOM 选区直接打开轻量评论输入框。 */
+function offerAnnotationForSelection(): void {
+  hideAnnotationAction();
+  if (running || pendingAnnotations.length >= 10) return;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  const startArticle = closestFinalArticle(range.startContainer);
+  const endArticle = closestFinalArticle(range.endContainer);
+  if (!startArticle || startArticle !== endArticle) return;
+  const messageId = String(startArticle.dataset.messageId || '');
+  const contentHash = String(startArticle.dataset.contentHash || '');
+  const content = startArticle.querySelector<HTMLElement>('.message-content');
+  const selectedText = selection.toString().trim();
+  if (!messageId || !contentHash || !content || !selectedText || selectedText.length > 2000) return;
+
+  const surroundingText = selectionContext(range, content, selectedText);
+  const articleRect = startArticle.getBoundingClientRect();
+  const selectionRect = range.getBoundingClientRect();
+  const annotation: ResponseAnnotation = {
+    id: `annotation-${Date.now()}-${pendingAnnotations.length + 1}`,
+    source_message_id: messageId,
+    source_content_hash: contentHash,
+    selected_text: selectedText,
+    surrounding_text: surroundingText,
+    comment: '',
+    anchor_top: Math.max(8, selectionRect.top - articleRect.top),
+  };
+  pendingAnnotations.push(annotation);
+  renderPendingAnnotations();
+  openAnnotationEditor(annotation, selectionRect);
+}
+
+/** 创建与选区或编号气泡相邻的评论编辑器。评论允许为空。 */
+function openAnnotationEditor(
+  annotation: ResponseAnnotation,
+  anchor: DOMRect,
+): void {
+  hideAnnotationAction();
+  const editor = document.createElement('div');
+  editor.className = 'annotation-editor';
+  const comment = document.createElement('textarea');
+  comment.rows = 1;
+  comment.maxLength = 2000;
+  comment.placeholder = '添加可选评论...';
+  comment.value = annotation.comment;
+  comment.addEventListener('input', () => { annotation.comment = comment.value; });
+  const submit = document.createElement('button');
+  submit.type = 'button';
+  submit.className = 'annotation-submit';
+  submit.textContent = '↑';
+  submit.title = 'Save annotation';
+  submit.setAttribute('aria-label', submit.title);
+  const commit = (): void => {
+    annotation.comment = comment.value.trim();
+    hideAnnotationAction();
+    renderPendingAnnotations();
+  };
+  submit.addEventListener('mousedown', (event) => event.preventDefault());
+  submit.addEventListener('click', commit);
+  comment.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      commit();
+    }
+  });
+  editor.append(comment, submit);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'annotation-remove';
+  remove.textContent = '×';
+  remove.title = 'Remove annotation';
+  remove.setAttribute('aria-label', 'Remove annotation');
+  remove.addEventListener('click', () => {
+    pendingAnnotations = pendingAnnotations.filter((item) => item.id !== annotation.id);
+    hideAnnotationAction();
+    renderPendingAnnotations();
+  });
+  editor.prepend(remove);
+  document.body.append(editor);
+  positionAnnotationEditor(editor, anchor);
+  annotationAction = editor;
+  comment.focus({ preventScroll: true });
+}
+
+/** 将评论编辑器限制在 Webview 可见区域内，并优先放在选区下方。 */
+function positionAnnotationEditor(editor: HTMLElement, anchor: DOMRect): void {
+  const bounds = editor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(anchor.left, window.innerWidth - bounds.width - 8));
+  const below = anchor.bottom + 8;
+  const top = below + bounds.height <= window.innerHeight - 8
+    ? below
+    : Math.max(8, anchor.top - bounds.height - 8);
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+}
+
+/** 返回选区节点所属、且已经由后端确认完成的最终回答。 */
+function closestFinalArticle(node: Node): HTMLElement | null {
+  const element = node instanceof Element ? node : node.parentElement;
+  return element?.closest<HTMLElement>('.final-message.annotatable') || null;
+}
+
+/**
+ * 使用渲染后的语义块生成纯文本上下文。短块完整保留，长块只保留选区附近内容，
+ * 避免把 HTML 或整篇长回答重新注入模型。
+ */
+function selectionContext(range: Range, content: HTMLElement, selectedText: string): string {
+  const blocks: HTMLElement[] = [];
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    if (range.intersectsNode(node)) {
+      const element = (node.parentElement?.closest(ANNOTATION_BLOCK_SELECTOR) as HTMLElement | null)
+        || content;
+      if (content.contains(element) && !blocks.includes(element)) blocks.push(element);
+    }
+    node = walker.nextNode();
+  }
+  const blockText = blocks.map((block) => block.innerText.trim()).filter(Boolean).join('\n\n');
+  if (!blockText || blockText.length <= 1500) return blockText || selectedText;
+  const selectedAt = blockText.indexOf(selectedText);
+  if (selectedAt < 0) {
+    return `${blockText.slice(0, 490)}\n\n${selectedText}\n\n${blockText.slice(-490)}`;
+  }
+  const before = blockText.slice(Math.max(0, selectedAt - 500), selectedAt);
+  const afterStart = selectedAt + selectedText.length;
+  const after = blockText.slice(afterStart, afterStart + 500);
+  return `${before}${selectedText}${after}`;
+}
+
+/** 移除悬浮批注按钮，避免滚动或重新选择后按钮停留在旧位置。 */
+function hideAnnotationAction(): void {
+  annotationAction?.remove();
+  annotationAction = undefined;
 }
 
 /**
@@ -1574,14 +1877,25 @@ document.addEventListener('click', (event) => {
   if (target instanceof Node && !attachmentMenu.contains(target) && target !== attachmentButton) {
     closeAttachmentMenu();
   }
+  if (target instanceof Node && !annotationAction?.contains(target)) hideAnnotationAction();
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     closeRuntimeMenu();
     closeAttachmentMenu();
+    hideAnnotationAction();
   }
 });
-window.addEventListener('resize', closeRuntimeMenu);
+window.addEventListener('resize', () => {
+  closeRuntimeMenu();
+  hideAnnotationAction();
+});
+messages.addEventListener('mouseup', (event) => {
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('.final-message .message-content')) return;
+  window.setTimeout(offerAnnotationForSelection, 0);
+});
+messages.addEventListener('scroll', hideAnnotationAction);
 newTaskInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();

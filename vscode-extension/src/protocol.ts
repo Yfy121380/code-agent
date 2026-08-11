@@ -26,6 +26,7 @@ export interface BridgeState {
   retry: {
     available: boolean;
     user_request: string;
+    response_annotations?: ResponseAnnotation[];
   };
   change_sets: unknown[];
 }
@@ -55,8 +56,21 @@ export interface DisplayHistoryItem {
   tool_calls?: Array<Record<string, unknown>>;
   tool_call_id?: string;
   metadata?: Record<string, unknown>;
+  content_hash?: string;
+  response_annotations?: ResponseAnnotation[];
   conversation_id: string;
   created_at: string;
+}
+
+/** 用户针对一条已完成最终回答创建的文本批注。 */
+export interface ResponseAnnotation {
+  id: string;
+  source_message_id: string;
+  conversation_id: string;
+  source_content_hash: string;
+  selected_text: string;
+  surrounding_text: string;
+  comment: string;
 }
 
 /** 判断任意 JSON 值是否具备 Bridge 事件要求的最小结构。 */

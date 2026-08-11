@@ -795,13 +795,19 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             projected["tool_calls"] = calls
         return projected
 
-    def save_request_checkpoint(self, user_request, editor_context=""):
+    def save_request_checkpoint(
+        self,
+        user_request,
+        editor_context="",
+        response_annotations=None,
+    ):
         """Snapshot the recoverable session state before a user turn begins."""
         with self._session_lock:
             return self.session_store.save_request_checkpoint(
                 self.session,
                 user_request,
                 editor_context,
+                response_annotations,
             )
 
     @staticmethod

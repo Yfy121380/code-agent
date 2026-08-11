@@ -24,10 +24,14 @@ def test_request_checkpoint_preserves_pre_request_state(tmp_path):
         "version": 1,
         "user_request": "new request",
         "editor_context": "",
+        "response_annotations": [],
         "transcript_size": 0,
         "session": expected,
     }
-    assert store.request_checkpoint_info("session-1") == {"user_request": "new request"}
+    assert store.request_checkpoint_info("session-1") == {
+        "user_request": "new request",
+        "response_annotations": [],
+    }
 
 
 def test_missing_request_checkpoint_is_not_retryable(tmp_path):

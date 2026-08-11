@@ -87,7 +87,13 @@ class SessionStore:
             )
             return recovered
 
-    def save_request_checkpoint(self, session, user_request, editor_context=""):
+    def save_request_checkpoint(
+        self,
+        session,
+        user_request,
+        editor_context="",
+        response_annotations=None,
+    ):
         """Persist the state immediately before one user request starts.
 
         The checkpoint lives beside ``session.json`` instead of inside it so a
@@ -101,6 +107,7 @@ class SessionStore:
             "version": 1,
             "user_request": str(user_request or ""),
             "editor_context": str(editor_context or ""),
+            "response_annotations": copy.deepcopy(response_annotations or []),
             "transcript_size": self.transcript_size(session_id),
             "session": copy.deepcopy(session),
         }
@@ -140,7 +147,12 @@ class SessionStore:
         payload = self.load_request_checkpoint(session_id)
         if payload is None:
             return None
-        return {"user_request": str(payload.get("user_request") or "")}
+        return {
+            "user_request": str(payload.get("user_request") or ""),
+            "response_annotations": copy.deepcopy(
+                payload.get("response_annotations") or []
+            ),
+        }
 
     def clear_request_checkpoint(self, session_id):
         """Remove retry state when the conversation is explicitly reset."""

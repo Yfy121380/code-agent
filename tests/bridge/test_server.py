@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from codemate.bridge.protocol import InteractionBroker, JsonLineWriter
+from codemate.bridge.annotations import response_content_hash
 from codemate.bridge.server import BridgeServer, RequestContext
 from codemate.bridge.ui import JsonUI
 
@@ -17,18 +18,30 @@ class DummySessionStore:
     def list_sessions(self):
         return []
 
-    def save_request_checkpoint(self, session, user_request, editor_context=""):
+    def save_request_checkpoint(
+        self,
+        session,
+        user_request,
+        editor_context="",
+        response_annotations=None,
+    ):
         self.checkpoint = {
             "session": dict(session),
             "user_request": user_request,
             "editor_context": editor_context,
+            "response_annotations": list(response_annotations or []),
             "transcript_size": len(self.transcript),
         }
 
     def request_checkpoint_info(self, session_id):
         if self.checkpoint is None:
             return None
-        return {"user_request": self.checkpoint["user_request"]}
+        return {
+            "user_request": self.checkpoint["user_request"],
+            "response_annotations": list(
+                self.checkpoint.get("response_annotations") or []
+            ),
+        }
 
     def load_request_checkpoint(self, session_id):
         return self.checkpoint
@@ -59,7 +72,14 @@ class DummyAgent:
         self.approval_policy = "ask"
         self.last_editor_context = ""
 
-    def ask(self, text, *, source_user_request=None, editor_context=""):
+    def ask(
+        self,
+        text,
+        *,
+        source_user_request=None,
+        editor_context="",
+        response_annotations=None,
+    ):
         assert text == "inspect project"
         assert source_user_request is None
         self.last_editor_context = editor_context
@@ -67,11 +87,17 @@ class DummyAgent:
         self.ui.final_answer("Done")
         return "Done"
 
-    def save_request_checkpoint(self, user_request, editor_context=""):
+    def save_request_checkpoint(
+        self,
+        user_request,
+        editor_context="",
+        response_annotations=None,
+    ):
         self.session_store.save_request_checkpoint(
             self.session,
             user_request,
             editor_context,
+            response_annotations,
         )
 
     def latest_change_set(self):
@@ -378,5 +404,6 @@ def test_display_history_preserves_long_transcript_after_model_history_is_compac
             "content": long_content,
             "created_at": "",
             "conversation_id": "turn-old",
+            "content_hash": response_content_hash(long_content),
         }
     ]

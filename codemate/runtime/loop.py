@@ -274,7 +274,14 @@ class RuntimeLoopMixin:
             },
         )
 
-    def ask(self, user_message, *, source_user_request=None, editor_context=""):
+    def ask(
+        self,
+        user_message,
+        *,
+        source_user_request=None,
+        editor_context="",
+        response_annotations=None,
+    ):
         """Run one turn while retaining its external user request separately."""
         run_started_at = time.monotonic()
         try:
@@ -283,6 +290,7 @@ class RuntimeLoopMixin:
                 run_started_at,
                 source_user_request=source_user_request,
                 editor_context=editor_context,
+                response_annotations=response_annotations,
             )
         except KeyboardInterrupt as exc:
             self._finish_failed_run(
@@ -334,6 +342,7 @@ class RuntimeLoopMixin:
         *,
         source_user_request=None,
         editor_context="",
+        response_annotations=None,
     ):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
@@ -385,7 +394,15 @@ class RuntimeLoopMixin:
         # Keep the actual request as the final user message. Besides matching
         # model semantics, compaction can then pin the correct message rather
         # than the preceding editor evidence block.
-        self.record({"role": "user", "content": user_message, "created_at": now()})
+        user_record = {"role": "user", "content": user_message, "created_at": now()}
+        if response_annotations:
+            # Model history keeps the complete annotated request; the durable UI
+            # transcript separately retains the clean composer text and cards.
+            user_record["display_content"] = str(source_user_request or "")
+            user_record["response_annotations"] = [
+                dict(item) for item in response_annotations
+            ]
+        self.record(user_record)
         self.retrieve_long_term_memory_for_request(user_message, task_state)
 
         tool_steps = 0
@@ -408,7 +425,14 @@ class RuntimeLoopMixin:
                 if compact_result.get("status") == "error":
                     final = f"History compaction failed: {compact_result.get('reason', 'unknown error')}"
                     task_state.stop_retry_limit(final)
-                    self.record({"role": "assistant", "content": final, "created_at": now()})
+                    self.record(
+                        {
+                            "role": "assistant",
+                            "kind": "final",
+                            "content": final,
+                            "created_at": now(),
+                        }
+                    )
                     self.run_store.write_task_state(task_state)
                     self.ui.final_answer(final)
                     self._emit_run_finished(task_state, final, run_started_at)
@@ -611,7 +635,14 @@ class RuntimeLoopMixin:
         else:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
-        self.record({"role": "assistant", "content": final, "created_at": now()})
+        self.record(
+            {
+                "role": "assistant",
+                "kind": "final",
+                "content": final,
+                "created_at": now(),
+            }
+        )
         self.run_store.write_task_state(task_state)
         self.ui.final_answer(final)
         self._emit_run_finished(task_state, final, run_started_at)

@@ -18,6 +18,11 @@ from ..cli import (
 from ..models.capabilities import PROVIDER_MODELS, models_for_provider
 from ..runtime import CodeMate
 from ..runtime.review import manual_review_request
+from .annotations import (
+    render_annotated_request,
+    response_content_hash,
+    validate_response_annotations,
+)
 from .protocol import InteractionBroker, JsonLineWriter, ProtocolError, parse_message
 from .ui import JsonUI
 
@@ -247,31 +252,49 @@ class BridgeServer:
         save_checkpoint=True,
     ):
         text = str(message.get("text") or "").strip()
-        if not text:
-            raise ValueError("ask.text must be non-empty")
+        transcript = self.agent.session_store.load_transcript(
+            str(self.agent.session.get("id") or "")
+        )
+        response_annotations = validate_response_annotations(
+            message.get("response_annotations"),
+            transcript,
+        )
+        if not text and not response_annotations:
+            raise ValueError("ask requires text or at least one response annotation")
+        model_request = render_annotated_request(text, response_annotations)
         editor_context = _render_editor_context(message.get("attachments"))
         if not editor_context and message.get("editor_context"):
             editor_context = str(message.get("editor_context") or "")
         if save_checkpoint:
-            self.agent.save_request_checkpoint(text, editor_context)
+            self.agent.save_request_checkpoint(
+                text,
+                editor_context,
+                response_annotations,
+            )
         self.writer.emit(
             "run_started",
             request_id=request_id,
             text=text,
+            response_annotations=response_annotations,
             state=self._state(),
         )
         final = self.agent.ask(
-            text,
-            source_user_request=source_user_request,
+            model_request,
+            source_user_request=(text if response_annotations else source_user_request),
             editor_context=editor_context,
+            response_annotations=response_annotations,
         )
         change_set = self.agent.latest_change_set()
+        conversation_id = str(
+            getattr(self.agent, "_current_conversation_id", "") or ""
+        )
         self.writer.emit(
             "run_finished",
             request_id=request_id,
             status="completed",
             final=str(final or ""),
             change_set=change_set,
+            messages=self._display_conversation(conversation_id),
             state=self._state(),
         )
 
@@ -415,12 +438,17 @@ class BridgeServer:
     def _retry(self, request_id, message):
         """Restore the latest pre-request snapshot, then run edited input."""
         text = str(message.get("text") or "").strip()
-        if not text:
-            raise ValueError("retry.text must be non-empty")
         session_id = str(self.agent.session.get("id") or "")
         payload = self.agent.session_store.load_request_checkpoint(session_id)
         if payload is None:
             raise ValueError("no request checkpoint is available for this session")
+        response_annotations = (
+            message.get("response_annotations")
+            if "response_annotations" in message
+            else payload.get("response_annotations") or []
+        )
+        if not text and not response_annotations:
+            raise ValueError("retry requires text or at least one response annotation")
         snapshot = copy.deepcopy(payload["session"])
         self.agent.session_store.truncate_transcript(
             session_id,
@@ -433,7 +461,11 @@ class BridgeServer:
             history=self._display_history(),
             state=self._state(),
         )
-        retry_message = {"text": text, "attachments": message.get("attachments")}
+        retry_message = {
+            "text": text,
+            "attachments": message.get("attachments"),
+            "response_annotations": response_annotations,
+        }
         if "attachments" not in message:
             retry_message["editor_context"] = str(
                 payload.get("editor_context") or ""
@@ -534,6 +566,9 @@ class BridgeServer:
             "retry": {
                 "available": checkpoint is not None,
                 "user_request": str((checkpoint or {}).get("user_request") or ""),
+                "response_annotations": copy.deepcopy(
+                    (checkpoint or {}).get("response_annotations") or []
+                ),
             },
             "change_sets": self.agent.list_change_sets(),
         }
@@ -571,10 +606,22 @@ class BridgeServer:
                 "id": str(item.get("id") or ""),
                 "role": role,
                 "kind": kind,
-                "content": str(item.get("content") or ""),
+                "content": str(
+                    item.get("display_content")
+                    if "display_content" in item
+                    else item.get("content") or ""
+                ),
                 "created_at": str(item.get("created_at") or ""),
                 "conversation_id": str(item.get("conversation_id") or ""),
             }
+            if role == "assistant" and kind == "final":
+                projected["content_hash"] = response_content_hash(
+                    item.get("content")
+                )
+            if isinstance(item.get("response_annotations"), list):
+                projected["response_annotations"] = copy.deepcopy(
+                    item["response_annotations"]
+                )
             if item.get("name"):
                 projected["name"] = str(item["name"])
             if item.get("tool_calls"):
@@ -587,6 +634,17 @@ class BridgeServer:
                 projected["metadata"] = dict(item["ui_metadata"])
             display.append(projected)
         return display
+
+    def _display_conversation(self, conversation_id):
+        """Return canonical transcript messages for one completed UI turn."""
+        target = str(conversation_id or "")
+        if not target:
+            return []
+        return [
+            item
+            for item in self._display_history()
+            if str(item.get("conversation_id") or "") == target
+        ]
 
 
 def build_bridge_parser():

@@ -99,7 +99,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               });
             }
           } else if (message.type === 'sendMessage' && typeof message.text === 'string') {
-            await this.backend.sendInput(message.text, this.attachments(message));
+            await this.backend.sendInput(
+              message.text,
+              this.attachments(message),
+              this.responseAnnotations(message),
+            );
           } else if (message.type === 'newTask' && typeof message.text === 'string') {
             await this.backend.startSession(message.text, this.attachments(message));
           } else if (message.type === 'retryRequest' && typeof message.text === 'string') {
@@ -107,6 +111,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.backend.retryLastRequest(
               message.text,
               attachments.length > 0 ? attachments : undefined,
+              this.responseAnnotations(message),
             );
           } else if (message.type === 'listSessions') {
             await this.backend.sendCommand('session_list');
@@ -175,6 +180,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 读取并规范化 Webview 请求中可选的附件数组。 */
   private attachments(message: Record<string, unknown>): unknown[] {
     return Array.isArray(message.attachments) ? message.attachments : [];
+  }
+
+  /** 读取 Webview 已根据最终回答选区构造的待发送批注。 */
+  private responseAnnotations(message: Record<string, unknown>): unknown[] {
+    return Array.isArray(message.responseAnnotations)
+      ? message.responseAnnotations
+      : [];
   }
 
   /**

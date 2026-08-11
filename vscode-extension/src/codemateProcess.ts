@@ -217,9 +217,17 @@ export class CodeMateProcess implements vscode.Disposable {
   }
 
   /** 将普通文本发送给 ask，或在本地把斜杠命令转换为结构化命令。 */
-  async sendInput(text: string, attachments: unknown[] = []): Promise<string> {
+  async sendInput(
+    text: string,
+    attachments: unknown[] = [],
+    responseAnnotations: unknown[] = [],
+  ): Promise<string> {
     const requestId = await this.beginRequest();
-    const command = parseSlashCommand(text);
+    // 带批注的输入始终是 Agent 请求，避免把 `/compact` 等文字误解释为命令后
+    // 丢掉批注上下文。
+    const command = responseAnnotations.length === 0
+      ? parseSlashCommand(text)
+      : undefined;
     if (command) {
       if (command.name === 'help') {
         this.activeRequestId = '';
@@ -233,7 +241,13 @@ export class CodeMateProcess implements vscode.Disposable {
         this.sendRaw({ id: requestId, type: 'command', ...command });
       }
     } else {
-      this.sendRaw({ id: requestId, type: 'ask', text, attachments });
+      this.sendRaw({
+        id: requestId,
+        type: 'ask',
+        text,
+        attachments,
+        response_annotations: responseAnnotations,
+      });
     }
     return requestId;
   }
@@ -246,10 +260,15 @@ export class CodeMateProcess implements vscode.Disposable {
   }
 
   /** 恢复最近请求前的 checkpoint，并执行替换后的请求文本。 */
-  async retryLastRequest(text: string, attachments?: unknown[]): Promise<string> {
+  async retryLastRequest(
+    text: string,
+    attachments?: unknown[],
+    responseAnnotations?: unknown[],
+  ): Promise<string> {
     const requestId = await this.beginRequest();
     const message: Record<string, unknown> = { id: requestId, type: 'retry', text };
     if (attachments) message.attachments = attachments;
+    if (responseAnnotations) message.response_annotations = responseAnnotations;
     this.sendRaw(message);
     return requestId;
   }

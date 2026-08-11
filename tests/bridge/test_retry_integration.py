@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from codemate import ModelResponse
+from codemate.bridge.annotations import response_content_hash
 from codemate.bridge.protocol import InteractionBroker, JsonLineWriter
 from codemate.bridge.server import BridgeServer, RequestContext
 from codemate.bridge.ui import JsonUI
@@ -85,3 +86,59 @@ def test_new_task_and_retry_replace_only_the_latest_turn(tmp_path):
         "run_finished",
     ]
     assert retry_events[0]["history"] == []
+
+
+def test_annotation_only_request_keeps_model_prompt_out_of_display_history(tmp_path):
+    server, stream = build_real_server(tmp_path)
+    server._dispatch({"id": "first", "type": "ask", "text": "first request"})
+    source = next(
+        item
+        for item in server.agent.session_store.load_transcript(
+            server.agent.session["id"]
+        )
+        if item.get("role") == "assistant" and item.get("kind") == "final"
+    )
+    annotation = {
+        "id": "annotation-1",
+        "source_message_id": source["id"],
+        "source_content_hash": response_content_hash(source["content"]),
+        "selected_text": "first result",
+        "surrounding_text": "first result",
+        "comment": "Explain this result.",
+    }
+
+    server._dispatch(
+        {
+            "id": "annotated",
+            "type": "ask",
+            "text": "",
+            "response_annotations": [annotation],
+        }
+    )
+
+    model_user_message = server.agent.session["history"][-2]
+    assert "Annotation 1:" in model_user_message["content"]
+    assert model_user_message["display_content"] == ""
+    assert model_user_message["response_annotations"][0]["comment"] == (
+        "Explain this result."
+    )
+    displayed_user = [
+        item
+        for item in server._display_history()
+        if item.get("conversation_id") == model_user_message["conversation_id"]
+        and item.get("role") == "user"
+    ][0]
+    assert displayed_user["content"] == ""
+    assert displayed_user["response_annotations"][0]["selected_text"] == (
+        "first result"
+    )
+    finished = [
+        event
+        for event in emitted(stream)
+        if event.get("request_id") == "annotated"
+        and event.get("type") == "run_finished"
+    ][0]
+    assert any(
+        item.get("kind") == "final" and item.get("content_hash")
+        for item in finished["messages"]
+    )
