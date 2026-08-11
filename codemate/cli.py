@@ -311,8 +311,22 @@ def run_cli(args, ui, agent_holder):
 
     def print_status():
         agent = current_agent()
-        host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
-        print(build_welcome(agent, model=f"{current_provider}:{current_model}", host=host))
+        host = getattr(
+            agent.model_client,
+            "host",
+            getattr(
+                agent.model_client,
+                "base_url",
+                getattr(args, "host", DEFAULT_OLLAMA_HOST),
+            ),
+        )
+        ui.welcome(
+            build_welcome(
+                agent,
+                model=f"{current_provider}:{current_model}",
+                host=host,
+            )
+        )
 
     def load_session(session_id):
         # 会话切换只替换 session 相关状态；模型 provider/model、审批策略和 UI 沿用当前进程设置。

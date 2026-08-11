@@ -14,24 +14,41 @@ from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.panel import Panel
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
 from .markdown_stream import COMMENTARY_STYLE, MarkdownStreamRenderer
-from .summaries import COMPACT_RESULT_TOOLS, summarize_read_tool_result, summarize_tool_call, summarize_tool_result
+from .summaries import (
+    COMPACT_RESULT_TOOLS,
+    summarize_approval_call,
+    summarize_model_usage,
+    summarize_read_tool_result,
+    summarize_tool_call,
+    summarize_tool_result,
+)
 
 
-TOOL_CALL_STYLE = "#b0b0b0"
-TOOL_RESULT_STYLE = "#b0b0b0"
-TOOL_DETAIL_STYLE = "#999999"
-TOOL_ERROR_STYLE = "#d6a85f"
-ASSISTANT_MARKER_STYLE = "#e5e7eb"
-ASSISTANT_MARKER_TEXT = "◆ Codemate"
+PRIMARY_STYLE = "#e6e8eb"
+MUTED_STYLE = "#9298a1"
+FAINT_STYLE = "#646b74"
+BORDER_STYLE = "#34383d"
+SUCCESS_STYLE = "#75c995"
+WARNING_STYLE = "#d9b36c"
+ERROR_STYLE = "#e58181"
+TOOL_CALL_STYLE = "#a7adb5"
+TOOL_RESULT_STYLE = "#9298a1"
+TOOL_DETAIL_STYLE = "#737a83"
+TOOL_ERROR_STYLE = ERROR_STYLE
+ASSISTANT_MARKER_STYLE = f"bold {PRIMARY_STYLE}"
+ASSISTANT_MARKER_TEXT = "● CodeMate"
 
 
 class NullUI:
     """无输出 UI，用于测试、benchmark 或不需要交互展示的调用场景。"""
+
+    def welcome(self, renderable):
+        pass
 
     def model_start(self):
         pass
@@ -93,6 +110,13 @@ class TerminalUI(NullUI):
         self._stream_phase = ""
         self._stream_marker_printed = False
         self._stream_renderer = MarkdownStreamRenderer(self.console)
+        self._model_status = None
+        self._streamed_response = False
+        self._pending_model_usage = ""
+
+    def welcome(self, renderable):
+        """输出启动或运行配置切换后的状态区。"""
+        self.console.print(renderable)
 
     def approval_menu(self, choices):
         # 审批菜单使用 prompt_toolkit 接管按键：
@@ -157,7 +181,7 @@ class TerminalUI(NullUI):
             style=Style.from_dict(
                 {
                     "hint": "fg:#64748b",
-                    "selected": "fg:#e5e7eb bg:#334155",
+                    "selected": "fg:#f0f2f4 bg:#303236 bold",
                 }
             ),
             full_screen=False,
@@ -166,17 +190,52 @@ class TerminalUI(NullUI):
         return app.run()
 
     def model_start(self):
-        pass
+        self._stop_model_status()
+        self._pending_model_usage = ""
+        self._streamed_response = False
+        status_factory = getattr(self.console, "status", None)
+        if not callable(status_factory):
+            return
+        self._model_status = status_factory(
+            "[italic #9298a1]Thinking...[/]",
+            spinner="dots",
+            spinner_style=FAINT_STYLE,
+        )
+        self._model_status.start()
 
     def model_end(self, kind="", metadata=None):
-        pass
+        self._stop_model_status()
+        if kind == "error":
+            self._pending_model_usage = ""
+            self._streamed_response = False
+            return
+        self._pending_model_usage = summarize_model_usage(metadata)
+        if self._streamed_response:
+            self._flush_model_usage()
+        self._streamed_response = False
 
     def stream_start(self, phase=""):
         # 流式文本是正式输出，但 Markdown 需要分块渲染：
         # renderer 会先缓冲未完成语法块，history/trace 仍保存完整原文。
         self._stream_phase = str(phase or "")
         self._stream_marker_printed = False
+        self._streamed_response = True
+        self._stop_model_status()
         self._stream_renderer.reset()
+
+    def _stop_model_status(self):
+        if self._model_status is None:
+            return
+        self._model_status.stop()
+        self._model_status = None
+
+    def _flush_model_usage(self):
+        if not self._pending_model_usage:
+            return
+        line = Text("    model  ", style=FAINT_STYLE)
+        line.append(self._pending_model_usage, style=TOOL_DETAIL_STYLE)
+        self.console.print(line)
+        self._pending_model_usage = ""
 
     def _print_assistant_marker(self):
         # Commentary 和 final 使用同一标识，避免依赖 provider-specific phase。
@@ -205,38 +264,44 @@ class TerminalUI(NullUI):
 
     def compact_start(self, reason=""):
         suffix = f" ({reason})" if reason else ""
-        self.console.print(f"[dim]Compacting history{suffix}...[/dim]")
+        self.console.print(Text(f"  ├─ compact  running{suffix}", style=MUTED_STYLE))
 
     def compact_end(self, status="", metadata=None):
         metadata = dict(metadata or {})
         if status == "ok":
-            self.console.print(
-                "[green]  -> history compacted: "
-                f"{metadata.get('history_before_messages', 0)} -> {metadata.get('history_after_messages', 0)} messages, "
-                f"summary {metadata.get('summary_chars', 0)} chars[/green]"
+            text = (
+                f"  └─ compact  {metadata.get('history_before_messages', 0)} → "
+                f"{metadata.get('history_after_messages', 0)} messages · "
+                f"{metadata.get('summary_chars', 0)} summary chars"
             )
+            self.console.print(Text(text, style=SUCCESS_STYLE))
         elif status == "error":
-            self.console.print(f"[yellow]  -> history compact failed: {metadata.get('reason', 'unknown error')}[/yellow]")
+            message = f"  └─ compact failed  {metadata.get('reason', 'unknown error')}"
+            self.console.print(Text(message, style=ERROR_STYLE))
 
     def review_start(self):
-        self.console.print("[dim]Reviewing current changes...[/dim]")
+        self.console.print(Text("  ├─ review  inspecting current changes", style=MUTED_STYLE))
+        self._flush_model_usage()
 
     def review_end(self, status="", metadata=None):
         metadata = dict(metadata or {})
         if status == "ok":
-            self.console.print(
-                f"[dim]  -> review complete, {metadata.get('review_report_chars', 0)} chars[/dim]"
+            message = (
+                f"  └─ review complete  "
+                f"{metadata.get('review_report_chars', 0)} chars"
             )
+            self.console.print(Text(message, style=SUCCESS_STYLE))
         elif status == "step_limit":
-            self.console.print("[yellow]  -> review stopped after reaching the step limit[/yellow]")
+            self.console.print(Text("  └─ review stopped  step limit reached", style=WARNING_STYLE))
         else:
-            self.console.print("[yellow]  -> review failed[/yellow]")
+            self.console.print(Text("  └─ review failed", style=ERROR_STYLE))
 
     def commentary(self, text):
         text = str(text or "").strip()
         if text:
             self._print_assistant_marker()
             self.console.print(Markdown(text, style=COMMENTARY_STYLE))
+            self._flush_model_usage()
 
     def tool_start(self, name, args, risk_level=""):
         if name in {"submit_plan", "review"}:
@@ -245,12 +310,15 @@ class TerminalUI(NullUI):
             return
         summary = summarize_tool_call(name, args)
         lines = summary.splitlines() or [name]
-        title = f"◇ {lines[0]}"
+        title = Text("  ├─ ", style=FAINT_STYLE)
+        title.append(lines[0], style=TOOL_CALL_STYLE)
         if risk_level and risk_level != "low":
-            title += f"  [{risk_level}]"
-        self.console.print(Text(title, style=TOOL_CALL_STYLE))
+            risk_style = WARNING_STYLE if risk_level == "high" else TOOL_DETAIL_STYLE
+            title.append(f"  {risk_level}", style=risk_style)
+        self.console.print(title)
         for line in lines[1:]:
-            self.console.print(Text(f"    {line}", style=TOOL_DETAIL_STYLE))
+            self.console.print(Text(f"  │  {line.strip()}", style=TOOL_DETAIL_STYLE))
+        self._flush_model_usage()
 
     def tool_result(self, name, args, result, metadata=None):
         del args
@@ -262,28 +330,79 @@ class TerminalUI(NullUI):
             return
         if name in COMPACT_RESULT_TOOLS and status == "ok":
             summary = summarize_read_tool_result(name, result, metadata)
-            self.console.print(Text(f"  ↳ {summary}", style=TOOL_RESULT_STYLE))
+            truncation = self._truncation_note(metadata)
+            if truncation:
+                summary += f" · {truncation}"
+            self.console.print(Text(f"  └─ {summary}", style=TOOL_RESULT_STYLE))
             return
         summary = summarize_tool_result(name, result, metadata)
         lines = summary.splitlines()
         if lines and lines[0].startswith("status:"):
             lines = lines[1:]
+        truncation = self._truncation_note(metadata)
+        if truncation and not any("truncated:" in line for line in lines):
+            lines.append(truncation)
         style = TOOL_RESULT_STYLE if status == "ok" else TOOL_ERROR_STYLE
-        self.console.print(Text(f"  ↳ {status} · {name}", style=style))
+        status_style = SUCCESS_STYLE if status == "ok" else style
+        result_line = Text("  └─ ", style=FAINT_STYLE)
+        result_line.append(str(status), style=f"bold {status_style}")
+        result_line.append(f"  {name}", style=TOOL_RESULT_STYLE)
+        self.console.print(result_line)
         for line in lines:
             detail_style = TOOL_DETAIL_STYLE if status == "ok" else style
-            self.console.print(Text(f"    {line}", style=detail_style))
+            self.console.print(Text(f"      {line}", style=detail_style))
+        self._render_change_preview(metadata.get("change_preview"))
+
+    @staticmethod
+    def _truncation_note(metadata):
+        if not metadata.get("tool_result_truncated"):
+            return ""
+        original = int(metadata.get("tool_result_original_chars", 0) or 0)
+        returned = int(metadata.get("tool_result_returned_chars", 0) or 0)
+        return f"truncated {original} → {returned} chars"
+
+    def _render_change_preview(self, raw_preview):
+        """显示 runtime 已生成的有界 diff，不重新读取或比较文件。"""
+        if not isinstance(raw_preview, dict):
+            return
+        path = str(raw_preview.get("path", "") or "").strip()
+        if not path:
+            return
+        additions = int(raw_preview.get("additions", 0) or 0)
+        deletions = int(raw_preview.get("deletions", 0) or 0)
+        heading = Text("      Δ ", style=FAINT_STYLE)
+        heading.append(path, style=PRIMARY_STYLE)
+        heading.append(f"  +{additions}", style=SUCCESS_STYLE)
+        heading.append(f" -{deletions}", style=ERROR_STYLE)
+        self.console.print(heading)
+        diff = str(raw_preview.get("diff", "") or "")
+        if diff:
+            self.console.print(
+                Syntax(
+                    diff,
+                    "diff",
+                    theme="ansi_dark",
+                    background_color="default",
+                    padding=(0, 2),
+                    word_wrap=False,
+                )
+            )
+            return
+        message = str(raw_preview.get("message", "") or "No textual preview available.")
+        self.console.print(Text(f"        {message}", style=TOOL_DETAIL_STYLE))
 
     def approval_request(self, name, args, metadata=None):
         metadata = dict(metadata or {})
         risk = metadata.get("risk_level", "")
-        title = f"approve: {name}"
+        title = Text("APPROVAL", style=f"bold {WARNING_STYLE}")
+        title.append(f"  {name}", style=PRIMARY_STYLE)
         if risk:
-            title += f" ({risk})"
-        summary = summarize_tool_call(name, args)
+            title.append(f"  ·  {risk}", style=WARNING_STYLE)
+        summary = summarize_approval_call(name, args)
         if metadata.get("outside_workspace"):
             summary += "\n\nWarning: target path is outside the current workspace."
-        self.console.print(Panel(Syntax(summary, "text", word_wrap=True), title=title, border_style="yellow"))
+        self.console.print(Rule(title, style=BORDER_STYLE))
+        self.console.print(Syntax(summary, "text", word_wrap=True, background_color="default", padding=(0, 1)))
         access = str(metadata.get("approval_access", "") or "").strip()
         allow_dir = str(metadata.get("suggested_allow_dir", "") or "").strip()
         shell_subject = str(metadata.get("suggested_shell_subject", "") or "").strip()
@@ -332,7 +451,11 @@ class TerminalUI(NullUI):
             for question in questions:
                 header = str(question.get("header", "")).strip()
                 prompt = str(question.get("question", "")).strip()
-                self.console.print(Panel(Markdown(prompt), title=header, border_style="cyan"))
+                title = Text("QUESTION", style=f"bold {PRIMARY_STYLE}")
+                if header:
+                    title.append(f"  {header}", style=MUTED_STYLE)
+                self.console.print(Rule(title, style=BORDER_STYLE))
+                self.console.print(Markdown(prompt))
 
                 choices = []
                 for option in question.get("options", []):
@@ -366,7 +489,12 @@ class TerminalUI(NullUI):
 
     def plan_review(self, title, plan):
         """Render a submitted plan and return the user's approval decision."""
-        self.console.print(Panel(Markdown(plan), title=f"Plan: {title}", border_style="cyan"))
+        heading = Text("PLAN", style=f"bold {PRIMARY_STYLE}")
+        heading.append(f"  {title}", style=MUTED_STYLE)
+        self.console.print(Rule(heading, style=BORDER_STYLE))
+        self.console.print(Markdown(plan))
+        self.console.print(Rule(style=BORDER_STYLE))
+        self._flush_model_usage()
         choices = [
             ("Approve and implement", {"decision": "approved"}),
             ("Revise plan", {"decision": "revision_requested"}),
@@ -396,3 +524,4 @@ class TerminalUI(NullUI):
             return
         self._print_assistant_marker()
         self.console.print(Markdown(text))
+        self._flush_model_usage()

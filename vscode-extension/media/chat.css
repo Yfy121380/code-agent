@@ -1,17 +1,49 @@
 /*
  * CodeMate Webview 样式。
  *
- * 页面使用 VS Code 主题变量而不是固定颜色，从而适配浅色、深色和高对比度主题。
- * 布局规则按照 webview/chat.ts 中相同的 UI 职责分组。
+ * 页面采用面向黑色 VS Code 工作台的固定深色层级，并复用编辑器字体变量。
+ * 布局规则按照 webview/chat.ts 中相同的 UI 职责分组，避免视觉调整影响交互绑定。
  */
 
 /* 全局尺寸、继承字体和可复用的原生控件默认样式。 */
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
+  --cm-canvas: #101112;
+  --cm-surface-1: #161719;
+  --cm-surface-2: #1c1e21;
+  --cm-surface-3: #24272a;
+  --cm-border: #2a2d31;
+  --cm-border-strong: #3a3e43;
+  --cm-text: #e6e8eb;
+  --cm-muted: #9298a1;
+  --cm-faint: #646b74;
+  --cm-action: #d9dcdf;
+  --cm-action-text: #151617;
+  --cm-accent: #8eb8f8;
+  --cm-success: #75c995;
+  --cm-danger: #e58181;
+  --cm-warning: #d9b36c;
+  --cm-shadow: rgb(0 0 0 / 42%);
 }
 
 * {
   box-sizing: border-box;
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--cm-border-strong);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 html,
@@ -22,10 +54,12 @@ body,
 
 body {
   margin: 0;
-  color: var(--vscode-foreground);
-  background: var(--vscode-sideBar-background);
+  color: var(--cm-text);
+  background: var(--cm-canvas);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
+  letter-spacing: 0;
+  scrollbar-color: var(--cm-border-strong) transparent;
 }
 
 button,
@@ -38,20 +72,36 @@ textarea {
 button {
   min-height: 28px;
   padding: 4px 9px;
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
-  border: 1px solid transparent;
-  border-radius: 4px;
+  color: var(--cm-text);
+  background: var(--cm-surface-2);
+  border: 1px solid var(--cm-border);
+  border-radius: 5px;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
 button:hover:not(:disabled) {
-  background: var(--vscode-button-hoverBackground);
+  background: var(--cm-surface-3);
+  border-color: var(--cm-border-strong);
 }
 
 button:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: #fff;
+  background: #315f95;
 }
 
 [hidden] {
@@ -75,9 +125,10 @@ button:disabled {
 .status-bar {
   justify-content: space-between;
   gap: 8px;
-  min-height: 40px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--vscode-sideBar-border, transparent);
+  min-height: 42px;
+  padding: 7px 12px;
+  background: #0d0e0f;
+  border-bottom: 1px solid var(--cm-border);
 }
 
 .runtime-status {
@@ -85,24 +136,44 @@ button:disabled {
 }
 
 #connection-label {
-  display: block;
-  font-size: 0.9em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--cm-text);
+  font-size: 0.86em;
+  font-weight: 650;
+}
+
+#connection-label::before {
+  width: 6px;
+  height: 6px;
+  background: var(--cm-faint);
+  border-radius: 50%;
+  content: '';
 }
 
 #connection-label.connected {
-  color: var(--vscode-testing-iconPassed);
+  color: var(--cm-success);
+}
+
+#connection-label.connected::before {
+  background: var(--cm-success);
 }
 
 #connection-label.disconnected,
 .error-message {
-  color: var(--vscode-errorForeground);
+  color: var(--cm-danger);
+}
+
+#connection-label.disconnected::before {
+  background: var(--cm-danger);
 }
 
 #runtime-label {
   display: block;
   overflow: hidden;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.78em;
+  color: var(--cm-faint);
+  font-size: 0.76em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -116,24 +187,36 @@ button:disabled {
   min-height: 30px;
   padding: 0;
   place-items: center;
-  color: var(--vscode-foreground);
+  color: var(--cm-muted);
   background: transparent;
+  border-color: transparent;
 }
 
 .icon-button:hover:not(:disabled) {
-  background: var(--vscode-toolbar-hoverBackground);
+  color: var(--cm-text);
+  background: var(--cm-surface-3);
+  border-color: transparent;
 }
 
 .send-icon {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: var(--cm-action-text);
+  background: var(--cm-action);
+  border-color: var(--cm-action);
   border-radius: 50%;
   font-size: 17px;
+  font-weight: 700;
+}
+
+.send-icon:hover:not(:disabled) {
+  color: #070809;
+  background: #f1f3f5;
+  border-color: #f1f3f5;
 }
 
 .stop-icon {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: #fff;
+  background: #9e3f3f;
+  border-color: #b65050;
   border-radius: 50%;
   font-size: 11px;
 }
@@ -149,24 +232,26 @@ button:disabled {
 }
 
 .home-heading {
-  padding: 20px 14px 10px;
+  padding: 26px 16px 14px;
 }
 
 .home-heading h1 {
-  margin: 0 0 4px;
-  font-size: 1.35em;
+  margin: 0 0 6px;
+  color: #f2f3f4;
+  font-size: 1.42em;
+  font-weight: 650;
 }
 
 .home-heading p,
 .empty-state {
   margin: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   line-height: 1.5;
 }
 
 .session-list {
   min-height: 0;
-  padding: 4px 8px 12px;
+  padding: 4px 10px 14px;
   overflow-y: auto;
 }
 
@@ -176,9 +261,10 @@ button:disabled {
 
 .home-error {
   margin: 8px 4px;
-  padding: 8px;
-  color: var(--vscode-errorForeground);
-  border-left: 2px solid var(--vscode-errorForeground);
+  padding: 9px 10px;
+  color: var(--cm-danger);
+  background: rgb(229 129 129 / 7%);
+  border-left: 2px solid var(--cm-danger);
 }
 
 .home-error .message-content,
@@ -190,20 +276,26 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  border-bottom: 1px solid var(--vscode-sideBar-border, transparent);
+  border-bottom: 1px solid var(--cm-border);
 }
 
 .session-open {
   display: grid;
   min-width: 0;
-  padding: 10px 6px;
-  color: var(--vscode-foreground);
+  padding: 12px 8px;
+  color: var(--cm-text);
   background: transparent;
+  border: 0;
+  border-radius: 4px;
   text-align: left;
 }
 
 .session-open:hover {
-  background: var(--vscode-list-hoverBackground);
+  background: var(--cm-surface-1);
+}
+
+.session-open strong {
+  font-weight: 580;
 }
 
 .session-open strong,
@@ -215,8 +307,8 @@ button:disabled {
 
 .session-open span {
   margin-top: 3px;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.82em;
+  color: var(--cm-faint);
+  font-size: 0.8em;
 }
 
 .session-rename {
@@ -231,9 +323,10 @@ button:disabled {
 /* 聊天页面外壳和消息滚动容器。 */
 .chat-header {
   gap: 6px;
-  min-height: 38px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--vscode-sideBar-border, transparent);
+  min-height: 40px;
+  padding: 5px 9px;
+  background: var(--cm-canvas);
+  border-bottom: 1px solid var(--cm-border);
 }
 
 #session-title {
@@ -242,13 +335,16 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.92em;
+  font-weight: 600;
 }
 
 .messages {
   min-height: 0;
-  padding: 12px;
+  padding: 16px 14px 22px;
   overflow-x: hidden;
   overflow-y: auto;
+  scroll-behavior: smooth;
 }
 
 .turn,
@@ -262,12 +358,37 @@ button:disabled {
 }
 
 .turn {
-  margin-bottom: 22px;
+  position: relative;
+  margin-bottom: 28px;
+  padding-left: 14px;
+}
+
+/* 每轮消息由一条低对比执行轨道串联，强调它是一次任务而非普通聊天。 */
+.turn::before {
+  position: absolute;
+  top: 7px;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--cm-border);
+  content: '';
+}
+
+.turn::after {
+  position: absolute;
+  top: 7px;
+  left: -1px;
+  width: 7px;
+  height: 7px;
+  background: var(--cm-canvas);
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 50%;
+  content: '';
 }
 
 /* 用户消息、助手回答和独立系统消息的排版。 */
 .message {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .message-header {
@@ -276,23 +397,23 @@ button:disabled {
 }
 
 .message-label {
-  margin-bottom: 5px;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.82em;
-  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--cm-faint);
+  font-size: 0.76em;
+  font-weight: 650;
 }
 
 .message-user {
-  margin-left: 20px;
-  padding: 8px 10px;
-  background: var(--vscode-editor-inactiveSelectionBackground);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 6px;
+  margin-left: 18px;
+  padding: 10px 12px;
+  background: var(--cm-surface-2);
+  border: 1px solid var(--cm-border);
+  border-radius: 7px;
 }
 
 .message-user .message-label {
-  margin: 0;
-  color: var(--vscode-foreground);
+  margin: 0 0 4px;
+  color: var(--cm-muted);
 }
 
 .retry-button {
@@ -302,13 +423,16 @@ button:disabled {
 }
 
 .message-system {
-  padding-left: 9px;
-  border-left: 2px solid var(--vscode-textBlockQuote-border);
+  padding: 9px 11px;
+  background: var(--cm-surface-1);
+  border-left: 2px solid var(--cm-border-strong);
+  border-radius: 0 5px 5px 0;
 }
 
 .message-content {
   min-width: 0;
-  line-height: 1.5;
+  color: var(--cm-text);
+  line-height: 1.58;
   overflow-wrap: anywhere;
 }
 
@@ -325,11 +449,12 @@ button:disabled {
   min-width: 0;
   max-width: 100%;
   max-height: 360px;
-  padding: 8px;
+  padding: 10px 11px;
   overflow: auto;
-  color: var(--vscode-editor-foreground);
-  background: var(--vscode-textCodeBlock-background);
-  border-radius: 4px;
+  color: #d9dce0;
+  background: #0c0d0e;
+  border: 1px solid var(--cm-border);
+  border-radius: 5px;
   white-space: pre-wrap;
 }
 
@@ -337,8 +462,50 @@ button:disabled {
   font-family: var(--vscode-editor-font-family);
 }
 
+.message-content :not(pre) > code {
+  padding: 1px 4px;
+  color: #dce5ef;
+  background: var(--cm-surface-3);
+  border-radius: 3px;
+}
+
+.message-content blockquote {
+  margin: 10px 0;
+  padding: 1px 0 1px 12px;
+  color: #b9bec5;
+  border-left: 2px solid var(--cm-border-strong);
+}
+
+.message-content hr {
+  height: 1px;
+  margin: 18px 0;
+  background: var(--cm-border);
+  border: 0;
+}
+
+.message-content table {
+  width: 100%;
+  margin: 10px 0;
+  border-collapse: collapse;
+}
+
+.message-content th,
+.message-content td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--cm-border);
+  text-align: left;
+}
+
+.message-content th {
+  color: #f0f1f2;
+  background: var(--cm-surface-1);
+  font-weight: 600;
+}
+
 .message-content a {
-  color: var(--vscode-textLink-foreground);
+  color: var(--cm-accent);
+  text-decoration-color: rgb(142 184 248 / 45%);
+  text-underline-offset: 2px;
 }
 
 /* 已完成回答允许文本选择；选区附近显示轻量评论编辑器。 */
@@ -351,20 +518,28 @@ button:disabled {
   padding-right: 38px;
 }
 
+.message-assistant {
+  padding: 2px 2px 0;
+}
+
+.message-assistant .message-label {
+  color: #bcc1c8;
+}
+
 .annotation-editor {
   position: fixed;
   z-index: 80;
   display: flex;
   width: min(360px, calc(100vw - 16px));
-  min-height: 46px;
+  min-height: 48px;
   align-items: center;
   gap: 6px;
-  padding: 5px 7px 5px 12px;
-  color: var(--vscode-input-foreground);
-  background: var(--vscode-editorWidget-background, #2b2b2b);
-  border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+  padding: 6px 7px 6px 13px;
+  color: var(--cm-text);
+  background: #242629;
+  border: 1px solid #3a3e43;
   border-radius: 24px;
-  box-shadow: 0 7px 24px var(--vscode-widget-shadow);
+  box-shadow: 0 10px 28px var(--cm-shadow);
 }
 
 .annotation-editor textarea {
@@ -374,7 +549,7 @@ button:disabled {
   max-height: 90px;
   padding: 5px 0;
   resize: none;
-  color: var(--vscode-input-foreground);
+  color: var(--cm-text);
   background: transparent;
   border: 0;
   outline: none;
@@ -393,20 +568,22 @@ button:disabled {
 }
 
 .annotation-submit {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: #0b1520;
+  background: var(--cm-accent);
+  border-color: var(--cm-accent);
   font-size: 21px;
   line-height: 34px;
 }
 
 .annotation-submit:hover {
-  background: var(--vscode-button-hoverBackground);
+  background: #b0d0ff;
+  border-color: #b0d0ff;
 }
 
 .annotation-remove {
   width: 26px;
   min-height: 26px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   background: transparent;
   font-size: 18px;
 }
@@ -418,11 +595,11 @@ button:disabled {
   width: 32px;
   min-height: 32px;
   padding: 0;
-  color: #fff;
-  background: var(--vscode-button-background);
-  border: 2px solid var(--vscode-editor-background);
+  color: #0b1520;
+  background: var(--cm-accent);
+  border: 2px solid var(--cm-canvas);
   border-radius: 50%;
-  box-shadow: 0 2px 7px var(--vscode-widget-shadow);
+  box-shadow: 0 3px 10px var(--cm-shadow);
   font-size: 13px;
   font-weight: 700;
 }
@@ -442,7 +619,7 @@ button:disabled {
 /* 已发送批注属于用户消息的一部分，恢复会话时仍能看到原始选区和评论。 */
 .sent-annotations {
   margin-top: 8px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
 }
 
 .sent-annotations > summary {
@@ -452,8 +629,8 @@ button:disabled {
   gap: 5px;
   padding: 3px 8px;
   list-style: none;
-  background: var(--vscode-editorWidget-background, rgba(0, 0, 0, 0.2));
-  border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+  background: #202225;
+  border: 1px solid var(--cm-border-strong);
   border-radius: 14px;
   cursor: pointer;
   font-size: 0.82em;
@@ -466,7 +643,7 @@ button:disabled {
 
 .sent-annotations > summary::after {
   margin-left: 3px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   content: '⌄';
 }
 
@@ -478,7 +655,7 @@ button:disabled {
   position: relative;
   width: 13px;
   height: 10px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-accent);
   border: 1px solid currentColor;
   border-radius: 3px;
 }
@@ -499,9 +676,9 @@ button:disabled {
   max-height: 320px;
   margin-top: 6px;
   overflow-y: auto;
-  background: var(--vscode-editorWidget-background, rgba(0, 0, 0, 0.2));
-  border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
-  border-radius: 8px;
+  background: var(--cm-surface-1);
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
 }
 
 .sent-annotation {
@@ -509,28 +686,29 @@ button:disabled {
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 5px;
   padding: 9px 10px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
 }
 
 .sent-annotation + .sent-annotation {
-  border-top: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+  border-top: 1px solid var(--cm-border);
 }
 
 .sent-annotation-number {
   padding-top: 1px;
+  color: var(--cm-faint);
   text-align: right;
 }
 
 .sent-annotation-label {
   margin-bottom: 2px;
-  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  color: var(--cm-faint);
   font-size: 0.88em;
 }
 
 .sent-annotation blockquote,
 .sent-annotation p {
   margin: 0 0 7px;
-  color: var(--vscode-foreground);
+  color: var(--cm-text);
   white-space: pre-wrap;
 }
 
@@ -540,39 +718,99 @@ button:disabled {
 
 /* 单轮 Agent 对话中可折叠的 commentary 与工具时间线。 */
 .turn-process {
-  margin: 4px 0 12px;
-  color: var(--vscode-descriptionForeground);
-  border-left: 2px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
+  margin: 5px 0 14px;
+  color: var(--cm-muted);
 }
 
 .turn-process > summary {
+  display: flex;
   min-height: 28px;
-  padding: 4px 8px;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+  color: var(--cm-muted);
+  list-style: none;
   line-height: 20px;
   cursor: pointer;
   user-select: none;
 }
 
+.turn-process > summary::-webkit-details-marker,
+.tool-event > summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-process > summary::before {
+  width: 14px;
+  color: var(--cm-faint);
+  content: '›';
+  font-size: 17px;
+  line-height: 1;
+  text-align: center;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.turn-process[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.turn-process > summary:hover {
+  color: var(--cm-text);
+}
+
 .process-body {
-  padding: 2px 0 2px 10px;
+  margin-left: 7px;
+  padding: 3px 0 2px 14px;
+  border-left: 1px solid var(--cm-border);
 }
 
 .process-message {
-  margin: 5px 8px 10px 0;
+  margin: 6px 8px 12px 0;
+  color: #b5bac1;
 }
 
 .tool-event {
-  margin: 5px 8px 8px 0;
-  padding: 2px 0;
-  color: var(--vscode-descriptionForeground);
-  border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
+  margin: 5px 8px 7px 0;
+  padding: 0;
+  color: var(--cm-muted);
+  background: transparent;
+  border: 0;
 }
 
 .tool-event summary {
+  display: flex;
   min-height: 25px;
-  padding: 0 5px;
+  align-items: center;
+  gap: 7px;
+  padding: 1px 4px;
+  overflow: hidden;
+  list-style: none;
   line-height: 25px;
   cursor: pointer;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-event summary::before {
+  flex: 0 0 auto;
+  width: 11px;
+  color: var(--cm-faint);
+  content: '›';
+  font-size: 15px;
+  text-align: center;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.tool-event[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.tool-event summary:hover {
+  color: #c6cbd1;
+  background: var(--cm-surface-1);
+  border-radius: 4px;
 }
 
 .tool-file-target {
@@ -582,14 +820,15 @@ button:disabled {
   align-items: baseline;
   margin: 6px 0;
   padding: 7px 9px;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-textCodeBlock-background);
-  border-radius: 5px;
+  color: var(--cm-faint);
+  background: var(--cm-surface-1);
+  border: 1px solid var(--cm-border);
+  border-radius: 4px;
 }
 
 .tool-file-target code {
   overflow: hidden;
-  color: var(--vscode-foreground);
+  color: #cdd1d6;
   font-family: var(--vscode-editor-font-family);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -598,30 +837,32 @@ button:disabled {
 .tool-result-compact {
   margin: 5px 0;
   padding: 6px 8px;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-textCodeBlock-background);
+  color: var(--cm-muted);
+  background: var(--cm-surface-1);
+  border: 1px solid var(--cm-border);
   border-radius: 4px;
 }
 
 .tool-status {
-  margin-top: 5px;
-  font-size: 0.82em;
+  margin: 5px 4px 0;
+  font-size: 0.78em;
+  font-weight: 600;
 }
 
 .tool-ok .tool-status {
-  color: var(--vscode-testing-iconPassed);
+  color: var(--cm-success);
 }
 
 .tool-error .tool-status {
-  color: var(--vscode-errorForeground);
+  color: var(--cm-danger);
 }
 
 /* 单次 write_file/patch_file 的紧凑修改预览；完整对比仍由 Changes 面板打开。 */
 .tool-change-preview {
-  margin: 7px 0 5px;
+  margin: 8px 0 6px;
   overflow: hidden;
-  background: var(--vscode-editor-background);
-  border: 1px solid var(--vscode-widget-border, var(--vscode-sideBar-border));
+  background: #0d0e0f;
+  border: 1px solid var(--cm-border);
   border-radius: 6px;
 }
 
@@ -631,30 +872,30 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  min-height: 30px;
-  padding: 5px 9px;
-  font-size: 0.82em;
-  background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-textCodeBlock-background));
-  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-sideBar-border));
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 0.8em;
+  background: var(--cm-surface-2);
+  border-bottom: 1px solid var(--cm-border);
 }
 
 .tool-change-header strong {
   overflow: hidden;
-  color: var(--vscode-foreground);
+  color: #dfe2e5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tool-change-header span,
 .tool-change-message {
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
 }
 
 .tool-change-diff {
   max-height: 220px;
   overflow: auto;
-  color: var(--vscode-editor-foreground);
-  background: var(--vscode-editor-background);
+  color: #cfd3d7;
+  background: #0d0e0f;
   font-size: 0.82em;
   font-family: var(--vscode-editor-font-family);
   line-height: 1.45;
@@ -673,7 +914,7 @@ button:disabled {
   display: block;
   min-width: 0;
   padding: 1px 12px 1px 8px;
-  color: var(--vscode-editor-foreground);
+  color: inherit;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -686,20 +927,22 @@ button:disabled {
   position: sticky;
   left: 0;
   padding: 1px 8px 1px 4px;
-  color: var(--vscode-editorLineNumber-foreground);
-  background: var(--vscode-editor-background);
+  color: #58606a;
+  background: #0d0e0f;
   text-align: right;
   user-select: none;
 }
 
 .diff-added {
-  background: var(--vscode-diffEditor-insertedLineBackground, rgba(40, 160, 90, 0.16));
-  border-left-color: var(--vscode-gitDecoration-addedResourceForeground);
+  color: #c9e7d4;
+  background: rgb(58 117 78 / 30%);
+  border-left-color: #65b985;
 }
 
 .diff-deleted {
-  background: var(--vscode-diffEditor-removedLineBackground, rgba(210, 70, 70, 0.16));
-  border-left-color: var(--vscode-gitDecoration-deletedResourceForeground);
+  color: #efcece;
+  background: rgb(133 55 55 / 30%);
+  border-left-color: #d36c6c;
 }
 
 .diff-added .diff-line-number,
@@ -709,13 +952,13 @@ button:disabled {
 
 .diff-hunk,
 .diff-omitted {
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
+  color: #828a94;
+  background: #17191b;
 }
 
 .diff-hunk code,
 .diff-omitted code {
-  color: var(--vscode-descriptionForeground);
+  color: #828a94;
 }
 
 .tool-change-message {
@@ -733,14 +976,17 @@ button:disabled {
 }
 
 .inline-actions {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .approval-option {
+  position: relative;
   max-width: 100%;
-  color: var(--vscode-foreground);
-  background: var(--vscode-editor-inactiveSelectionBackground);
-  border-color: var(--vscode-widget-border, var(--vscode-sideBar-border));
+  min-height: 32px;
+  padding: 6px 30px 6px 10px;
+  color: #c6cbd1;
+  background: var(--cm-surface-2);
+  border-color: var(--cm-border-strong);
   overflow-wrap: anywhere;
   text-align: left;
   white-space: normal;
@@ -748,9 +994,9 @@ button:disabled {
 
 .approval-option:hover:not(:disabled),
 .approval-option.selected {
-  color: var(--vscode-foreground);
-  background: var(--vscode-toolbar-hoverBackground);
-  border-color: var(--vscode-descriptionForeground);
+  color: #f4f5f6;
+  background: var(--cm-surface-3);
+  border-color: #737a83;
 }
 
 .approval-option.selected {
@@ -758,17 +1004,32 @@ button:disabled {
   opacity: 1;
 }
 
+.approval-option.selected::after {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  color: var(--cm-success);
+  content: '✓';
+  transform: translateY(-50%);
+}
+
 .approval-option.not-selected {
   opacity: 0.45;
 }
 
 .question-form fieldset {
-  padding: 8px 0;
-  border: 0;
+  margin: 8px 0;
+  padding: 10px;
+  background: var(--cm-surface-1);
+  border: 1px solid var(--cm-border);
+  border-radius: 5px;
 }
 
 .question-form legend {
-  margin-bottom: 5px;
+  max-width: 100%;
+  padding: 0 4px;
+  color: #d9dcdf;
+  font-weight: 600;
 }
 
 .question-form select,
@@ -778,34 +1039,43 @@ button:disabled {
   width: 100%;
   min-height: 30px;
   padding: 5px 7px;
-  color: var(--vscode-input-foreground);
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, transparent);
+  color: var(--cm-text);
+  background: #0f1011;
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 4px;
+  outline: none;
 }
 
 /* 固定在底部的输入框，以及发送、停止和编辑器上下文控件。 */
 .composer {
   padding: 10px 12px 12px;
-  border-top: 1px solid var(--vscode-sideBar-border, transparent);
-  background: var(--vscode-sideBar-background);
+  background: var(--cm-canvas);
+  border-top: 1px solid var(--cm-border);
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 42px;
+  min-height: 46px;
   max-height: 220px;
-  padding: 8px;
+  padding: 10px 11px;
   resize: none;
-  color: var(--vscode-input-foreground);
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 5px;
+  color: var(--cm-text);
+  background: var(--cm-surface-2);
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 7px;
   outline: none;
+  line-height: 1.45;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.composer textarea::placeholder {
+  color: var(--cm-faint);
 }
 
 .composer textarea:focus,
 .composer textarea[data-retry='true'] {
-  border-color: var(--vscode-focusBorder);
+  background: #1d2024;
+  border-color: #687a8f;
 }
 
 .composer-footer {
@@ -824,23 +1094,24 @@ button:disabled {
   right: 0;
   bottom: calc(100% + 6px);
   z-index: 30;
-  min-width: 190px;
-  padding: 4px;
-  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
-  border: 1px solid var(--vscode-widget-border, var(--vscode-sideBar-border));
-  box-shadow: 0 5px 16px var(--vscode-widget-shadow);
+  min-width: 200px;
+  padding: 5px;
+  background: #202225;
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 6px;
+  box-shadow: 0 10px 26px var(--cm-shadow);
 }
 
 .attachment-menu button {
   display: block;
   width: 100%;
-  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  color: var(--cm-text);
   background: transparent;
   text-align: left;
 }
 
 .attachment-menu button:hover {
-  background: var(--vscode-toolbar-hoverBackground);
+  background: #2a2d31;
 }
 
 .attachment-chips {
@@ -856,10 +1127,10 @@ button:disabled {
   align-items: center;
   gap: 4px;
   padding: 2px 5px 2px 7px;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-editor-inactiveSelectionBackground);
-  border: 1px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
-  border-radius: 4px;
+  color: #bac0c7;
+  background: var(--cm-surface-2);
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 12px;
   font-size: 0.8em;
 }
 
@@ -879,10 +1150,11 @@ button:disabled {
 
 /* 每轮文件变更、整轮 Undo/Redo 和 VS Code 诊断。 */
 .changes-panel {
-  margin: 8px 0 12px;
-  padding: 8px;
-  border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
-  border-bottom: 1px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
+  margin: 10px 0 14px;
+  padding: 10px;
+  background: var(--cm-surface-1);
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
 }
 
 .changes-header {
@@ -890,12 +1162,21 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 5px;
+  margin-bottom: 7px;
+}
+
+.changes-header > strong,
+.change-diagnostics > strong {
+  color: #d9dcdf;
+  font-size: 0.84em;
+  font-weight: 650;
 }
 
 .changes-actions button {
   min-height: 24px;
   padding: 2px 7px;
+  color: var(--cm-muted);
+  background: transparent;
 }
 
 .change-list,
@@ -910,13 +1191,14 @@ button:disabled {
   min-height: 26px;
   padding: 3px 4px;
   overflow: hidden;
-  color: var(--vscode-foreground);
+  color: var(--cm-text);
   background: transparent;
   text-align: left;
 }
 
 .change-file {
   grid-template-columns: 18px minmax(0, 1fr) auto;
+  border-color: transparent;
 }
 
 .diagnostic-row {
@@ -932,7 +1214,7 @@ button:disabled {
 
 .change-stats {
   padding-left: 8px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   font-family: var(--vscode-editor-font-family);
   font-size: 0.86em;
   white-space: nowrap;
@@ -940,24 +1222,25 @@ button:disabled {
 
 .change-file:hover,
 .diagnostic-row:hover {
-  background: var(--vscode-list-hoverBackground);
+  background: var(--cm-surface-3);
+  border-color: transparent;
 }
 
 .change-status.added {
-  color: var(--vscode-gitDecoration-addedResourceForeground);
+  color: var(--cm-success);
 }
 
 .change-status.deleted {
-  color: var(--vscode-gitDecoration-deletedResourceForeground);
+  color: var(--cm-danger);
 }
 
 .change-status.modified {
-  color: var(--vscode-gitDecoration-modifiedResourceForeground);
+  color: var(--cm-warning);
 }
 
 .change-warning {
   margin: 6px 2px 0;
-  color: var(--vscode-errorForeground);
+  color: var(--cm-danger);
   font-size: 0.82em;
 }
 
@@ -965,7 +1248,7 @@ button:disabled {
   gap: 2px;
   margin-top: 8px;
   padding-top: 7px;
-  border-top: 1px solid var(--vscode-sideBar-border, var(--vscode-widget-border));
+  border-top: 1px solid var(--cm-border);
 }
 
 .change-diagnostics strong {
@@ -974,7 +1257,8 @@ button:disabled {
 
 .diagnostic-row {
   display: block;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
+  border-color: transparent;
 }
 
 /* Provider、model、approval 按钮及其上方的本地弹出选择器。 */
@@ -992,9 +1276,10 @@ button:disabled {
   max-width: 110px;
   padding: 2px 6px;
   overflow: hidden;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   background: transparent;
-  border-color: var(--vscode-sideBar-border, var(--vscode-widget-border));
+  border-color: var(--cm-border);
+  border-radius: 4px;
   font-size: 0.78em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1005,21 +1290,22 @@ button:disabled {
   bottom: calc(100% + 6px);
   z-index: 30;
   max-height: min(320px, 55vh);
-  padding: 4px;
+  min-width: 150px;
+  padding: 5px;
   overflow-y: auto;
-  color: var(--vscode-menu-foreground, var(--vscode-foreground));
-  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
-  border: 1px solid var(--vscode-widget-border, var(--vscode-sideBar-border));
-  border-radius: 5px;
-  box-shadow: 0 5px 16px var(--vscode-widget-shadow);
+  color: var(--cm-text);
+  background: #202225;
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 6px;
+  box-shadow: 0 10px 26px var(--cm-shadow);
 }
 
 .runtime-menu-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18px;
   width: 100%;
-  min-height: 28px;
-  padding: 4px 7px;
+  min-height: 30px;
+  padding: 5px 8px;
   color: inherit;
   background: transparent;
   text-align: left;
@@ -1028,7 +1314,7 @@ button:disabled {
 .runtime-menu-item:hover,
 .runtime-menu-item.selected {
   color: inherit;
-  background: var(--vscode-toolbar-hoverBackground);
+  background: #2a2d31;
 }
 
 .runtime-menu-item.selected {
@@ -1036,19 +1322,21 @@ button:disabled {
 }
 
 .runtime-menu-check {
+  color: var(--cm-success);
   text-align: center;
 }
 
 /* 模型运行和历史压缩过程中的临时状态提示。 */
 .thinking-indicator {
-  margin: 5px 8px 9px 0;
-  color: var(--vscode-descriptionForeground);
+  margin: 6px 8px 10px 0;
+  color: var(--cm-muted);
   font-style: italic;
+  animation: cm-thinking 1.4s ease-in-out infinite;
 }
 
 .compact-message {
   margin: 6px 0 10px;
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   line-height: 1.45;
 }
 
@@ -1057,15 +1345,15 @@ button:disabled {
 }
 
 .compact-result.success {
-  color: var(--vscode-testing-iconPassed);
+  color: var(--cm-success);
 }
 
 .compact-result.skipped {
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
 }
 
 .compact-result.error {
-  color: var(--vscode-errorForeground);
+  color: var(--cm-danger);
 }
 
 /* 锚定在输入框上的斜杠命令与 @附件补全菜单。 */
@@ -1081,28 +1369,30 @@ button:disabled {
   z-index: 5;
   max-height: 240px;
   overflow-y: auto;
-  background: var(--vscode-quickInput-background, var(--vscode-menu-background));
-  border: 1px solid var(--vscode-widget-border);
-  box-shadow: 0 4px 12px var(--vscode-widget-shadow);
+  padding: 5px;
+  background: #202225;
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 6px;
+  box-shadow: 0 10px 26px var(--cm-shadow);
 }
 
 .command-menu button {
   display: grid;
   width: 100%;
   padding: 6px 8px;
-  color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+  color: var(--cm-text);
   background: transparent;
   text-align: left;
 }
 
 .command-menu button.selected,
 .command-menu button:hover {
-  background: var(--vscode-list-activeSelectionBackground);
-  color: var(--vscode-list-activeSelectionForeground);
+  color: #fff;
+  background: #2a2d31;
 }
 
 .command-menu span {
-  color: var(--vscode-descriptionForeground);
+  color: var(--cm-muted);
   font-size: 0.82em;
 }
 
@@ -1113,7 +1403,7 @@ button:disabled {
   z-index: 20;
   display: grid;
   padding: 16px;
-  background: rgb(0 0 0 / 35%);
+  background: rgb(0 0 0 / 66%);
   place-items: center;
 }
 
@@ -1122,10 +1412,11 @@ button:disabled {
   width: min(340px, 100%);
   gap: 10px;
   padding: 14px;
-  color: var(--vscode-foreground);
-  background: var(--vscode-editorWidget-background);
-  border: 1px solid var(--vscode-widget-border);
-  box-shadow: 0 6px 20px var(--vscode-widget-shadow);
+  color: var(--cm-text);
+  background: var(--cm-surface-2);
+  border: 1px solid var(--cm-border-strong);
+  border-radius: 7px;
+  box-shadow: 0 14px 36px var(--cm-shadow);
 }
 
 .dialog .inline-actions {
@@ -1134,7 +1425,59 @@ button:disabled {
 
 .reconnect {
   padding: 12px;
+  color: var(--cm-muted);
   text-align: center;
+}
+
+@keyframes cm-thinking {
+  0%,
+  100% {
+    opacity: 0.48;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 窄侧栏中收紧横向留白，避免运行配置和操作按钮挤压正文。 */
+@media (max-width: 360px) {
+  .messages {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .turn {
+    padding-left: 11px;
+  }
+
+  .message-user {
+    margin-left: 8px;
+  }
+
+  .composer {
+    padding-right: 9px;
+    padding-left: 9px;
+  }
+
+  .runtime-button {
+    max-width: 84px;
+  }
+
+  .final-message.annotatable {
+    padding-right: 34px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 .sr-only {

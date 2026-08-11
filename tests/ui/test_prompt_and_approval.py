@@ -109,6 +109,27 @@ def test_terminal_approval_offers_shell_path_and_combined_session_choices():
     ]
 
 
+def test_terminal_edit_approval_hides_file_contents_and_shows_target():
+    output = StringIO()
+    ui = TerminalUI(console=Console(file=output, force_terminal=False))
+
+    with patch.object(ui, "approval_menu", return_value={"allowed": False}):
+        ui.approval_request(
+            "patch_file",
+            {
+                "path": "src/app.py",
+                "old_text": "secret old payload",
+                "new_text": "secret new payload",
+            },
+            metadata={"risk_level": "high"},
+        )
+
+    rendered = output.getvalue()
+    assert "target: src/app.py" in rendered
+    assert "secret old payload" not in rendered
+    assert "secret new payload" not in rendered
+
+
 def test_terminal_request_user_input_adds_other_and_returns_custom_answer():
     output = StringIO()
     ui = TerminalUI(console=Console(file=output, force_terminal=False))

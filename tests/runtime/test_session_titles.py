@@ -4,14 +4,13 @@
 重点边界：首轮标题生成、已有标题不重写、benchmark 关闭标题、标题清理截断、banner 不被长标题撑破。
 """
 
+from io import StringIO
+
+from rich.console import Console
+
 from codemate import FakeModelClient, MiniAgent, ModelResponse, SessionStore, WorkspaceContext
 from codemate import cli
 from codemate.ui.banner import build_welcome
-import unicodedata
-
-
-def display_width(text):
-    return sum(2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1 for char in str(text))
 
 
 def build_agent(tmp_path, outputs):
@@ -93,12 +92,24 @@ def test_session_title_normalization_removes_markers_and_limits_chinese(tmp_path
     assert agent.session["title"] == "你好我在这儿可以帮你"
 
 
-def test_welcome_banner_clips_long_session_title(tmp_path):
+def test_welcome_banner_renders_runtime_details_and_sanitizes_endpoint(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.session["title"] = "你好！我在这儿。可以帮你写代码、写脚本、排查问题"
+    output = StringIO()
+    console = Console(file=output, force_terminal=False, width=72)
 
-    banner = build_welcome(agent, model="openai:gpt-5.4", host="")
+    console.print(
+        build_welcome(
+            agent,
+            model="openai:gpt-5.4",
+            host="https://user:secret@api.example.com/v1",
+        )
+    )
 
-    widths = {display_width(line) for line in banner.splitlines()}
-    assert len(widths) == 1
-    assert "..." in banner
+    rendered = output.getvalue()
+    assert "CODEMATE" in rendered
+    assert "openai:gpt-5.4" in rendered
+    assert "https://api.example.com/v1" in rendered
+    assert "secret" not in rendered
+    assert "approval auto" in rendered
+    assert "sandbox" in rendered

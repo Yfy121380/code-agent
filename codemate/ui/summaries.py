@@ -8,7 +8,6 @@
 import json
 
 
-MAX_PREVIEW_LINES = 18
 MAX_RESULT_LINES = 4
 MAX_LINE_CHARS = 40
 SHELL_STREAM_EDGE_LINES = 2
@@ -34,27 +33,43 @@ def _format_bytes(value):
     return f"{value / (1024 * 1024):.1f} MB"
 
 
-def preview_text(text, max_lines=MAX_PREVIEW_LINES):
-    """生成带行号的短预览，主要用于 write_file 和 patch_file 的内容展示。"""
-    text = str(text or "")
-    lines = text.splitlines()
-    if not lines and text:
-        lines = [text]
-    rendered = []
-    for index, line in enumerate(lines[:max_lines], 1):
-        rendered.append(f"{index:>4}  {_clip_line(line)}")
-    if len(lines) > max_lines:
-        rendered.append(f"      ... ({len(lines) - max_lines} more lines)")
-    if not rendered:
-        rendered.append("      (empty)")
-    return "\n".join(rendered)
-
-
 def compact_json(value, limit=600):
     text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _format_token_count(value):
+    """把模型 usage 数字压成适合终端状态行的短格式。"""
+    try:
+        number = max(0, int(value or 0))
+    except (TypeError, ValueError):
+        number = 0
+    if number < 1000:
+        return str(number)
+    if number < 1_000_000:
+        return f"{number / 1000:.1f}k"
+    return f"{number / 1_000_000:.2f}m"
+
+
+def summarize_model_usage(metadata):
+    """提取跨 OpenAI/Anthropic 一致的 input、cache 与 output usage。"""
+    metadata = dict(metadata or {})
+    input_tokens = metadata.get("input_tokens")
+    output_tokens = metadata.get("output_tokens")
+    cached_tokens = metadata.get("cached_tokens")
+    cache_creation_tokens = metadata.get("cache_creation_input_tokens")
+    if all(value in (None, "", 0) for value in (input_tokens, output_tokens, cached_tokens, cache_creation_tokens)):
+        return ""
+
+    parts = [f"{_format_token_count(input_tokens)} input"]
+    if cached_tokens not in (None, "", 0):
+        parts.append(f"{_format_token_count(cached_tokens)} cached")
+    if cache_creation_tokens not in (None, "", 0):
+        parts.append(f"{_format_token_count(cache_creation_tokens)} cache write")
+    parts.append(f"{_format_token_count(output_tokens)} output")
+    return " · ".join(parts)
 
 
 def summarize_tool_call(name, args):
@@ -80,20 +95,12 @@ def summarize_tool_call(name, args):
         content = str(args.get("content", ""))
         path = args.get("path", "")
         mode = str(args.get("mode", "overwrite"))
-        lines = [f"write_file {path}", f"  mode: {mode}", f"  size: {len(content)} chars", "  preview:", preview_text(content)]
-        return "\n".join(lines)
+        return f"write_file {path}\n  {mode} · {len(content)} chars"
     if name == "patch_file":
         path = args.get("path", "")
         old_text = str(args.get("old_text", ""))
         new_text = str(args.get("new_text", ""))
-        lines = [
-            f"patch_file {path}",
-            f"  old_text: {len(old_text)} chars",
-            preview_text(old_text, max_lines=8),
-            f"  new_text: {len(new_text)} chars",
-            preview_text(new_text, max_lines=8),
-        ]
-        return "\n".join(lines)
+        return f"patch_file {path}\n  replace {len(old_text)} → {len(new_text)} chars"
     if name == "run_shell":
         return f"run_shell\n  $ {args.get('command', '')}"
     if name == "read_file":
@@ -153,6 +160,14 @@ def summarize_tool_call(name, args):
     return f"{name}\n  args: {compact_json(args)}"
 
 
+def summarize_approval_call(name, args):
+    """审批只展示决策所需目标，隐藏文件正文等大参数。"""
+    args = dict(args or {})
+    if name in {"write_file", "patch_file"}:
+        return f"{name}\n  target: {args.get('path', '')}"
+    return summarize_tool_call(name, args)
+
+
 def summarize_read_tool_result(name, result, metadata=None):
     """读类工具在终端只展示规模信息，避免把读取内容刷满屏幕。"""
     metadata = dict(metadata or {})
@@ -180,10 +195,19 @@ def summarize_read_tool_result(name, result, metadata=None):
             return f"{status}, image, {width}x{height}, {media_type}, {size}"
         return f"{status}, {len(lines)} lines, {char_count} chars"
     if name == "web_search":
-        result_count = sum(1 for line in lines if line.lstrip().split(". ", 1)[0].isdigit() and "Title:" in line)
+        result_count = sum(
+            1
+            for line in lines
+            if line.lstrip().split(". ", 1)[0].isdigit() and "Title:" in line
+        )
         return f"{status}, {result_count} results, {len(lines)} lines, {char_count} chars"
     if name == "web_extract":
-        source_count = sum(1 for line in lines if line.lstrip().split(". ", 1)[0].isdigit() and ("URL:" in line or "Content:" in line))
+        source_count = sum(
+            1
+            for line in lines
+            if line.lstrip().split(". ", 1)[0].isdigit()
+            and ("URL:" in line or "Content:" in line)
+        )
         failed_count = sum(1 for line in lines if line.lstrip().startswith("- "))
         bits = [f"{status}, {source_count} sources"]
         if failed_count:
@@ -281,4 +305,8 @@ def summarize_tool_result(name, result, metadata=None):
         lines.append(f"... ({len(result_lines) - MAX_RESULT_LINES} more lines)")
     if not lines:
         lines.append("(empty)")
+    if metadata.get("tool_result_truncated"):
+        original = int(metadata.get("tool_result_original_chars", 0) or 0)
+        returned = int(metadata.get("tool_result_returned_chars", 0) or 0)
+        lines.append(f"truncated: {original} -> {returned} chars")
     return "\n".join(lines)

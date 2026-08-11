@@ -32,7 +32,7 @@ CodeMate 是一个本地运行的 coding agent。它面向代码仓库工作，�
 
 #### 编写
 <p align="center">
-  <img src="docs/assets/design.png" alt="write" width="800">
+  <img src="docs/assets/write.png" alt="write" width="800">
 </p>
 
 

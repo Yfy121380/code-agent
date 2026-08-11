@@ -222,3 +222,20 @@ def test_terminal_unphased_stream_uses_normal_live_rendering():
     assert renderables[0].plain == ASSISTANT_MARKER_TEXT
     assert isinstance(renderables[1], Markdown)
     assert renderables[1].markup == "Streaming without phase"
+
+
+def test_terminal_stream_renders_usage_after_completed_text():
+    console = RecordingConsole()
+    ui = TerminalUI(console=console)
+
+    ui.stream_start()
+    ui.stream_delta("Completed.\n\n", phase="final_answer")
+    ui.stream_end(kind="final")
+    ui.model_end(
+        kind="final",
+        metadata={"input_tokens": 12000, "cached_tokens": 7680, "output_tokens": 42},
+    )
+
+    renderables = [item["objects"][0] for item in console.printed]
+    assert isinstance(renderables[-1], Text)
+    assert renderables[-1].plain == "    model  12.0k input · 7.7k cached · 42 output"

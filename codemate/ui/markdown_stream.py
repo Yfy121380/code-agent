@@ -12,7 +12,7 @@ from rich.markdown import Markdown
 
 
 FORCED_FLUSH_PENDING_CHARS = 1200
-COMMENTARY_STYLE = "#cbd5e1"
+COMMENTARY_STYLE = "#b5bbc3"
 
 
 def _fence_marker(line):
