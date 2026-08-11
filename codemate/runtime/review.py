@@ -85,6 +85,31 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
     as Pre-existing. Do not expand into unrelated repository areas merely to
     search for additional issues.
 
+    ## Progress updates
+
+    - Write all progress commentary in Chinese.
+    - Before meaningful investigation and when moving to a new review phase,
+      briefly explain what you are checking and why it matters.
+    - After collecting useful evidence, summarize the concrete finding, its
+      likely impact, and the next question you will verify.
+    - Do not emit commentary before every trivial tool call. Commentary should
+      preserve useful review context rather than narrate mechanics.
+    - During broad reviews, record important findings as you go because older
+      read and search results may later be cleared from context.
+    - Progress commentary is not the final review. Continue investigating until
+      the actionable findings and remaining uncertainty are established.
+
+    Good progress commentary:
+
+    - “我先检查本次 diff 和相关调用链，确认修改目标及实际影响范围。”
+    - “目前确认状态恢复同时影响 session 持久化和权限重建；下一步检查异常路径是否会保留旧状态。”
+    - “相关测试覆盖了正常恢复，但没有覆盖后台线程晚到写入。我继续核对关闭顺序和锁边界。”
+
+    Avoid low-information commentary such as:
+
+    - “我继续看看。”
+    - “可能有问题，我再猜一下。”
+
     ## Review process
 
     Follow these phases in order. Adapt the specific files, searches, and
@@ -123,10 +148,13 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
     - Whether the implementation handles the underlying case or only one visible
       example.
 
-    You are not given the original user request. Do not invent missing
-    requirements or assume that every previous behavior must remain unchanged.
-    When repository evidence is insufficient to determine intent, describe the
-    uncertainty instead of reporting a confirmed defect.
+    The review request may include the original user request. Treat it as the
+    authoritative description of the intended behavior and scope. Use the diff,
+    repository evidence, tests, and project conventions to determine whether
+    the implementation satisfies it. If no original request is available, do
+    not invent missing requirements or assume that every previous behavior must
+    remain unchanged. When repository evidence is insufficient to determine
+    intent, describe the uncertainty instead of reporting a confirmed defect.
 
     ### Phase 3: Investigate and validate concrete risks
 
@@ -145,8 +173,9 @@ REVIEW_SYSTEM_PROMPT = textwrap.dedent(
 
     The optional review target is an investigation focus, not an established
     fact, requirement, or defect. Verify it against the diff and repository
-    evidence. Do not restrict the review to the target when other concrete
-    issues are found.
+    evidence. It must not override or reinterpret the original user request.
+    Do not restrict the review to the target when other concrete issues are
+    found.
 
     Before reporting a finding:
 
@@ -278,21 +307,28 @@ def review_system_prompt():
     return REVIEW_SYSTEM_PROMPT
 
 
-def _review_request(target=""):
+def _review_request(source_request="", target=""):
+    source_request = str(source_request or "").strip()
     target = str(target or "").strip()
+    source_text = source_request or (
+        "No original user request is available. Review the current changes "
+        "using repository evidence and the optional target."
+    )
     target_text = target or (
         "No specific target was provided. Perform a general review of the current changes."
     )
-    return textwrap.dedent(
-        f"""\
-        Optional review target:
-
-        {target_text}
-
-        Review all relevant current staged, unstaged, and untracked project
-        changes. Follow the required review phases and return the final review.
-        """
-    ).strip()
+    return "\n\n".join(
+        [
+            "Original user request:",
+            source_text,
+            "Optional review target:",
+            target_text,
+            (
+                "Review all relevant current staged, unstaged, and untracked project\n"
+                "changes. Follow the required review phases and return the final review."
+            ),
+        ]
+    )
 
 
 def _review_child_session(agent, target):
@@ -331,6 +367,10 @@ def run_review(agent, target=""):
     from .agent import CodeMate
 
     target = str(target or "").strip()
+    source_request = str(
+        getattr(getattr(agent, "current_task_state", None), "source_user_request", "")
+        or ""
+    ).strip()
     start = getattr(agent.ui, "review_start", None)
     if callable(start):
         start()
@@ -372,7 +412,7 @@ def run_review(agent, target=""):
             timezone_name=getattr(agent, "timezone_name", "Asia/Shanghai"),
         )
         try:
-            report = child.ask(_review_request(target))
+            report = child.ask(_review_request(source_request, target))
         except ModelRequestError:
             if not _has_collected_review_evidence(child):
                 raise

@@ -1,0 +1,127 @@
+{
+  "name": "codemate-vscode",
+  "displayName": "CodeMate",
+  "description": "Use the local CodeMate coding agent from Visual Studio Code.",
+  "version": "0.1.0",
+  "publisher": "xidiannss",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "CodeMate can inspect, modify, and execute code in the current workspace."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codemate.showWelcome",
+        "title": "CodeMate: Show Welcome"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codemate",
+          "title": "CodeMate",
+          "icon": "media/codemate.svg"
+        }
+      ]
+    },
+    "views": {
+      "codemate": [
+        {
+          "type": "webview",
+          "id": "codemate.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeMate",
+      "properties": {
+        "codemate.backend.command": {
+          "type": "string",
+          "default": "uv",
+          "description": "Executable used to start the CodeMate JSONL bridge."
+        },
+        "codemate.backend.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "run",
+            "--project",
+            "${extensionRoot}/..",
+            "codemate-bridge"
+          ],
+          "description": "Arguments passed before CodeMate's workspace and model options."
+        },
+        "codemate.provider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "openai",
+            "anthropic",
+            "deepseek"
+          ],
+          "default": "openai",
+          "description": "Model provider used when the backend starts."
+        },
+        "codemate.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override. Leave empty to use CodeMate's provider default."
+        },
+        "codemate.approval": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "auto",
+            "read_only",
+            "full"
+          ],
+          "default": "ask",
+          "description": "Approval policy used when the backend starts."
+        },
+        "codemate.shell.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional absolute Python executable used by run_shell. Its directory is placed first in the tool PATH without changing the CodeMate backend interpreter. Supports ${workspaceFolder}."
+        },
+        "codemate.session.resumeLatest": {
+          "type": "boolean",
+          "default": true,
+          "description": "Resume the most recently used session for the workspace when CodeMate starts."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile:extension": "tsc -p ./",
+    "compile:webview": "esbuild webview/chat.ts --bundle --platform=browser --format=iife --outfile=dist/webview.js",
+    "compile": "npm run compile:extension && npm run compile:webview",
+    "watch": "tsc -watch -p ./",
+    "check": "tsc -p ./ --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.6",
+    "marked": "^15.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.95.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.2"
+  }
+}

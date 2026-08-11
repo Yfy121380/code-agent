@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected
 import urllib.error
 import urllib.request
 
@@ -21,7 +21,24 @@ from .schemas import _tool_specs_to_openai, _tool_specs_to_openai_chat
 from .types import ModelResponse, ModelStreamEvent, ModelStreamIncompleteError, ModelToolCall
 
 OPENAI_COMPATIBLE_USER_AGENT = "codemate/0.1"
-OPENAI_RETRY_DELAYS = (1.0, 3.0, 7.0)
+OPENAI_RETRY_DELAYS = (2.0, 5.0, 10.0, 20.0, 40.0)
+OPENAI_TRANSIENT_ERROR_CODES = {
+    "rate_limit_exceeded",
+    "server_error",
+    "server_is_overloaded",
+    "service_unavailable",
+}
+OPENAI_TRANSIENT_ERROR_TYPES = {
+    "api_error",
+    "overloaded_error",
+    "rate_limit_error",
+    "server_error",
+    "service_unavailable_error",
+}
+
+
+class _OpenAITransientError(RuntimeError):
+    """A provider-side failure that is safe to retry before output is emitted."""
 
 
 def _connection_error_detail(exc):
@@ -345,9 +362,32 @@ def _to_openai_chat_messages(messages, system=None, supports_images=True):
 
 
 def _raise_openai_stream_error(event):
-    error = event.get("error") if isinstance(event.get("error"), dict) else event
+    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+    if isinstance(event.get("error"), dict):
+        error = event["error"]
+    elif isinstance(response.get("error"), dict):
+        error = response["error"]
+    elif response:
+        error = response
+    else:
+        error = event
     message = error.get("message") or error.get("code") or "unknown streaming error"
-    raise RuntimeError(f"OpenAI-compatible streaming error: {message}")
+    if message == "unknown streaming error":
+        raw_event = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        message = f"unknown streaming error: {raw_event[:1000]}"
+    error_code = str(error.get("code") or "")
+    error_type = str(error.get("type") or "")
+    exception_type = (
+        _OpenAITransientError
+        if error_code in OPENAI_TRANSIENT_ERROR_CODES
+        or error_type in OPENAI_TRANSIENT_ERROR_TYPES
+        else RuntimeError
+    )
+    raise exception_type(f"OpenAI-compatible streaming error: {message}")
+
+
+def _retryable_http_status(status):
+    return status in {408, 409, 429} or status >= 500
 
 
 class OpenAICompatibleModelClient:
@@ -406,7 +446,7 @@ class OpenAICompatibleModelClient:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"OpenAI-compatible chat fallback failed with HTTP {exc.code}: {body}") from exc
-        except (urllib.error.URLError, RemoteDisconnected) as exc:
+        except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
             raise RuntimeError(
                 "Could not reach the OpenAI-compatible chat fallback.\n"
                 f"Base URL: {self.base_url}\n"
@@ -465,7 +505,7 @@ class OpenAICompatibleModelClient:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"OpenAI-compatible chat streaming fallback failed with HTTP {exc.code}: {body}") from exc
-        except (urllib.error.URLError, RemoteDisconnected) as exc:
+        except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
             raise RuntimeError(
                 "Could not reach the OpenAI-compatible chat streaming fallback.\n"
                 f"Base URL: {self.base_url}\n"
@@ -504,7 +544,7 @@ class OpenAICompatibleModelClient:
                                 call["name"] = function["name"]
                             if function.get("arguments"):
                                 call["arguments"] = call.get("arguments", "") + function["arguments"]
-        except (urllib.error.URLError, RemoteDisconnected) as exc:
+        except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
             raise ModelStreamIncompleteError(
                 "stream_incomplete: OpenAI-compatible chat stream was interrupted before completion.\n"
                 f"Base URL: {self.base_url}\n"
@@ -579,12 +619,60 @@ class OpenAICompatibleModelClient:
         )
         attempts = len(OPENAI_RETRY_DELAYS) + 1
         for attempt in range(attempts):
+            text_parts = []
+            tool_calls = {}
+            item_phases = {}
+            completed_response = None
+            stream_opened = False
             try:
                 stream = urllib.request.urlopen(request, timeout=self.timeout)
-                break
+                stream_opened = True
+                with stream as response:
+                    for _event_name, event in _iter_sse_json(response):
+                        event_type = event.get("type", "")
+                        if event_type == "error" or event.get("error"):
+                            _raise_openai_stream_error(event)
+                        if event_type == "response.incomplete":
+                            raise ModelStreamIncompleteError(
+                                "stream_incomplete: OpenAI-compatible response reported response.incomplete"
+                            )
+                        if event_type == "response.failed":
+                            _raise_openai_stream_error(event)
+                        if event_type == "response.output_item.added":
+                            item = event.get("item", {}) or {}
+                            item_id = item.get("id") or event.get("item_id")
+                            if item_id and item.get("phase"):
+                                item_phases[item_id] = item.get("phase")
+                        elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
+                            delta = event.get("delta")
+                            if isinstance(delta, str) and delta:
+                                text_parts.append(delta)
+                                phase = event.get("phase") or item_phases.get(event.get("item_id"))
+                                yield ModelStreamEvent.text_delta(delta, phase=phase)
+                        elif event_type == "response.function_call_arguments.delta":
+                            key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
+                            call = tool_calls.setdefault(key, {"arguments": ""})
+                            call["arguments"] = call.get("arguments", "") + str(event.get("delta") or "")
+                        elif event_type == "response.function_call_arguments.done":
+                            key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
+                            call = tool_calls.setdefault(key, {"arguments": ""})
+                            call["id"] = event.get("item_id") or key
+                            call["call_id"] = event.get("call_id") or event.get("item_id") or key
+                            call["name"] = event.get("name")
+                            call["arguments"] = event.get("arguments", call.get("arguments", "") or "{}")
+                        elif event_type == "response.completed":
+                            completed_response = event.get("response") or {}
+                            break
+
+                if completed_response is None:
+                    raise ModelStreamIncompleteError(
+                        "stream_incomplete: OpenAI-compatible stream ended without response.completed"
+                    )
+                if completed_response.get("error"):
+                    _raise_openai_stream_error(completed_response)
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
+                if _retryable_http_status(exc.code) and attempt < attempts - 1:
                     time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
                 if tools and exc.code >= 500:
@@ -597,73 +685,39 @@ class OpenAICompatibleModelClient:
                     )
                     return
                 raise RuntimeError(f"OpenAI-compatible streaming request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
+            except _OpenAITransientError:
+                # Retrying after visible deltas would duplicate user-facing output.
+                # Tool-call fragments are safe because runtime executes only a completed response.
+                if not text_parts and attempt < attempts - 1:
                     time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue
+                raise
+            except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
+                if not text_parts and attempt < attempts - 1:
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
+                    continue
+                if stream_opened:
+                    raise ModelStreamIncompleteError(
+                        "stream_incomplete: OpenAI-compatible stream was interrupted before response.completed.\n"
+                        f"Base URL: {self.base_url}\n"
+                        f"Model: {self.model}\n"
+                        f"Cause: {_connection_error_detail(exc)}"
+                    ) from exc
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible streaming backend.\n"
                     f"Base URL: {self.base_url}\n"
                     f"Model: {self.model}\n"
                     f"Cause: {_connection_error_detail(exc)}"
                 ) from exc
+            except ModelStreamIncompleteError:
+                if not text_parts and attempt < attempts - 1:
+                    time.sleep(OPENAI_RETRY_DELAYS[attempt])
+                    continue
+                raise
 
-        text_parts = []
-        tool_calls = {}
-        item_phases = {}
-        completed_response = None
-        try:
-            with stream as response:
-                for _event_name, event in _iter_sse_json(response):
-                    event_type = event.get("type", "")
-                    if event_type == "error" or event.get("error"):
-                        _raise_openai_stream_error(event)
-                    if event_type == "response.incomplete":
-                        raise ModelStreamIncompleteError(
-                            "stream_incomplete: OpenAI-compatible response reported response.incomplete"
-                        )
-                    if event_type == "response.failed":
-                        _raise_openai_stream_error(event)
-                    if event_type == "response.output_item.added":
-                        item = event.get("item", {}) or {}
-                        item_id = item.get("id") or event.get("item_id")
-                        if item_id and item.get("phase"):
-                            item_phases[item_id] = item.get("phase")
-                    elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
-                        delta = event.get("delta")
-                        if isinstance(delta, str) and delta:
-                            text_parts.append(delta)
-                            phase = event.get("phase") or item_phases.get(event.get("item_id"))
-                            yield ModelStreamEvent.text_delta(delta, phase=phase)
-                    elif event_type == "response.function_call_arguments.delta":
-                        key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
-                        call = tool_calls.setdefault(key, {"arguments": ""})
-                        call["arguments"] = call.get("arguments", "") + str(event.get("delta") or "")
-                    elif event_type == "response.function_call_arguments.done":
-                        key = str(event.get("item_id") or event.get("output_index") or len(tool_calls))
-                        call = tool_calls.setdefault(key, {"arguments": ""})
-                        call["id"] = event.get("item_id") or key
-                        call["call_id"] = event.get("call_id") or event.get("item_id") or key
-                        call["name"] = event.get("name")
-                        call["arguments"] = event.get("arguments", call.get("arguments", "") or "{}")
-                    elif event_type == "response.completed":
-                        completed_response = event.get("response") or {}
-                        break
-        except (urllib.error.URLError, RemoteDisconnected) as exc:
-            raise ModelStreamIncompleteError(
-                "stream_incomplete: OpenAI-compatible stream was interrupted before response.completed.\n"
-                f"Base URL: {self.base_url}\n"
-                f"Model: {self.model}\n"
-                f"Cause: {_connection_error_detail(exc)}"
-            ) from exc
+            break
 
-        if completed_response is None:
-            raise ModelStreamIncompleteError(
-                "stream_incomplete: OpenAI-compatible stream ended without response.completed"
-            )
         data = completed_response
-        if data.get("error"):
-            raise RuntimeError(f"OpenAI-compatible streaming error: {data['error']}")
         metadata = {
             "prompt_cache_supported": self.supports_prompt_cache,
             "prompt_cache_key": prompt_cache_key,
@@ -731,7 +785,7 @@ class OpenAICompatibleModelClient:
                         structured_output=structured_output,
                     )
                 raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
+            except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
                 if attempt < attempts - 1:
                     time.sleep(OPENAI_RETRY_DELAYS[attempt])
                     continue

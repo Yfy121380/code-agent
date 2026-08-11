@@ -391,7 +391,13 @@ def run_cli(args, ui, agent_holder):
             review_focus = user_input[len("/review") :].strip()
             print()
             try:
-                agent.ask(manual_review_request(review_focus))
+                # /review is a runtime-generated turn, not an implementation
+                # request. Keep its optional focus without guessing which
+                # earlier user request describes the current changes.
+                agent.ask(
+                    manual_review_request(review_focus),
+                    source_user_request="",
+                )
             except KeyboardInterrupt:
                 print("\ninterrupted")
             except RuntimeError as exc:

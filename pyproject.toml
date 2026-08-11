@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 codemate = "codemate.cli:main"
+codemate-bridge = "codemate.bridge.server:main"
 
 [dependency-groups]
 dev = [

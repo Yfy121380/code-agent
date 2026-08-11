@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected
 import urllib.error
 import urllib.request
 
@@ -302,7 +302,7 @@ class AnthropicCompatibleModelClient:
                     time.sleep(0.5 * (attempt + 1))
                     continue
                 raise RuntimeError(f"Anthropic-compatible streaming request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
+            except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
                 if attempt < attempts - 1:
                     time.sleep(0.5 * (attempt + 1))
                     continue
@@ -359,7 +359,7 @@ class AnthropicCompatibleModelClient:
                     elif event_type == "message_stop":
                         message_stopped = True
                         break
-        except (urllib.error.URLError, RemoteDisconnected) as exc:
+        except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
             raise ModelStreamIncompleteError(
                 "stream_incomplete: Anthropic-compatible stream was interrupted before message_stop.\n"
                 f"Base URL: {self.base_url}\n"
@@ -416,7 +416,7 @@ class AnthropicCompatibleModelClient:
                     time.sleep(0.5 * (attempt + 1))
                     continue
                 raise RuntimeError(f"Anthropic-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
+            except (urllib.error.URLError, RemoteDisconnected, IncompleteRead) as exc:
                 if attempt < attempts - 1:
                     time.sleep(0.5 * (attempt + 1))
                     continue

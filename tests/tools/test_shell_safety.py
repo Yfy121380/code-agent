@@ -523,3 +523,20 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
 
     assert secret not in result
     assert "missing" in result
+
+
+def test_shell_environment_uses_tool_path_instead_of_backend_path(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="full")
+
+    with patch.dict(
+        os.environ,
+        {
+            "PATH": "/codemate/.venv/bin:/usr/bin",
+            "CODEMATE_SHELL_PATH": "/project/.venv/bin:/usr/bin",
+        },
+        clear=False,
+    ):
+        environment = agent.shell_env()
+
+    assert environment["PATH"] == "/project/.venv/bin:/usr/bin"
+    assert "CODEMATE_SHELL_PATH" not in environment

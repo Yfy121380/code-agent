@@ -249,6 +249,11 @@ class RuntimeLoopMixin:
         }
         if content_blocks:
             tool_record["content_blocks"] = content_blocks
+        # UI metadata 不进入工具正文，但会随会话恢复重新显示单次修改片段。
+        if isinstance(metadata.get("change_preview"), dict):
+            tool_record["ui_metadata"] = {
+                "change_preview": dict(metadata["change_preview"]),
+            }
         self.record(tool_record)
         self.flush_pending_internal_context()
         self.run_store.write_task_state(task_state)
@@ -269,11 +274,16 @@ class RuntimeLoopMixin:
             },
         )
 
-    def ask(self, user_message):
-        """Run one user turn and always leave a terminal run state behind."""
+    def ask(self, user_message, *, source_user_request=None, editor_context=""):
+        """Run one turn while retaining its external user request separately."""
         run_started_at = time.monotonic()
         try:
-            return self._run_agent_loop(user_message, run_started_at)
+            return self._run_agent_loop(
+                user_message,
+                run_started_at,
+                source_user_request=source_user_request,
+                editor_context=editor_context,
+            )
         except KeyboardInterrupt as exc:
             self._finish_failed_run(
                 self.current_task_state,
@@ -314,8 +324,17 @@ class RuntimeLoopMixin:
                 run_started_at,
             )
             raise RuntimeError(f"Agent run failed unexpectedly: {exc}") from exc
+        finally:
+            self.finish_change_tracking()
 
-    def _run_agent_loop(self, user_message, run_started_at):
+    def _run_agent_loop(
+        self,
+        user_message,
+        run_started_at,
+        *,
+        source_user_request=None,
+        editor_context="",
+    ):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
         为什么存在：
@@ -337,9 +356,15 @@ class RuntimeLoopMixin:
         """
         # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
         self._current_conversation_id = self.new_conversation_id()
-        task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
+        task_state = TaskState.create(
+            run_id=self.new_run_id(),
+            task_id=self.new_task_id(),
+            user_request=user_message,
+            source_user_request=source_user_request,
+        )
         self.current_task_state = task_state
         self.current_run_dir = self.run_store.start_run(task_state)
+        self.begin_change_tracking(task_state)
         self.emit_trace(
             task_state,
             "run_started",
@@ -348,6 +373,18 @@ class RuntimeLoopMixin:
                 "user_request": clip(user_message, 300),
             },
         )
+        if str(editor_context or "").strip():
+            self.record(
+                {
+                    "role": "user",
+                    "kind": "editor_context",
+                    "content": str(editor_context).strip(),
+                    "created_at": now(),
+                }
+            )
+        # Keep the actual request as the final user message. Besides matching
+        # model semantics, compaction can then pin the correct message rather
+        # than the preceding editor evidence block.
         self.record({"role": "user", "content": user_message, "created_at": now()})
         self.retrieve_long_term_memory_for_request(user_message, task_state)
 

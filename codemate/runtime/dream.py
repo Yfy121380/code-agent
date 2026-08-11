@@ -207,9 +207,21 @@ class DreamMixin:
                 return result
 
             try:
-                write_result = memorylib.append_candidate_memories(self.root, candidates)
                 with self._session_lock:
-                    checkpoint = memorylib.mark_candidate_extracted(self.session, conversations)
+                    if self._closed:
+                        return {
+                            "status": "skipped",
+                            "reason": "runtime_closed",
+                            "attempts": attempts,
+                        }
+                    write_result = memorylib.append_candidate_memories(
+                        self.root,
+                        candidates,
+                    )
+                    checkpoint = memorylib.mark_candidate_extracted(
+                        self.session,
+                        conversations,
+                    )
                     self.session_path = self.session_store.save(self.session)
             except Exception as exc:
                 result = {

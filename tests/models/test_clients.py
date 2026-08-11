@@ -5,6 +5,7 @@
 """
 
 import json
+from http.client import IncompleteRead
 import urllib.error
 import urllib.request
 
@@ -51,6 +52,19 @@ class InterruptedHTTPResponse(FakeHTTPResponse):
             raise urllib.error.URLError("connection reset")
         self._read_count += 1
         return super().readline()
+
+
+class IncompleteReadHTTPResponse(FakeHTTPResponse):
+    def readline(self):
+        raise IncompleteRead(b"", 1)
+
+
+class IncompleteBodyResponse(FakeHTTPResponse):
+    def __init__(self):
+        super().__init__("")
+
+    def read(self):
+        raise IncompleteRead(b"", 1)
 
 
 def test_openai_responses_commentary_only_is_not_final():
@@ -258,6 +272,10 @@ def test_anthropic_tool_result_can_include_image_blocks(tmp_path):
 def test_common_model_capabilities_are_configured():
     assert model_capability("gpt-5.4").supports_images is True
     assert model_capability("gpt-5.5").openai_reasoning_effort == "high"
+    assert model_capability("gpt-5.6-sol").context_tokens == 258_000
+    assert model_capability("gpt-5.6-sol").supports_streaming is True
+    assert model_capability("gpt-5.6-sol").supports_images is True
+    assert model_capability("gpt-5.6-sol").openai_reasoning_effort == "xhigh"
     assert model_capability("claude-sonnet-4-6").supports_images is True
     assert model_capability("claude-opus-4-8").anthropic_effort == "high"
     assert model_capability("deepseek-v4-pro").supports_images is False
@@ -280,6 +298,31 @@ def test_openai_reasoning_effort_is_added_for_reasoning_models(monkeypatch):
     assert response.text == "ok"
     assert client.supports_images is True
     assert captured["payload"]["reasoning"] == {"effort": "high"}
+
+
+def test_gpt_5_6_sol_uses_xhigh_reasoning(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(
+            {"output_text": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = OpenAICompatibleModelClient(
+        "gpt-5.6-sol",
+        "https://example.test/v1",
+        "",
+        None,
+        30,
+    )
+
+    response = client.complete("hello", 100)
+
+    assert response.text == "ok"
+    assert captured["payload"]["reasoning"] == {"effort": "xhigh"}
 
 
 def test_openai_custom_endpoint_receives_prompt_cache_key(monkeypatch):
@@ -322,6 +365,24 @@ def test_openai_responses_retries_transient_connection_errors(monkeypatch):
     assert delays == list(OPENAI_RETRY_DELAYS)
 
 
+def test_openai_responses_retries_incomplete_http_body(monkeypatch):
+    attempts = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        if len(attempts) == 1:
+            return IncompleteBodyResponse()
+        return FakeHTTPResponse({"output_text": "ok", "usage": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.openai.time.sleep", lambda _delay: None)
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    assert client.complete("hello", 100).text == "ok"
+    assert len(attempts) == 2
+
+
 def test_openai_connection_error_includes_underlying_reason(monkeypatch):
     def fake_urlopen(request, timeout):
         del request, timeout
@@ -360,6 +421,31 @@ def test_anthropic_effort_is_added_for_claude_but_not_deepseek(monkeypatch):
     assert "cache_control" not in payloads[1]
     assert "thinking" not in payloads[0]
     assert "thinking" not in payloads[1]
+
+
+def test_anthropic_retries_incomplete_http_body(monkeypatch):
+    attempts = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        if len(attempts) == 1:
+            return IncompleteBodyResponse()
+        return FakeHTTPResponse(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.anthropic.time.sleep", lambda _delay: None)
+    client = AnthropicCompatibleModelClient(
+        "claude-sonnet-4-6", "https://example.test/v1", "", None, 30
+    )
+
+    assert client.complete("hello", 100).text == "ok"
+    assert len(attempts) == 2
 
 
 def test_anthropic_prompt_cache_marks_system_and_automatic_breakpoint(monkeypatch):
@@ -488,6 +574,90 @@ def test_openai_responses_streaming_yields_text_delta_and_done_response(monkeypa
     assert client.last_completion_metadata["input_tokens"] == 2
 
 
+def test_openai_stream_retries_provider_overload_before_output(monkeypatch):
+    attempts = []
+    delays = []
+    overloaded = (
+        'data: {"type":"error","error":{"code":"server_is_overloaded",'
+        '"message":"try again later","type":"service_unavailable_error"}}\n\n'
+    )
+    completed = (
+        'data: {"type":"response.completed","response":{"output_text":"ok",'
+        '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+    )
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        body = overloaded if len(attempts) == 1 else completed
+        return FakeHTTPResponse(body, content_type="text/event-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.openai.time.sleep", delays.append)
+    client = OpenAICompatibleModelClient("gpt-5.6-sol", "https://example.test/v1", "", None, 30)
+
+    events = list(client.stream_complete("hello", 100))
+
+    assert len(attempts) == 2
+    assert delays == [OPENAI_RETRY_DELAYS[0]]
+    assert events[-1].kind == "done"
+    assert events[-1].response.text == "ok"
+
+
+def test_openai_stream_retries_nested_response_failed_error(monkeypatch):
+    attempts = []
+    delays = []
+    failed = (
+        'data: {"type":"response.failed","response":{"status":"failed","error":'
+        '{"code":"server_is_overloaded","message":"nested overload",'
+        '"type":"service_unavailable_error"}}}\n\n'
+    )
+    completed = (
+        'data: {"type":"response.completed","response":{"output_text":"ok",'
+        '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+    )
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        body = failed if len(attempts) == 1 else completed
+        return FakeHTTPResponse(body, content_type="text/event-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("codemate.models.openai.time.sleep", delays.append)
+    client = OpenAICompatibleModelClient("gpt-5.6-sol", "https://example.test/v1", "", None, 30)
+
+    events = list(client.stream_complete("hello", 100))
+
+    assert len(attempts) == 2
+    assert delays == [OPENAI_RETRY_DELAYS[0]]
+    assert events[-1].response.text == "ok"
+
+
+def test_openai_stream_does_not_retry_overload_after_visible_output(monkeypatch):
+    attempts = []
+    body = "\n\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            'data: {"type":"error","error":{"code":"server_is_overloaded",'
+            '"message":"try again later","type":"service_unavailable_error"}}',
+        ]
+    ) + "\n\n"
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        attempts.append(1)
+        return FakeHTTPResponse(body, content_type="text/event-stream")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = OpenAICompatibleModelClient("gpt-5.6-sol", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(RuntimeError, match="try again later"):
+        list(client.stream_complete("hello", 100))
+
+    assert len(attempts) == 1
+
+
 def test_openai_stream_without_response_completed_is_rejected(monkeypatch):
     body = (
         'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
@@ -511,6 +681,19 @@ def test_openai_interrupted_stream_is_reported_as_incomplete(monkeypatch):
         "urlopen",
         lambda request, timeout: InterruptedHTTPResponse(body, fail_after_lines=2),
     )
+    client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
+
+    with pytest.raises(ModelStreamIncompleteError, match="stream_incomplete"):
+        list(client.stream_complete("hello", 100))
+
+
+def test_openai_incomplete_http_stream_is_reported_as_incomplete(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: IncompleteReadHTTPResponse(""),
+    )
+    monkeypatch.setattr("codemate.models.openai.time.sleep", lambda _delay: None)
     client = OpenAICompatibleModelClient("gpt-5.4", "https://example.test/v1", "", None, 30)
 
     with pytest.raises(ModelStreamIncompleteError, match="stream_incomplete"):

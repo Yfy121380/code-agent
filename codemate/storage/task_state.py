@@ -32,6 +32,7 @@ class TaskState:
     run_id: str
     task_id: str
     user_request: str
+    source_user_request: str = ""
     status: str = STATUS_RUNNING
     tool_steps: int = 0
     attempts: int = 0
@@ -40,17 +41,30 @@ class TaskState:
     final_answer: str = ""
 
     @classmethod
-    def create(cls, task_id, user_request, run_id=""):
+    def create(cls, task_id, user_request, run_id="", source_user_request=None):
         if not run_id:
             run_id = "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
-        return cls(run_id=run_id, task_id=task_id, user_request=user_request)
+        if source_user_request is None:
+            source_user_request = user_request
+        return cls(
+            run_id=run_id,
+            task_id=task_id,
+            user_request=str(user_request),
+            source_user_request=str(source_user_request),
+        )
 
     @classmethod
     def from_dict(cls, data):
+        source_user_request = data.get("source_user_request")
+        if source_user_request is None:
+            source_user_request = data.get("user_request", "")
         return cls(
             run_id=str(data.get("run_id", "")),
             task_id=str(data.get("task_id", "")),
             user_request=str(data.get("user_request", "")),
+            # Older task states predate runtime-generated request tracking. In
+            # those records the persisted request is also the best source.
+            source_user_request=str(source_user_request),
             status=str(data.get("status", STATUS_RUNNING)),
             tool_steps=int(data.get("tool_steps", 0)),
             attempts=int(data.get("attempts", 0)),
@@ -104,6 +118,7 @@ class TaskState:
             "run_id": self.run_id,
             "task_id": self.task_id,
             "user_request": self.user_request,
+            "source_user_request": self.source_user_request,
             "status": self.status,
             "tool_steps": self.tool_steps,
             "attempts": self.attempts,

@@ -40,6 +40,11 @@ def test_patch_file_allows_freshly_read_file(tmp_path):
 
     assert result == "patched target.txt"
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "beta\n"
+    preview = agent._last_tool_result_metadata["change_preview"]
+    assert preview["path"] == "target.txt"
+    assert preview["additions"] == 1
+    assert preview["deletions"] == 1
+    assert "+beta" in preview["diff"]
 
 def test_patch_file_rejects_stale_read_after_external_change(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")
@@ -63,6 +68,9 @@ def test_write_file_allows_new_file_without_prior_read(tmp_path):
 
     assert result == "wrote created.txt (4 chars)"
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "new\n"
+    preview = agent._last_tool_result_metadata["change_preview"]
+    assert preview["status"] == "added"
+    assert preview["additions"] == 1
 
 def test_write_file_requires_fresh_read_for_existing_file(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")

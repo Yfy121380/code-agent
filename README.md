@@ -96,7 +96,7 @@ uv run codemate --resume latest
 
 ```python
 PROVIDER_MODELS = {
-    "openai": ["gpt-5.4", "gpt-5.5"],
+    "openai": ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol"],
     "anthropic": ["claude-sonnet-4-6", "claude-opus-4-8"],
     "deepseek": ["deepseek-v4-pro"],
 }
@@ -280,6 +280,7 @@ MCP 工具会在启动时连接 server、发现工具，并包装成普通工具
 
 更详细的设计说明见：
 
+- [Claude Code 与 Codex 默认提示词设计对比](claude-code-vs-codex-default-prompts.md)
 - [Design Overview](docs/设计总览.md)
 - [CLI / UI](docs/modules/01-cli-ui.md)
 - [Model Client](docs/modules/02-model-client.md)

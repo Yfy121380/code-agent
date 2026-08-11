@@ -1,0 +1,9 @@
+# 打包时只保留运行扩展所需的 dist、media 和 manifest，排除源码与开发依赖。
+.vscode/**
+src/**
+webview/**
+node_modules/**
+tsconfig.json
+tsconfig.webview.json
+package-lock.json
+**/*.map

@@ -2,6 +2,7 @@
 # 每个 session 拥有独立目录，目录下保存 session.json 和该会话产生的 runs。
 # 这样排查历史时可以直接从一次会话进入对应的运行工件，而不是在全局 runs 中查找。
 
+import copy
 import json
 from pathlib import Path
 import re
@@ -33,6 +34,12 @@ class SessionStore:
 
     def backup_path(self, session_id):
         return self.session_dir(session_id) / "session.json.bak"
+
+    def request_checkpoint_path(self, session_id):
+        return self.session_dir(session_id) / "request_checkpoint.json"
+
+    def transcript_path(self, session_id):
+        return self.session_dir(session_id) / "transcript.jsonl"
 
     def runs_dir(self, session_id):
         return self.session_dir(session_id) / "runs"
@@ -79,6 +86,153 @@ class SessionStore:
                 stacklevel=2,
             )
             return recovered
+
+    def save_request_checkpoint(self, session, user_request, editor_context=""):
+        """Persist the state immediately before one user request starts.
+
+        The checkpoint lives beside ``session.json`` instead of inside it so a
+        snapshot can never recursively contain an older snapshot. Only the most
+        recent request checkpoint is retained for each session.
+        """
+        session_id = str(session.get("id") or "").strip()
+        if not session_id:
+            raise PersistenceError("cannot checkpoint a session without an id")
+        payload = {
+            "version": 1,
+            "user_request": str(user_request or ""),
+            "editor_context": str(editor_context or ""),
+            "transcript_size": self.transcript_size(session_id),
+            "session": copy.deepcopy(session),
+        }
+        path = self.request_checkpoint_path(session_id)
+        try:
+            with self._write_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(path, payload)
+        except PersistenceError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise PersistenceError(
+                f"could not save request checkpoint for {session_id!r}: {exc}"
+            ) from exc
+        return path
+
+    def load_request_checkpoint(self, session_id):
+        """Load and validate the latest pre-request checkpoint for a session."""
+        path = self.request_checkpoint_path(session_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PersistenceError(
+                f"could not load request checkpoint for {session_id!r}: {exc}"
+            ) from exc
+        snapshot = payload.get("session") if isinstance(payload, dict) else None
+        if not isinstance(snapshot, dict) or str(snapshot.get("id") or "") != str(
+            session_id
+        ):
+            raise PersistenceError(f"invalid request checkpoint for {session_id!r}")
+        return payload
+
+    def request_checkpoint_info(self, session_id):
+        """Return lightweight retry metadata without exposing the snapshot."""
+        payload = self.load_request_checkpoint(session_id)
+        if payload is None:
+            return None
+        return {"user_request": str(payload.get("user_request") or "")}
+
+    def clear_request_checkpoint(self, session_id):
+        """Remove retry state when the conversation is explicitly reset."""
+        try:
+            with self._write_lock:
+                self.request_checkpoint_path(session_id).unlink(missing_ok=True)
+        except OSError as exc:
+            raise PersistenceError(
+                f"could not clear request checkpoint for {session_id!r}: {exc}"
+            ) from exc
+
+    def append_transcript(self, session_id, item):
+        """Append one UI-visible history record without coupling it to compact."""
+        path = self.transcript_path(session_id)
+        try:
+            line = json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+            with self._write_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
+                    handle.flush()
+            return path
+        except (OSError, TypeError, ValueError) as exc:
+            raise PersistenceError(
+                f"could not append transcript for {session_id!r}: {exc}"
+            ) from exc
+
+    def load_transcript(self, session_id):
+        """Load the append-only UI transcript, tolerating a partial final line."""
+        path = self.transcript_path(session_id)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise PersistenceError(
+                f"could not load transcript for {session_id!r}: {exc}"
+            ) from exc
+        records = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                records.append(item)
+        return records
+
+    def transcript_size(self, session_id):
+        """Return a stable byte checkpoint used to roll back the latest request."""
+        try:
+            return self.transcript_path(session_id).stat().st_size
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise PersistenceError(
+                f"could not inspect transcript for {session_id!r}: {exc}"
+            ) from exc
+
+    def truncate_transcript(self, session_id, size):
+        """Restore the transcript to a previously persisted byte boundary."""
+        target = max(0, int(size or 0))
+        path = self.transcript_path(session_id)
+        try:
+            with self._write_lock:
+                if not path.exists():
+                    if target == 0:
+                        return
+                    raise PersistenceError(
+                        f"transcript for {session_id!r} is missing"
+                    )
+                with path.open("r+b") as handle:
+                    if target > handle.seek(0, 2):
+                        raise PersistenceError(
+                            f"transcript checkpoint for {session_id!r} is invalid"
+                        )
+                    handle.truncate(target)
+        except PersistenceError:
+            raise
+        except OSError as exc:
+            raise PersistenceError(
+                f"could not truncate transcript for {session_id!r}: {exc}"
+            ) from exc
+
+    def clear_transcript(self, session_id):
+        try:
+            with self._write_lock:
+                self.transcript_path(session_id).unlink(missing_ok=True)
+        except OSError as exc:
+            raise PersistenceError(
+                f"could not clear transcript for {session_id!r}: {exc}"
+            ) from exc
 
     def latest(self):
         sessions = self.list_sessions()

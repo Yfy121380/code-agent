@@ -33,6 +33,7 @@ def test_slash_command_completer_shows_descriptions_and_inserts_template():
     assert any(str(item.display_text) == "/provider openai" for item in provider_items)
     assert any(str(item.display_text) == "/provider anthropic" for item in provider_items)
     assert any(str(item.display_text) == "/model gpt-5.5" for item in model_items)
+    assert any(str(item.display_text) == "/model gpt-5.6-sol" for item in model_items)
     assert any(str(item.display_text) == "/model claude-opus-4-8" for item in model_items)
     remember = next(item for item in remember_items if str(item.display_text) == "/remember <text>")
     assert remember.text == "/remember "

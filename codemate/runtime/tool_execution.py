@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .. import tools as toolkit
 from ..tools.file_state import has_current_file_state, record_file_state
+from .change_preview import build_change_preview, capture_text_snapshot
 
 
 class ToolExecutionMixin:
@@ -170,6 +171,10 @@ class ToolExecutionMixin:
             return message
         if not asked_for_approval:
             self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
+        edit_path = self.path(args["path"]) if name in {"write_file", "patch_file"} else None
+        if edit_path is not None:
+            self.track_file_edit(edit_path)
+        edit_before = capture_text_snapshot(edit_path) if edit_path is not None else None
         try:
             raw_output = toolkit.normalize_tool_output(tool["run"](args))
             result, truncation_metadata = self.truncate_tool_result(raw_output.content)
@@ -202,6 +207,9 @@ class ToolExecutionMixin:
             if tool_status == "ok" and name in {"read_file", "write_file", "patch_file"}:
                 with self._session_lock:
                     record_file_state(self.session, self.root, args["path"])
+            change_preview = None
+            if tool_status == "ok" and edit_path is not None and edit_before is not None:
+                change_preview = build_change_preview(self.root, edit_path, edit_before)
             self._last_tool_result_content_blocks = content_blocks
             self._last_tool_result_metadata = {
                 "tool_status": tool_status,
@@ -216,6 +224,8 @@ class ToolExecutionMixin:
                 **dict(raw_output.metadata or {}),
                 **truncation_metadata,
             }
+            if change_preview is not None:
+                self._last_tool_result_metadata["change_preview"] = change_preview
             return result
         except Exception as exc:
             security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""

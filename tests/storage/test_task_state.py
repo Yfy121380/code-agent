@@ -18,6 +18,7 @@ def test_task_state_starts_running_with_empty_progress():
     assert state.task_id == "task_001"
     assert state.run_id == "run_001"
     assert state.user_request == "Inspect the repo."
+    assert state.source_user_request == "Inspect the repo."
     assert state.status == "running"
     assert state.tool_steps == 0
     assert state.attempts == 0
@@ -67,3 +68,41 @@ def test_task_state_snapshot_keeps_final_answer():
     assert snapshot["final_answer"] == "Final answer."
     assert snapshot["stop_reason"] == STOP_REASON_FINAL_ANSWER_RETURNED
 
+
+def test_task_state_keeps_runtime_and_source_requests_separate():
+    state = TaskState.create(
+        run_id="run_review",
+        task_id="task_review",
+        user_request="Internal review instruction.",
+        source_user_request="",
+    )
+
+    restored = TaskState.from_dict(state.to_dict())
+
+    assert restored.user_request == "Internal review instruction."
+    assert restored.source_user_request == ""
+
+
+def test_old_task_state_uses_user_request_as_source_request():
+    restored = TaskState.from_dict(
+        {
+            "run_id": "run_old",
+            "task_id": "task_old",
+            "user_request": "Fix the old bug.",
+        }
+    )
+
+    assert restored.source_user_request == "Fix the old bug."
+
+
+def test_null_source_request_uses_persisted_user_request():
+    restored = TaskState.from_dict(
+        {
+            "run_id": "run_null",
+            "task_id": "task_null",
+            "user_request": "Review this change.",
+            "source_user_request": None,
+        }
+    )
+
+    assert restored.source_user_request == "Review this change."

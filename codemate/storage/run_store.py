@@ -1,7 +1,8 @@
 """运行工件落盘。
 
 session.json 负责保存“可恢复的会话状态”；RunStore 负责保存“单次运行的审计工件”，
-目前只包含 task_state 和 trace。两者分开后，恢复现场和复盘证据不会混在一起。
+目前包含 task_state、trace 和可逆文件快照。两者分开后，恢复现场和复盘证据
+不会混在一起，session 也不需要保存文件内容。
 """
 
 import json
@@ -9,6 +10,7 @@ import threading
 from pathlib import Path
 
 from .atomic import PersistenceError, atomic_write_json
+from .change_sets import ChangeSetTracker, apply_change_set, load_change_set
 
 
 def _run_id(value):
@@ -22,6 +24,7 @@ class RunStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._trace_lock = threading.Lock()
+        self._change_lock = threading.Lock()
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
@@ -62,3 +65,24 @@ class RunStore:
 
     def load_task_state(self, task_id):
         return json.loads(self.task_state_path(task_id).read_text(encoding="utf-8"))
+
+    def begin_change_set(self, task_state, workspace_root, conversation_id):
+        """Start a reversible workspace snapshot inside the current run."""
+        return ChangeSetTracker(
+            workspace_root,
+            self.run_dir(task_state),
+            _run_id(task_state),
+            conversation_id,
+        ).begin()
+
+    def load_change_set(self, run_id, workspace_root):
+        with self._change_lock:
+            return load_change_set(self.run_dir(run_id), workspace_root)
+
+    def apply_change_set(self, run_id, workspace_root, action):
+        with self._change_lock:
+            return apply_change_set(
+                self.run_dir(run_id),
+                workspace_root,
+                action,
+            )

@@ -20,10 +20,10 @@ node_modules/
 .ruff_cache/
 .coverage
 htmlcov/
-docs/case-studies/
-docs/case_records/
-.vscode/
-vscode-extension/
+docs/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
 
 # Temporary files
 .mini-coding-agent

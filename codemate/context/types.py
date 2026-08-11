@@ -30,6 +30,7 @@ INTERNAL_CONTEXT_MESSAGE_KINDS = frozenset(
         "todo_context",
         "plan_context",
         "todo_invalidated_context",
+        "editor_context",
     }
 )
 HISTORY_SUMMARY_SECTIONS = (

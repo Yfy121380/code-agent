@@ -30,6 +30,7 @@ SLASH_COMMANDS = [
     ("/model", "/model", "Show current model and available models."),
     ("/model gpt-5.4", "/model gpt-5.4", "Use gpt-5.4."),
     ("/model gpt-5.5", "/model gpt-5.5", "Use gpt-5.5."),
+    ("/model gpt-5.6-sol", "/model gpt-5.6-sol", "Use gpt-5.6-sol."),
     ("/model claude-sonnet-4-6", "/model claude-sonnet-4-6", "Use claude-sonnet-4-6."),
     ("/model claude-opus-4-8", "/model claude-opus-4-8", "Use claude-opus-4-8."),
     ("/model deepseek-v4-pro", "/model deepseek-v4-pro", "Use deepseek-v4-pro."),

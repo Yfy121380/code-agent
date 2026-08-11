@@ -13,6 +13,7 @@ import textwrap
 import uuid
 import hashlib
 import threading
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from ..ui import NullUI
 from .. import tools as toolkit
 from ..workspace import MAX_HISTORY, clip, now
 from .approvals import ApprovalMixin
+from .changes import ChangeTrackingMixin
 from .compaction import HistoryCompactionMixin
 from .dream import DreamMixin
 from .loop import RuntimeLoopMixin
@@ -50,6 +52,7 @@ from .tool_execution import ToolExecutionMixin
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
+SHELL_PATH_OVERRIDE_ENV = "CODEMATE_SHELL_PATH"
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
 DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
 MAX_SKILL_DESCRIPTION_CHARS = 250
@@ -85,7 +88,7 @@ class PromptPrefix:
     tool_signature: str
 
 
-class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin, PlanModeMixin):
+class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, HistoryCompactionMixin, PlanModeMixin, ChangeTrackingMixin):
     def __init__(
         self,
         model_client,
@@ -156,6 +159,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "read_files": {},
             "todos": [],
             "invoked_skills": [],
+            "change_sets": [],
             "temporary_permissions": default_temporary_permissions(),
         }
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
@@ -169,6 +173,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # 候选提取一次只能处理一批，避免后台提取与 compact 前同步提取重复追加。
         self._memory_candidate_extract_lock = threading.RLock()
         self._background_threads = set()
+        self._closed = False
+        self._current_change_tracker = None
+        self._latest_change_set = None
         # 补齐字段
         self._ensure_session_shape()
         # 本会话内临时加入的权限规则，不写回 settings.json。
@@ -279,6 +286,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("read_files", {})
         self.session.setdefault("todos", [])
         self.session.setdefault("invoked_skills", [])
+        self.session.setdefault("change_sets", [])
         temporary_permissions = self.session.setdefault("temporary_permissions", default_temporary_permissions())
         permissions = temporary_permissions.setdefault("permissions", {})
         for access in ("read", "write"):
@@ -748,6 +756,53 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             self.session["history"].append(item)
             self.session["updated_at"] = now()
             self.session_path = self.session_store.save(self.session)
+            transcript_item = self._transcript_item(item)
+            if transcript_item is None:
+                return
+            try:
+                self.session_store.append_transcript(
+                    self.session["id"], transcript_item
+                )
+            except Exception as exc:
+                # Transcript only powers UI replay; a display-log failure must
+                # not turn a successfully persisted agent message into an error.
+                warnings.warn(
+                    f"Could not append session transcript: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    @staticmethod
+    def _transcript_item(item):
+        """Project a model message into the smaller, durable UI transcript."""
+        if (
+            str(item.get("role") or "") == "user"
+            and str(item.get("kind") or "").endswith("_context")
+        ):
+            return None
+        projected = dict(item)
+        calls = []
+        for raw_call in item.get("tool_calls") or []:
+            if not isinstance(raw_call, dict):
+                continue
+            call = dict(raw_call)
+            if str(call.get("name") or "") in {"write_file", "patch_file"}:
+                args = call.get("args")
+                if isinstance(args, dict):
+                    call["args"] = {"path": str(args.get("path") or "")}
+            calls.append(call)
+        if calls:
+            projected["tool_calls"] = calls
+        return projected
+
+    def save_request_checkpoint(self, user_request, editor_context=""):
+        """Snapshot the recoverable session state before a user turn begins."""
+        with self._session_lock:
+            return self.session_store.save_request_checkpoint(
+                self.session,
+                user_request,
+                editor_context,
+            )
 
     @staticmethod
     def new_conversation_id():
@@ -920,13 +975,17 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         return value
 
     def shell_env(self):
+        """Build the allowlisted tool environment without leaking the backend venv."""
         env = {
             name: os.environ[name]
             for name in self.shell_env_allowlist
             if name in os.environ
         }
         env["PWD"] = str(self.root)
-        if "PATH" not in env and os.environ.get("PATH"):
+        shell_path = os.environ.get(SHELL_PATH_OVERRIDE_ENV, "").strip()
+        if shell_path:
+            env["PATH"] = shell_path
+        elif "PATH" not in env and os.environ.get("PATH"):
             env["PATH"] = os.environ["PATH"]
         return env
 
@@ -1025,16 +1084,29 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             self.session["invoked_skills"] = []
             self.session["updated_at"] = now()
             self.session_store.save(self.session)
+            self.session_store.clear_transcript(self.session["id"])
+            self.session_store.clear_request_checkpoint(self.session["id"])
 
     def close(self):
         # 统一释放 runtime 持有的外部资源。
         # 目前主要是 MCP 的后台事件循环和 stdio/http/sse 连接，后续如果接入
         # 其他长生命周期资源，也可以继续收口在这里。
+        self.quiesce_background_session_writes()
         try:
             toolkit.close_mcp_connections(self)
         finally:
             for thread in list(self._background_threads):
                 thread.join(timeout=1)
+
+    def quiesce_background_session_writes(self):
+        """Prevent stale maintenance workers from persisting this session."""
+        with self._session_lock:
+            self._closed = True
+
+    def resume_background_session_writes(self):
+        """Undo quiescing if construction of a replacement runtime fails."""
+        with self._session_lock:
+            self._closed = False
 
     def path(self, raw_path):
         return toolkit.resolve_tool_path(self, raw_path, access="read").path

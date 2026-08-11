@@ -17,7 +17,7 @@ class ModelCapability:
 
 
 PROVIDER_MODELS = {
-    "openai": ("gpt-5.4", "gpt-5.5"),
+    "openai": ("gpt-5.4", "gpt-5.5", "gpt-5.6-sol"),
     "anthropic": ("claude-sonnet-4-6", "claude-opus-4-8"),
     "deepseek": ("deepseek-v4-pro",),
 }
@@ -45,6 +45,13 @@ MODEL_CAPABILITIES = {
         supports_images=True,
         supports_reasoning=True,
         openai_reasoning_effort="high",
+    ),
+    "gpt-5.6-sol": ModelCapability(
+        context_tokens=258_000,
+        supports_streaming=True,
+        supports_images=True,
+        supports_reasoning=True,
+        openai_reasoning_effort="xhigh",
     ),
     "claude-sonnet-4-6": ModelCapability(
         context_tokens=500_000,

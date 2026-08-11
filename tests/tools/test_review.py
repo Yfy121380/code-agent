@@ -18,6 +18,7 @@ from codemate.runtime.review import (
     REVIEW_ALLOWED_TOOLS,
     REVIEW_FINALIZATION_RECOVERY_REQUEST,
     manual_review_request,
+    review_system_prompt,
 )
 from codemate.tools import DELEGATE_TOOL_SPEC, REVIEW_TOOL_SPEC, SUBAGENT_MAX_STEPS
 from codemate.ui import NullUI
@@ -69,6 +70,14 @@ class RecordingReviewUI:
 
     def final_answer(self, text):
         pass
+
+
+def test_review_prompt_requires_informative_chinese_progress_updates():
+    prompt = review_system_prompt()
+
+    assert "## Progress updates" in prompt
+    assert "Write all progress commentary in Chinese." in prompt
+    assert "目前确认状态恢复同时影响 session 持久化和权限重建" in prompt
 
 
 def test_subagent_step_limit_is_runtime_owned():
@@ -178,6 +187,13 @@ def test_review_child_tool_allowlist_blocks_direct_file_writes(tmp_path):
     result = agent.ask("Review the current changes.")
 
     assert result == "Review found no actionable issues."
+    review_prompt = next(
+        prompt
+        for prompt in agent.model_client.prompts
+        if "Original user request:" in prompt
+    )
+    assert "Original user request:\n\nReview the current changes." in review_prompt
+    assert "Optional review target:\n\nCheck the changed ownership boundary." in review_prompt
     assert not target.exists()
     assert ui.commentary_messages == [
         "I found the changed ownership boundary and will inspect its caller."
@@ -302,9 +318,56 @@ def test_review_runtime_has_dedicated_prompt_and_tools(tmp_path):
     assert "Ignore Codemate-generated runtime metadata such as `.codemate/`" in prompt
     assert "Do not report an interpretation as a defect" in prompt
     assert "The optional review target is an investigation focus" in prompt
+    assert "It must not override or reinterpret the original user request" in prompt
+    assert "No original user request is available" in prompt
     assert "Optional review target:\n\nCheck adjacent behavior." in prompt
     tool_names = {item["name"] for item in agent.model_client.tool_specs[0]}
     assert tool_names == {"list_files", "read_file", "grep", "run_shell", "todo_write", "todo_list"}
+
+
+def test_review_preserves_multiline_original_request_without_parent_history(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelResponse.tool_call("review", {"target": "Check both branches."}),
+            ModelResponse.final("No actionable issues found."),
+            ModelResponse.final("Done."),
+        ],
+    )
+
+    result = agent.ask("Fix branch A.\n\nPreserve branch B.")
+
+    assert result == "Done."
+    review_prompt = next(
+        prompt
+        for prompt in agent.model_client.prompts
+        if "Original user request:" in prompt
+    )
+    assert (
+        "Original user request:\n\nFix branch A.\n\nPreserve branch B.\n\n"
+        in review_prompt
+    )
+    assert "Optional review target:\n\nCheck both branches." in review_prompt
+    child_sessions = [
+        item for item in agent.session_store.root.iterdir() if item.name.startswith("review-")
+    ]
+    child_session = json.loads(
+        (child_sessions[0] / "session.json").read_text(encoding="utf-8")
+    )
+    child_user_messages = [
+        item["content"]
+        for item in child_session["history"]
+        if item.get("role") == "user"
+    ]
+    assert child_user_messages == [
+        "Original user request:\n\n"
+        "Fix branch A.\n\n"
+        "Preserve branch B.\n\n"
+        "Optional review target:\n\n"
+        "Check both branches.\n\n"
+        "Review all relevant current staged, unstaged, and untracked project\n"
+        "changes. Follow the required review phases and return the final review."
+    ]
 
 
 def test_review_retries_final_report_once_without_tools_after_collected_evidence(
@@ -342,6 +405,9 @@ def test_review_retries_final_report_once_without_tools_after_collected_evidence
     assert "review_status: ok" in result
     assert "No actionable issues found." in result
     assert captured["prompts"] == [
+        "Original user request:\n\n"
+        "No original user request is available. Review the current changes using "
+        "repository evidence and the optional target.\n\n"
         "Optional review target:\n\nCheck the changed behavior.\n\n"
         "Review all relevant current staged, unstaged, and untracked project\n"
         "changes. Follow the required review phases and return the final review.",
@@ -479,7 +545,7 @@ def test_manual_review_request_only_adds_nonempty_focus():
 
 def test_review_slash_command_routes_default_and_focused_requests(tmp_path, monkeypatch):
     agent = build_agent(tmp_path, [])
-    prompts = []
+    calls = []
     inputs = iter(["/review", "/review 重点检查权限绕过", "/exit"])
 
     class FakePromptSession:
@@ -490,13 +556,20 @@ def test_review_slash_command_routes_default_and_focused_requests(tmp_path, monk
             return next(inputs)
 
     monkeypatch.setattr(cli, "PromptSession", FakePromptSession)
-    monkeypatch.setattr(agent, "ask", lambda prompt: prompts.append(prompt) or "done")
+    monkeypatch.setattr(
+        agent,
+        "ask",
+        lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "done",
+    )
     args = type("Args", (), {"provider": "openai", "prompt": [], "host": ""})()
 
     assert cli.run_cli(args, NullUI(), {"agent": agent}) == 0
-    assert prompts == [
-        MANUAL_REVIEW_REQUEST,
-        manual_review_request("重点检查权限绕过"),
+    assert calls == [
+        (MANUAL_REVIEW_REQUEST, {"source_user_request": ""}),
+        (
+            manual_review_request("重点检查权限绕过"),
+            {"source_user_request": ""},
+        ),
     ]
 
 

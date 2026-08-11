@@ -62,6 +62,35 @@ def test_record_adds_message_and_conversation_ids(tmp_path):
 
     assert all(item.get("id", "").startswith("msg_") for item in agent.session["history"])
     assert agent.session["history"][0]["conversation_id"] == agent.session["history"][1]["conversation_id"]
+    assert len(agent.session_store.load_transcript(agent.session["id"])) == 2
+
+
+def test_transcript_omits_internal_context_and_large_edit_arguments(tmp_path):
+    agent = build_agent(tmp_path)
+
+    agent.record(
+        {
+            "role": "user",
+            "kind": "runtime_context",
+            "content": "internal",
+        }
+    )
+    agent.record(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-edit",
+                    "name": "write_file",
+                    "args": {"path": "app.py", "content": "large body"},
+                }
+            ],
+        }
+    )
+
+    transcript = agent.session_store.load_transcript(agent.session["id"])
+    assert len(transcript) == 1
+    assert transcript[0]["tool_calls"][0]["args"] == {"path": "app.py"}
 
 
 def test_candidate_extraction_appends_jsonl_and_updates_session_checkpoint(tmp_path):
