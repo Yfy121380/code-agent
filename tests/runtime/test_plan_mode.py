@@ -59,6 +59,8 @@ def test_plan_mode_switches_policy_prefix_and_visible_tools(tmp_path):
 
     assert "write_file" in normal_names
     assert "submit_plan" not in normal_names
+    assert "`path/to/file.py:55`" in agent.prefix
+    assert "`file.py (line 55)`" in agent.prefix
     assert agent.enter_plan_mode() is True
 
     plan_names = {item["name"] for item in agent.model_tools()}
@@ -73,6 +75,7 @@ def test_plan_mode_switches_policy_prefix_and_visible_tools(tmp_path):
     assert not any(name.startswith("mcp__") for name in plan_names)
     assert "## Planning workflow" in agent.prefix
     assert "After editing code" not in agent.prefix
+    assert "`path/to/file.py:55`" not in agent.prefix
     assert "must each be the only tool call" in agent.prefix
     plan_specs = {item["name"]: item for item in agent.model_tools()}
     assert "tests, builds, formatters" in plan_specs["run_shell"]["description"]

@@ -508,6 +508,31 @@ summary:focus-visible {
   text-underline-offset: 2px;
 }
 
+/* 模型输出的 `路径:行号` 使用紧凑文本链接，点击后由 Extension Host 定位代码。 */
+.message-content .code-location {
+  display: inline;
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  color: var(--cm-accent);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.message-content .code-location:hover:not(:disabled) {
+  color: #afd0ff;
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* 已完成回答允许文本选择；选区附近显示轻量评论编辑器。 */
 .final-message.annotatable .message-content {
   cursor: text;

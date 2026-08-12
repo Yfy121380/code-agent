@@ -507,6 +507,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             Answer rules:
             - Never invent tool results, file changes, command outputs, test results, or source evidence.
             - Answer in the user's language unless the user asks otherwise.
+            - When referring to local code, use `path/to/file.py:55` for files inside the workspace and `/absolute/path/to/file.py:55` for files outside it. Line numbers are 1-based.
+            - If no specific line is relevant, provide only the path. Do not use ambiguous forms such as `file.py (line 55)` or paths relative to the current file.
             - Match the amount of detail to the user's request and the work performed.
             - For simple questions or small confirmations, answer directly and briefly.
             - For completed code edits, include what changed, important files or functions, verification performed, and any remaining caveats.

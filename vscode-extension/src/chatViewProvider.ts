@@ -1,6 +1,7 @@
 /** 连接 CodeMate Webview 和 Extension Host 中的后端进程。 */
 
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 
 import { ChangeDocumentProvider } from './changeDocumentProvider';
 import { CodeMateProcess } from './codemateProcess';
@@ -416,14 +417,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /** 打开工作区相对路径对应的诊断位置，并定位到从 1 开始的行号。 */
-  private async openLocation(relativePath: string, line: number): Promise<void> {
+  /**
+   * 打开模型或诊断引用的本地代码位置。
+   *
+   * 相对路径始终以当前工作区为基准且不得通过 `..` 越界；绝对路径保留原语义，
+   * 以支持用户要求模型解释工作区外文件。实际行号会收敛到文档范围内。
+   */
+  private async openLocation(requestedPath: string, line: number): Promise<void> {
     const workspace = vscode.workspace.workspaceFolders?.[0];
-    if (!workspace || !relativePath) return;
-    const uri = vscode.Uri.joinPath(workspace.uri, relativePath);
+    const rawPath = requestedPath.trim();
+    if (!workspace || !rawPath || rawPath.includes('\0')) return;
+
+    const workspaceRoot = workspace.uri.fsPath;
+    const absolutePath = path.isAbsolute(rawPath)
+      ? path.resolve(rawPath)
+      : path.resolve(workspaceRoot, rawPath);
+    if (!path.isAbsolute(rawPath)) {
+      const relative = path.relative(workspaceRoot, absolutePath);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error('Relative code location is outside the current workspace.');
+      }
+    }
+
+    const uri = vscode.Uri.file(absolutePath);
     const document = await vscode.workspace.openTextDocument(uri);
     const editor = await vscode.window.showTextDocument(document);
-    const position = new vscode.Position(Math.max(0, line - 1), 0);
+    const requestedLine = Number.isFinite(line) ? Math.floor(line) : 1;
+    const lineIndex = Math.min(
+      Math.max(0, requestedLine - 1),
+      Math.max(0, document.lineCount - 1),
+    );
+    const position = new vscode.Position(lineIndex, 0);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(new vscode.Range(position, position));
   }

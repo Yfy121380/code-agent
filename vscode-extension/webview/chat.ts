@@ -175,6 +175,54 @@ function renderMarkdown(target: HTMLElement, text: string): void {
     link.setAttribute('target', '_blank');
     link.setAttribute('rel', 'noopener noreferrer');
   }
+  enhanceCodeLocations(target);
+}
+
+/**
+ * 将行内代码中的 `路径:行号` 转换为编辑器跳转入口。
+ *
+ * 模型按统一格式输出工作区相对路径或绝对路径。这里只处理完整匹配的行内代码，
+ * 并排除 URL 和代码块，避免把示例代码、端口号等普通文本误识别为文件位置。
+ */
+function enhanceCodeLocations(target: HTMLElement): void {
+  for (const code of target.querySelectorAll<HTMLElement>('code')) {
+    if (code.closest('pre, a, button')) continue;
+    const location = parseCodeLocation(code.textContent || '');
+    if (!location) continue;
+
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'code-location';
+    link.textContent = `${fileName(location.path)} (line ${location.line})`;
+    link.title = `${location.path}:${location.line}`;
+    link.setAttribute('aria-label', `Open ${location.path} at line ${location.line}`);
+    link.addEventListener('click', () => {
+      vscode.postMessage({
+        type: 'openLocation',
+        path: location.path,
+        line: location.line,
+      });
+    });
+    code.replaceWith(link);
+  }
+}
+
+/** 解析模型输出的本地文件位置；没有目录或扩展名的普通 `name:number` 不处理。 */
+function parseCodeLocation(value: string): { path: string; line: number } | undefined {
+  const text = value.trim();
+  const match = /^(.+):([1-9]\d*)$/.exec(text);
+  if (!match || text.includes('://') || /[\r\n]/.test(text)) return undefined;
+  const path = match[1].trim();
+  const line = Number(match[2]);
+  if (!path || !Number.isSafeInteger(line)) return undefined;
+  const baseName = fileName(path);
+  if (!path.includes('/') && !path.includes('\\') && !baseName.includes('.')) return undefined;
+  return { path, line };
+}
+
+/** 同时兼容 POSIX 与 Windows 分隔符，生成紧凑的可见文件名。 */
+function fileName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
 
 /** 在会话浏览首页和当前聊天页面之间切换。 */
