@@ -17,7 +17,7 @@ from ..storage.atomic import atomic_append_text, atomic_write_text
 from .constants import BINARY_SNIFF_BYTES, LIST_FILE_LINE_COUNT_MAX_BYTES, TODO_STATUSES
 from .images import image_media_type_for_file, path_has_image_extension, prepare_image_read_result, sniff_image_media_type
 from .results import ToolRunOutput
-from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
+from .sandbox import build_shell_sandbox_command, sandbox_mode, sandbox_preflight_error
 from .todos import format_todo_plan, normalize_todos
 from .web import tool_web_extract, tool_web_research, tool_web_search
 
@@ -305,7 +305,8 @@ def _stop_shell_process(process, sig):
 def tool_run_shell(agent, args):
     # shell 命令实际执行入口。
     # 风险识别和审批在 runtime/validators 中已经完成，这里只负责在受控环境中运行命令。
-    # sandbox.enabled 为 true 时，非 full 模式会在 bwrap 中执行，作为路径校验之外的第二层防线。
+    # required/optional 模式优先使用 bwrap，作为路径校验之外的第二层防线。
+    # optional 只在 preflight 明确失败时降级，并把降级事实写入结果与 metadata。
     # full 用于本地测试和完全信任场景，审批和沙箱都不拦截命令。
     command = str(args.get("command", "")).strip()
     if not command:
@@ -315,20 +316,45 @@ def tool_run_shell(agent, args):
         raise ValueError("timeout must be in [1, 120]")
     run_args = command
     shell = True
-    if sandbox_enabled(agent) and str(getattr(agent, "approval_policy", "")) != "full":
+    mode = sandbox_mode(agent)
+    approval_policy = str(getattr(agent, "approval_policy", ""))
+    sandbox_warning = ""
+    sandbox_metadata = {
+        "sandbox_mode": mode,
+        "sandbox_status": "disabled" if mode == "disabled" else "bypassed_full",
+        "sandbox_degraded": False,
+    }
+    if mode != "disabled" and approval_policy != "full":
         preflight_error = sandbox_preflight_error()
         if preflight_error:
-            return textwrap.dedent(
-                f"""\
-                exit_code: 126
-                stdout:
-                (empty)
-                stderr:
-                {preflight_error}
-                """
-            ).strip()
-        run_args = build_shell_sandbox_command(agent, command)
-        shell = False
+            sandbox_metadata.update(
+                {
+                    "sandbox_status": "unavailable" if mode == "required" else "degraded",
+                    "sandbox_degraded": mode == "optional",
+                    "sandbox_error": preflight_error,
+                }
+            )
+            if mode == "required":
+                return ToolRunOutput(
+                    content=textwrap.dedent(
+                        f"""\
+                        exit_code: 126
+                        stdout:
+                        (empty)
+                        stderr:
+                        {preflight_error}
+                        """
+                    ).strip(),
+                    metadata=sandbox_metadata,
+                )
+            sandbox_warning = (
+                "sandbox_warning: sandbox mode is optional; bubblewrap is unavailable, "
+                f"so this command ran without a sandbox: {preflight_error}\n"
+            )
+        else:
+            run_args = build_shell_sandbox_command(agent, command)
+            shell = False
+            sandbox_metadata["sandbox_status"] = "active"
     process = subprocess.Popen(
         run_args,
         cwd=agent.root,
@@ -353,7 +379,7 @@ def tool_run_shell(agent, args):
         stdout = stdout if stdout is not None else (exc.stdout or "")
         stderr = stderr if stderr is not None else (exc.stderr or "")
         return ToolRunOutput(
-            content=textwrap.dedent(
+            content=sandbox_warning + textwrap.dedent(
                 f"""\
                 exit_code: 124
                 stdout:
@@ -363,12 +389,16 @@ def tool_run_shell(agent, args):
                 command timed out after {timeout} seconds
                 """
             ).strip(),
-            metadata={"tool_timeout": True, "timeout_seconds": timeout},
+            metadata={
+                **sandbox_metadata,
+                "tool_timeout": True,
+                "timeout_seconds": timeout,
+            },
         )
     except BaseException:
         _stop_shell_process(process, signal.SIGKILL)
         raise
-    return textwrap.dedent(
+    content = sandbox_warning + textwrap.dedent(
         f"""\
         exit_code: {process.returncode}
         stdout:
@@ -377,6 +407,9 @@ def tool_run_shell(agent, args):
         {stderr.strip() or "(empty)"}
         """
     ).strip()
+    if sandbox_metadata["sandbox_degraded"]:
+        return ToolRunOutput(content=content, metadata=sandbox_metadata)
+    return content
 
 
 def tool_write_file(agent, args):

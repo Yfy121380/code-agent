@@ -150,7 +150,7 @@ CodeMate 会自动创建项目级和用户级目录。
     "servers": {}
   },
   "sandbox": {
-    "enabled": true
+    "mode": "required"
   },
   "permissions": {
     "read": {
@@ -227,7 +227,13 @@ CodeMate 的内置工具分为几类：
 
 权限来源包括默认规则、用户级 `settings.json`、项目级 `settings.json` 和会话内临时 allow。规则聚合后统一用于普通文件工具、shell 路径审批和沙箱构造。deny 优先于 allow。
 
-非 full 模式下，`run_shell` 会先经过命令风险分类和路径审批，再在 `bwrap` 沙箱中执行。沙箱默认以只读方式挂载文件系统，并重新挂载允许写入的目录，用于防止 shell 命令在运行时越过静态检查。
+非 full 模式下，`run_shell` 会先经过命令风险分类和路径审批。`sandbox.mode` 支持三种配置：
+
+- `required`：默认值。使用 `bwrap` 执行；沙箱不可用时拒绝运行命令。
+- `optional`：优先使用 `bwrap`；沙箱不可用时明确报告降级并在宿主机执行。
+- `disabled`：不检查或使用 `bwrap`，直接在宿主机执行。
+
+沙箱启用时默认以只读方式挂载文件系统，并重新挂载允许写入的目录，用于防止 shell 命令在运行时越过静态检查。旧配置 `enabled: true/false` 会分别兼容为 `required/disabled`。
 
 ## 上下文与记忆
 

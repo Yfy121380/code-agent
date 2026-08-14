@@ -750,27 +750,34 @@ python test.py
 - 权限审批决定“是否可以尝试执行”。
 - 沙箱决定“执行时最多能访问和修改哪些地方”。
 
-## 16. 沙箱启用条件
+## 16. 沙箱运行模式
 
 沙箱配置在 settings 中：
 
 ```json
 {
   "sandbox": {
-    "enabled": true
+    "mode": "required"
   }
 }
 ```
 
-默认启用。
+支持三个模式：
+
+- `required`：默认值。必须使用 bwrap；preflight 失败时拒绝执行 shell。
+- `optional`：优先使用 bwrap；preflight 失败时显式降级为宿主机 shell。
+- `disabled`：不运行 preflight，也不使用 bwrap。
+
+旧配置中的 `enabled: true` 会被归一化为 `required`，`enabled: false` 会被归一化为 `disabled`。
 
 非 `full` 模式执行 shell 前会做 bwrap preflight：
 
 - 检查是否安装 `bwrap`。
 - 检查当前系统能否启动 bubblewrap。
-- 如果系统不支持非特权 user namespace 或 bwrap 无法启动，shell 工具会返回执行错误，而不是直接裸跑命令。
+- `required` 下，如果系统不支持非特权 user namespace 或 bwrap 无法启动，shell 工具会返回执行错误，而不是直接裸跑命令。
+- `optional` 下，同样的错误会写入工具结果和 trace metadata，并以 `sandbox_degraded=true` 明确记录本次命令在宿主机执行。
 
-`full` 模式会跳过沙箱和 preflight，直接执行 shell 命令。
+`full` 审批模式始终跳过沙箱和 preflight，直接执行 shell 命令；这与 sandbox 配置本身的三种模式相互独立。
 
 ## 17. 沙箱如何工作
 

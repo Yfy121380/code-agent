@@ -19,7 +19,7 @@ def isolated_codemate_home(tmp_path, monkeypatch):
     codemate_home.mkdir(parents=True, exist_ok=True)
     settings = {
         "mcp": {"servers": {}},
-        "sandbox": {"enabled": False},
+        "sandbox": {"mode": "disabled"},
         "permissions": {"read": {"allow": [], "deny": []}, "write": {"allow": [], "deny": []}},
     }
     (codemate_home / "settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

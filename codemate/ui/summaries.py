@@ -244,6 +244,8 @@ def summarize_shell_result(result, metadata=None):
     status = metadata.get("tool_status")
     if status:
         lines.append(f"status: {status}")
+    if metadata.get("sandbox_degraded"):
+        lines.append("warning: sandbox unavailable; command ran without isolation")
 
     exit_code = ""
     stdout_lines = []

@@ -13,8 +13,19 @@ _SANDBOX_PREFLIGHT_ERROR = None
 
 
 def sandbox_enabled(agent):
+    return sandbox_mode(agent) != "disabled"
+
+
+def sandbox_mode(agent):
+    """Return the normalized shell sandbox mode for this runtime."""
     sandbox = getattr(getattr(agent, "settings", None), "sandbox", {}) or {}
-    return bool(sandbox.get("enabled", True))
+    mode = sandbox.get("mode")
+    if mode in {"required", "optional", "disabled"}:
+        return str(mode)
+    # Keep programmatically constructed legacy settings safe by default.
+    if "enabled" in sandbox:
+        return "required" if bool(sandbox.get("enabled")) else "disabled"
+    return "required"
 
 
 def bwrap_path():

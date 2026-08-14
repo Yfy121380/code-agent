@@ -35,7 +35,7 @@ from .handlers import (
 )
 from .registry import build_tool_registry
 from .results import ToolRunOutput, normalize_tool_output
-from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_preflight_error
+from .sandbox import build_shell_sandbox_command, sandbox_enabled, sandbox_mode, sandbox_preflight_error
 from .shell_safety import ShellCommandAnalysis, analyze_shell_command
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC, PLAN_TOOL_SPECS, REVIEW_TOOL_SPEC
 from .validators import validate_tool
@@ -85,6 +85,7 @@ __all__ = [
     "resolve_tool_path",
     "temporary_shell_subject_allowed",
     "sandbox_enabled",
+    "sandbox_mode",
     "sandbox_preflight_error",
     "sniff_image_media_type",
     "validate_tool",

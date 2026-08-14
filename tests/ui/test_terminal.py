@@ -63,6 +63,17 @@ def test_rejected_shell_result_shows_policy_error_instead_of_empty_streams():
     ]
 
 
+def test_optional_sandbox_degradation_is_visible_in_shell_result():
+    summary = summarize_tool_result(
+        "run_shell",
+        "sandbox_warning: details\nexit_code: 0\nstdout:\nok\nstderr:\n(empty)",
+        {"tool_status": "ok", "sandbox_degraded": True},
+    )
+
+    assert "warning: sandbox unavailable; command ran without isolation" in summary
+    assert "exit_code: 0" in summary
+
+
 def test_generic_tool_result_is_limited_to_four_short_lines():
     summary = summarize_tool_result(
         "custom_tool",

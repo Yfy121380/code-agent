@@ -45,10 +45,12 @@ def _safe_endpoint(value):
 
 def _sandbox_label(agent):
     sandbox = getattr(getattr(agent, "settings", None), "sandbox", {}) or {}
-    enabled = bool(sandbox.get("enabled", True))
-    if enabled and str(getattr(agent, "approval_policy", "")) == "full":
+    mode = str(sandbox.get("mode", "required"))
+    if "mode" not in sandbox and "enabled" in sandbox:
+        mode = "required" if bool(sandbox.get("enabled")) else "disabled"
+    if mode != "disabled" and str(getattr(agent, "approval_policy", "")) == "full":
         return "bypassed (full)"
-    return "on" if enabled else "off"
+    return mode
 
 
 def _session_label(agent):

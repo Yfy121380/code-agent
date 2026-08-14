@@ -1,7 +1,7 @@
 """settings 与权限规则聚合测试。
 
 覆盖模块：config.settings。
-重点边界：父子目录规则合并、同类规则独立合并、临时规则参与聚合、sandbox 配置类型校验。
+重点边界：父子目录规则合并、同类规则独立合并、临时规则参与聚合、sandbox 三态配置与旧配置迁移。
 """
 
 from codemate.config.paths import codemate_paths
@@ -68,16 +68,46 @@ def test_permission_rules_include_temporary_settings(tmp_path):
     assert "/tmp/session-write" in {str(path) for path in rules.read_allow}
 
 
-def test_sandbox_enabled_must_be_boolean(tmp_path):
+def test_sandbox_mode_must_be_supported(tmp_path):
     paths = codemate_paths(tmp_path, home_root=tmp_path / "home")
     paths.user_settings.parent.mkdir(parents=True, exist_ok=True)
     paths.project_settings.parent.mkdir(parents=True, exist_ok=True)
-    paths.user_settings.write_text('{"sandbox": {"enabled": true}}\n', encoding="utf-8")
-    paths.project_settings.write_text('{"sandbox": {"enabled": "false"}}\n', encoding="utf-8")
+    paths.user_settings.write_text('{"sandbox": {"mode": "required"}}\n', encoding="utf-8")
+    paths.project_settings.write_text('{"sandbox": {"mode": "fallback"}}\n', encoding="utf-8")
 
     try:
         load_codemate_settings(paths)
     except ValueError as exc:
-        assert "sandbox.enabled must be a boolean" in str(exc)
+        assert "sandbox.mode must be one of" in str(exc)
     else:
-        raise AssertionError("invalid sandbox.enabled was accepted")
+        raise AssertionError("invalid sandbox.mode was accepted")
+
+
+def test_legacy_sandbox_enabled_is_normalized(tmp_path):
+    paths = codemate_paths(tmp_path, home_root=tmp_path / "home")
+    paths.user_settings.parent.mkdir(parents=True, exist_ok=True)
+    paths.project_settings.parent.mkdir(parents=True, exist_ok=True)
+    paths.user_settings.write_text('{"sandbox": {"enabled": true}}\n', encoding="utf-8")
+    paths.project_settings.write_text('{"sandbox": {"enabled": false}}\n', encoding="utf-8")
+
+    settings = load_codemate_settings(paths)
+
+    assert settings.sandbox == {"mode": "disabled"}
+
+
+def test_sandbox_rejects_mode_and_legacy_enabled_together(tmp_path):
+    paths = codemate_paths(tmp_path, home_root=tmp_path / "home")
+    paths.user_settings.parent.mkdir(parents=True, exist_ok=True)
+    paths.project_settings.parent.mkdir(parents=True, exist_ok=True)
+    paths.user_settings.write_text(
+        '{"sandbox": {"mode": "required", "enabled": true}}\n',
+        encoding="utf-8",
+    )
+    paths.project_settings.write_text('{}\n', encoding="utf-8")
+
+    try:
+        load_codemate_settings(paths)
+    except ValueError as exc:
+        assert "cannot define both mode and legacy enabled" in str(exc)
+    else:
+        raise AssertionError("ambiguous sandbox settings were accepted")

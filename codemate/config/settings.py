@@ -45,7 +45,7 @@ SETTINGS_TEMPLATE = {
         "servers": {},
     },
     "sandbox": {
-        "enabled": True,
+        "mode": "required",
     },
     "permissions": {
         "read": {
@@ -205,19 +205,34 @@ def _merged_permissions(user_settings, project_settings):
 
 
 def _merged_sandbox(user_settings, project_settings):
-    sandbox = copy.deepcopy(default_settings()["sandbox"])
+    mode = str(default_settings()["sandbox"]["mode"])
     for settings in (user_settings, project_settings):
         value = settings.get("sandbox", {})
         if value is None:
             continue
         if not isinstance(value, dict):
             raise ValueError("sandbox must be an object")
-        sandbox.update(copy.deepcopy(value))
-    enabled = sandbox.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise ValueError("sandbox.enabled must be a boolean")
-    sandbox["enabled"] = enabled
-    return sandbox
+        if "mode" in value and "enabled" in value:
+            raise ValueError("sandbox cannot define both mode and legacy enabled")
+        if "mode" in value:
+            candidate = value["mode"]
+            if not isinstance(candidate, str) or candidate not in {
+                "required",
+                "optional",
+                "disabled",
+            }:
+                raise ValueError(
+                    "sandbox.mode must be one of: required, optional, disabled"
+                )
+            mode = candidate
+        elif "enabled" in value:
+            # Existing settings used a boolean. Normalize them at load time so
+            # upgrades preserve the old fail-closed/disabled behavior.
+            enabled = value["enabled"]
+            if not isinstance(enabled, bool):
+                raise ValueError("sandbox.enabled must be a boolean")
+            mode = "required" if enabled else "disabled"
+    return {"mode": mode}
 
 
 def load_codemate_settings(paths_or_workspace_root):

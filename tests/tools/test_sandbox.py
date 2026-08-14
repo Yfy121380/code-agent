@@ -1,7 +1,7 @@
 """shell 沙箱测试。
 
 覆盖模块：tools.sandbox、run_shell 沙箱接入。
-重点边界：settings 默认开启、bwrap 命令构造、read deny 覆盖、write allow 绑定、preflight 错误、full 跳过沙箱。
+重点边界：三态配置、bwrap 命令构造、read deny 覆盖、write allow 绑定、preflight 降级、full 跳过沙箱。
 """
 
 import signal
@@ -13,12 +13,12 @@ from codemate.config.settings import default_settings
 from codemate.tools.sandbox import build_shell_sandbox_command
 
 
-def write_project_settings(tmp_path, sandbox_enabled=True, permissions=None):
+def write_project_settings(tmp_path, sandbox_mode="required", permissions=None):
     config_dir = tmp_path / ".codemate"
     config_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "mcp": {"servers": {}},
-        "sandbox": {"enabled": sandbox_enabled},
+        "sandbox": {"mode": sandbox_mode},
         "permissions": permissions or {"read": {"allow": [], "deny": []}, "write": {"allow": [], "deny": []}},
     }
     import json
@@ -63,8 +63,8 @@ def assert_option(args, *option):
     return any(args[index:index + len(option)] == option for index in range(len(args) - len(option) + 1))
 
 
-def test_default_settings_enable_shell_sandbox():
-    assert default_settings()["sandbox"]["enabled"] is True
+def test_default_settings_require_shell_sandbox():
+    assert default_settings()["sandbox"]["mode"] == "required"
 
 
 def test_build_shell_sandbox_command_uses_read_deny_and_write_allow(tmp_path):
@@ -111,8 +111,8 @@ def test_build_shell_sandbox_command_skips_write_allow_under_read_deny(tmp_path)
     assert not assert_option(args, "--bind", str(nested_write.resolve()), str(nested_write.resolve()))
 
 
-def test_run_shell_uses_bwrap_when_sandbox_enabled(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
+def test_run_shell_uses_bwrap_when_sandbox_required(tmp_path):
+    write_project_settings(tmp_path, sandbox_mode="required")
     agent = build_agent(tmp_path, approval_policy="auto")
 
     with patch("codemate.tools.handlers.sandbox_preflight_error", return_value=""), patch(
@@ -130,7 +130,7 @@ def test_run_shell_uses_bwrap_when_sandbox_enabled(tmp_path):
 
 
 def test_allow_once_write_adds_current_shell_path_to_sandbox_only(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
+    write_project_settings(tmp_path, sandbox_mode="required")
     outside_dir = tmp_path.parent.parent / f"{tmp_path.name}-outside-write-dir"
     outside_dir.mkdir(exist_ok=True)
     agent = build_agent(tmp_path, approval_policy="ask", ui=AllowOnceUI())
@@ -150,7 +150,7 @@ def test_allow_once_write_adds_current_shell_path_to_sandbox_only(tmp_path):
 
 
 def test_temporary_shell_subject_does_not_add_unapproved_sandbox_write_mount(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
+    write_project_settings(tmp_path, sandbox_mode="required")
     outside_dir = tmp_path.parent.parent / f"{tmp_path.name}-outside-python-dir"
     outside_dir.mkdir(exist_ok=True)
     agent = build_agent(tmp_path, approval_policy="ask", ui=RememberShellUI())
@@ -171,8 +171,8 @@ def test_temporary_shell_subject_does_not_add_unapproved_sandbox_write_mount(tmp
     assert not assert_option(second_args, "--bind", str(outside_dir.resolve()), str(outside_dir.resolve()))
 
 
-def test_run_shell_reports_bwrap_preflight_error(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
+def test_required_sandbox_reports_bwrap_preflight_error(tmp_path):
+    write_project_settings(tmp_path, sandbox_mode="required")
     agent = build_agent(tmp_path, approval_policy="auto")
 
     with patch("codemate.tools.handlers.sandbox_preflight_error", return_value="shell sandbox failed to start: denied"):
@@ -180,10 +180,70 @@ def test_run_shell_reports_bwrap_preflight_error(tmp_path):
 
     assert "exit_code: 126" in result
     assert "shell sandbox failed to start: denied" in result
+    assert agent._last_tool_result_metadata["sandbox_mode"] == "required"
+    assert agent._last_tool_result_metadata["sandbox_status"] == "unavailable"
+    assert agent._last_tool_result_metadata["sandbox_degraded"] is False
+
+
+def test_optional_sandbox_explicitly_degrades_when_preflight_fails(tmp_path):
+    write_project_settings(tmp_path, sandbox_mode="optional")
+    agent = build_agent(tmp_path, approval_policy="auto")
+
+    with patch(
+        "codemate.tools.handlers.sandbox_preflight_error",
+        return_value="shell sandbox failed to start: denied",
+    ), patch("codemate.tools.handlers.subprocess.Popen") as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
+        result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+
+    call = fake_popen.call_args
+    assert call.args[0] == "echo hi"
+    assert call.kwargs["shell"] is True
+    assert "sandbox_warning:" in result
+    assert "ok" in result
+    assert agent._last_tool_result_metadata["sandbox_mode"] == "optional"
+    assert agent._last_tool_result_metadata["sandbox_status"] == "degraded"
+    assert agent._last_tool_result_metadata["sandbox_degraded"] is True
+
+
+def test_optional_sandbox_uses_bwrap_when_preflight_succeeds(tmp_path):
+    write_project_settings(tmp_path, sandbox_mode="optional")
+    agent = build_agent(tmp_path, approval_policy="auto")
+
+    with patch("codemate.tools.handlers.sandbox_preflight_error", return_value=""), patch(
+        "codemate.tools.handlers.subprocess.Popen"
+    ) as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
+        result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+
+    call = fake_popen.call_args
+    assert call.args[0][0].endswith("bwrap")
+    assert call.kwargs["shell"] is False
+    assert "sandbox_warning:" not in result
+
+
+def test_disabled_sandbox_runs_without_preflight(tmp_path):
+    write_project_settings(tmp_path, sandbox_mode="disabled")
+    agent = build_agent(tmp_path, approval_policy="auto")
+
+    with patch("codemate.tools.handlers.sandbox_preflight_error") as fake_preflight, patch(
+        "codemate.tools.handlers.subprocess.Popen"
+    ) as fake_popen:
+        fake_popen.return_value.returncode = 0
+        fake_popen.return_value.communicate.return_value = ("ok\n", "")
+        result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+
+    call = fake_popen.call_args
+    assert call.args[0] == "echo hi"
+    assert call.kwargs["shell"] is True
+    fake_preflight.assert_not_called()
+    assert "sandbox_warning:" not in result
 
 
 def test_full_approval_skips_shell_sandbox(tmp_path):
-    write_project_settings(tmp_path, sandbox_enabled=True)
+    write_project_settings(tmp_path, sandbox_mode="required")
     agent = build_agent(tmp_path, approval_policy="full")
 
     with patch("codemate.tools.handlers.sandbox_preflight_error") as fake_preflight, patch(

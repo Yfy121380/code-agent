@@ -279,7 +279,7 @@ Use run_shell for tests, syntax checks, git status/log, package scripts, and oth
 
 Read-only commands with allowed paths may run directly. Write-like commands are risky. Dangerous commands require approval.
 File access may require approval or be blocked by permission rules.
-When sandbox.enabled is true, shell commands run inside a bubblewrap filesystem sandbox: most files are read-only, read-deny paths are hidden, write access is limited to allowed directories, and network access is available.
+When shell sandboxing is active, most files are read-only, read-deny paths are hidden, write access is limited to allowed directories, and network access is available. If a tool result reports sandbox degradation, account for the weaker isolation when deciding whether further shell work is appropriate.
 Keep commands focused and avoid unnecessary destructive operations.
 """.strip(),
     },
