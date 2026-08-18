@@ -761,7 +761,16 @@ Python 返回的变更集包含 before/after 快照路径。Webview 不应该知
 
 ### 12.7 Diagnostics
 
-当一轮结束或 VS Code Diagnostics 变化时，Provider：
+Diagnostics 现在有两条用途不同的链路。
+
+第一条位于工具执行过程中。`write_file` 或 `patch_file` 首次修改某个文件前，Python
+通过 Bridge 请求该文件的 Error 基线；修改成功后再次请求，并等待语言服务器刷新。
+Extension Host 使用 `vscode.languages.getDiagnostics(uri)` 返回结构化结果，Runtime
+只把相对基线新增的 Error 追加到工具结果，使 Agent 下一次模型调用可以立即发现并
+修正静态错误。原有 Error、Warning、超时和不可用状态不会改变写工具的成功结果。
+
+第二条位于一轮结束后，用于用户界面。当一轮结束或 VS Code Diagnostics 变化时，
+Provider：
 
 1. 找到本轮变更文件。
 2. 调用 `vscode.languages.getDiagnostics(uri)`。
@@ -769,6 +778,9 @@ Python 返回的变更集包含 before/after 快照路径。Webview 不应该知
 4. 把最多 50 条结果发给 Webview。
 
 点击诊断后，`openLocation()` 使用 VS Code API 打开文件并定位行号。
+
+即时诊断请求由 Extension Host 直接处理并通过 `interaction_response` 返回 Python，
+不会经过 Webview，也不会弹出审批或选择界面。
 
 ### 12.8 CSP 和 nonce
 

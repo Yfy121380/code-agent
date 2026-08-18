@@ -9,6 +9,9 @@ class ChangeTrackingMixin:
     """Connect run lifecycle events to the snapshot store without bloating loop.py."""
 
     def begin_change_tracking(self, task_state):
+        # Diagnostics are compared against the state before the first edit of
+        # each file in this run. They are editor assistance, not session state.
+        self._editor_diagnostic_baselines = {}
         self._current_change_tracker = None
         self._latest_change_set = None
         if self.runtime_mode != "agent" or self.depth != 0:
@@ -27,6 +30,7 @@ class ChangeTrackingMixin:
     def finish_change_tracking(self):
         tracker = getattr(self, "_current_change_tracker", None)
         self._current_change_tracker = None
+        self._editor_diagnostic_baselines = {}
         if tracker is None:
             return None
         try:

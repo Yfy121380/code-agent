@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { ChangeDocumentProvider } from './changeDocumentProvider';
 import { CodeMateProcess } from './codemateProcess';
+import { EditorDiagnosticsBridge } from './editorDiagnostics';
 import { isRecord } from './protocol';
 
 export const CHAT_VIEW_ID = 'codemate.chatView';
@@ -22,13 +23,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly changeSets = new Map<string, Record<string, unknown>>();
   private currentChangeSetId = '';
   private currentSessionId = '';
+  private readonly editorDiagnostics: EditorDiagnosticsBridge;
 
   /** 注入资源根目录、共享后端客户端和原生 Diff 文档 Provider。 */
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly backend: CodeMateProcess,
     private readonly changeDocuments: ChangeDocumentProvider,
-  ) {}
+  ) {
+    this.editorDiagnostics = new EditorDiagnosticsBridge(backend);
+  }
 
   /**
    * 初始化一个 Webview 实例，并接通双向消息。
@@ -61,6 +65,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Python -> Extension Host -> Webview。事件清理前先保存变更快照；run 完成后
     // 延迟刷新诊断，因为语言服务器可能稍后才发布最新结果。
     const backendEvents = this.backend.onEvent((event) => {
+      if (event.type === 'editor_diagnostics_request') {
+        void this.editorDiagnostics.handle(event);
+        return;
+      }
       this.rememberChangeSets(event);
       void webviewView.webview.postMessage({
         type: 'backendEvent',

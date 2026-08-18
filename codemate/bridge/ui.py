@@ -177,6 +177,20 @@ class JsonUI(NullUI):
             return {"status": "cancelled", "answers": {}}
         return result
 
+    def editor_diagnostics(self, path, *, wait_for_update=False):
+        """Ask the editor host for current errors without involving Webview UI."""
+        result = self.interactions.request(
+            "editor_diagnostics_request",
+            {
+                "path": str(path or ""),
+                "wait_for_update": bool(wait_for_update),
+            },
+            timeout=4.0,
+        )
+        if not isinstance(result, dict):
+            return {"status": "unavailable", "diagnostics": []}
+        return result
+
     def plan_review(self, title, plan):
         result = self.interactions.request(
             "plan_review_request",

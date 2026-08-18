@@ -86,6 +86,10 @@ class NullUI:
     def request_user_input(self, questions):
         return {"status": "cancelled", "answers": {}}
 
+    def editor_diagnostics(self, path, *, wait_for_update=False):
+        """Return no diagnostics when the active UI has no editor integration."""
+        return {"status": "unavailable", "diagnostics": []}
+
     def plan_review(self, title, plan):
         return {"decision": "cancelled"}
 

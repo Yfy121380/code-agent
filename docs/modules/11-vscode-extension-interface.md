@@ -467,6 +467,10 @@ postMessage(visible event)
 | `changeDiagnostics` | Diagnostics 发布 | ChangeSet 文件对应的错误和警告 |
 | `command_result` (`help`) | 本地 Slash Command | `/help` 不发送给 Python |
 
+`editor_diagnostics_request` 虽然也从 Python stdout 发出，但它不是 Webview 展示事件。
+`ChatViewProvider` 会在 Extension Host 内截获它，读取 VS Code Diagnostics 后直接发送
+`interaction_response`，因此聊天页面不会看到这类内部请求。
+
 ---
 
 ## 7. Extension Host 到 Python 消息
@@ -644,6 +648,16 @@ title, plan
 ```
 
 Webview 渲染 Markdown，并返回 `approved`、`revision_requested` 或 `cancelled`。
+
+#### `editor_diagnostics_request`
+
+```text
+path, wait_for_update
+```
+
+该请求由 Extension Host 直接消费，不发送给 Webview。Host 返回目标文件最多 100 条
+Error 快照；Runtime 只把相对修改前基线新增的最多 20 条 Error 写入工具结果。请求设置
+4 秒 Broker 超时，确保编辑器或语言服务器失效时不会永久阻塞工具循环。
 
 #### `session_select_request`
 
@@ -967,14 +981,31 @@ editor.document.getText(editor.selection)
 Error 和 Warning。这些诊断通常由 Pylance、TypeScript Language Service、ESLint 或
 其他语言扩展发布，主要属于编辑器静态分析结果，不等于 `pytest` 输出或程序运行异常。
 
-Agent 完成修改后，Extension Host 还会读取 ChangeSet 所含文件最多 50 条诊断，并监听：
+`write_file` 和 `patch_file` 还会使用一条运行时反馈链路：首次修改文件前记录 Error
+基线，修改成功后等待该文件的 Diagnostics 更新，再把最多 20 条新增 Error 附加到
+该工具结果。Runtime 根据诊断消息、来源和错误代码识别原有问题，因此编辑造成的
+普通行号移动不会把旧错误误判为新增错误。若语言服务器不可用或请求超时，诊断链路
+直接降级，文件修改仍保持原成功状态。
+
+这条链路的事件流为：
+
+```text
+Python Runtime -> editor_diagnostics_request
+Extension Host -> openTextDocument + getDiagnostics
+Extension Host -> interaction_response
+Python Runtime -> 比较基线并追加新增 Error 到 tool result
+```
+
+Agent 完成整轮修改后，Extension Host 还会读取 ChangeSet 所含文件最多 50 条诊断，
+并监听：
 
 ```ts
 vscode.languages.onDidChangeDiagnostics(...)
 ```
 
-语言服务器稍后更新结果时，Changes 面板下的 Problems 会随之刷新。这些自动诊断只在
-UI 展示，不会自动发给 Agent；只有用户添加 `@problems` 时才会成为模型上下文。
+语言服务器稍后更新结果时，Changes 面板下的 Problems 会随之刷新。轮末诊断用于 UI
+展示；修改工具后的新增 Error 会自动进入 Agent 上下文；用户主动添加 `@problems`
+时，当前活动文件的 Error 和 Warning 也会作为请求附件进入模型上下文。
 
 ### 14.6 打开文件和跳转位置
 

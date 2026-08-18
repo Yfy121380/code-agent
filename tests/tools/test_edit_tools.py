@@ -4,7 +4,20 @@
 重点边界：编辑前必须 read_file、grep 不满足读取要求、外部修改导致 stale、append/overwrite 语义。
 """
 
+from codemate.ui import NullUI
 from tests.helpers import build_agent
+
+
+class EditorDiagnosticsUI(NullUI):
+    """Return deterministic pre/post diagnostic snapshots for edit tests."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def editor_diagnostics(self, path, *, wait_for_update=False):
+        self.calls.append((path, wait_for_update))
+        return self.responses.pop(0)
 
 
 def test_patch_file_requires_fresh_read_first(tmp_path):
@@ -71,6 +84,126 @@ def test_write_file_allows_new_file_without_prior_read(tmp_path):
     preview = agent._last_tool_result_metadata["change_preview"]
     assert preview["status"] == "added"
     assert preview["additions"] == 1
+
+
+def test_write_file_appends_only_new_editor_errors_to_tool_result(tmp_path):
+    ui = EditorDiagnosticsUI(
+        [
+            {
+                "status": "ok",
+                "diagnostics": [
+                    {
+                        "path": "created.py",
+                        "line": 2,
+                        "column": 1,
+                        "severity": "error",
+                        "message": "Existing error",
+                        "source": "pyright",
+                        "code": "old",
+                    }
+                ],
+            },
+            {
+                "status": "ok",
+                "diagnostics": [
+                    {
+                        "path": "created.py",
+                        "line": 7,
+                        "column": 1,
+                        "severity": "error",
+                        "message": "Existing error",
+                        "source": "pyright",
+                        "code": "old",
+                    },
+                    {
+                        "path": "created.py",
+                        "line": 3,
+                        "column": 5,
+                        "severity": "error",
+                        "message": '"missing" is not defined',
+                        "source": "pyright",
+                        "code": "reportUndefinedVariable",
+                    },
+                    {
+                        "path": "created.py",
+                        "line": 4,
+                        "column": 1,
+                        "severity": "warning",
+                        "message": "Unused import",
+                    },
+                ],
+            },
+        ]
+    )
+    agent = build_agent(tmp_path, [], ui=ui)
+
+    result = agent.run_tool(
+        "write_file",
+        {"path": "created.py", "content": "value = missing\n"},
+    )
+
+    assert result.startswith("wrote created.py")
+    assert "New editor errors detected after this edit:" in result
+    assert 'created.py:3:5 [error] "missing" is not defined' in result
+    assert "Existing error" not in result
+    assert "Unused import" not in result
+    assert [wait for _path, wait in ui.calls] == [False, True]
+    assert agent._last_tool_result_metadata["tool_status"] == "ok"
+    assert agent._last_tool_result_metadata["editor_diagnostics_checked"] is True
+    assert agent._last_tool_result_metadata["editor_diagnostics_new_errors"] == 1
+
+
+def test_edit_succeeds_when_editor_diagnostics_are_unavailable(tmp_path):
+    ui = EditorDiagnosticsUI(
+        [{"status": "unavailable", "diagnostics": []}]
+    )
+    agent = build_agent(tmp_path, [], ui=ui)
+
+    result = agent.run_tool(
+        "write_file",
+        {"path": "created.py", "content": "value = 1\n"},
+    )
+
+    assert result == "wrote created.py (10 chars)"
+    assert len(ui.calls) == 1
+    assert agent._last_tool_result_metadata["tool_status"] == "ok"
+    assert "editor_diagnostics_checked" not in agent._last_tool_result_metadata
+
+
+def test_repeated_edits_keep_the_original_diagnostic_baseline(tmp_path):
+    ui = EditorDiagnosticsUI(
+        [
+            {"status": "ok", "diagnostics": []},
+            {
+                "status": "ok",
+                "diagnostics": [
+                    {
+                        "path": "created.py",
+                        "line": 1,
+                        "column": 9,
+                        "severity": "error",
+                        "message": '"missing" is not defined',
+                    }
+                ],
+            },
+            {"status": "ok", "diagnostics": []},
+        ]
+    )
+    agent = build_agent(tmp_path, [], ui=ui)
+
+    broken = agent.run_tool(
+        "write_file",
+        {"path": "created.py", "content": "value = missing\n"},
+    )
+    fixed = agent.run_tool(
+        "write_file",
+        {"path": "created.py", "content": "value = 1\n"},
+    )
+
+    assert "New editor errors detected after this edit:" in broken
+    assert fixed == "wrote created.py (10 chars)"
+    assert [wait for _path, wait in ui.calls] == [False, True, True]
+    assert agent._last_tool_result_metadata["editor_diagnostics_new_errors"] == 0
 
 def test_write_file_requires_fresh_read_for_existing_file(tmp_path):
     (tmp_path / "target.txt").write_text("alpha\n", encoding="utf-8")

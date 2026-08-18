@@ -52,7 +52,13 @@ class InteractionBroker:
         self._pending = {}
         self._lock = threading.Lock()
 
-    def request(self, event_type, payload):
+    def request(self, event_type, payload, timeout=None):
+        """Emit an interaction and wait for its matching response.
+
+        Interactive approvals intentionally wait without a deadline. Optional
+        editor integrations can provide a timeout so an unavailable client
+        cannot stall the agent's tool loop.
+        """
         interaction_id = f"interaction_{uuid.uuid4().hex[:12]}"
         response_queue = queue.Queue(maxsize=1)
         with self._lock:
@@ -64,7 +70,10 @@ class InteractionBroker:
             **dict(payload or {}),
         )
         try:
-            return response_queue.get()
+            try:
+                return response_queue.get(timeout=timeout)
+            except queue.Empty:
+                return None
         finally:
             with self._lock:
                 self._pending.pop(interaction_id, None)

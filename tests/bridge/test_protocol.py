@@ -3,6 +3,7 @@
 import io
 import json
 import threading
+import time
 
 import pytest
 
@@ -74,12 +75,31 @@ def test_interaction_broker_matches_response_by_id():
     assert request["request_id"] == "req-1"
 
 
+def test_interaction_broker_optional_timeout_removes_pending_request():
+    stream = io.StringIO()
+    broker = InteractionBroker(JsonLineWriter(stream))
+
+    started_at = time.monotonic()
+    result = broker.request("editor_diagnostics_request", {"path": "app.py"}, timeout=0.01)
+
+    assert result is None
+    assert time.monotonic() - started_at < 0.5
+    request = emitted_messages(stream)[0]
+    assert not broker.deliver(
+        {
+            "type": "interaction_response",
+            "interaction_id": request["interaction_id"],
+            "value": {"status": "ok", "diagnostics": []},
+        }
+    )
+
+
 class RecordingInteractions:
     def __init__(self, response):
         self.response = response
         self.calls = []
 
-    def request(self, event_type, payload):
+    def request(self, event_type, payload, timeout=None):
         self.calls.append((event_type, payload))
         return self.response
 
@@ -160,3 +180,31 @@ def test_json_ui_stream_events_share_a_stream_id():
     ]
     assert {event["stream_id"] for event in events} == {events[0]["stream_id"]}
     assert all(event["request_id"] == "req-3" for event in events)
+
+
+def test_json_ui_requests_editor_diagnostics_without_rendering_an_interaction():
+    interactions = RecordingInteractions(
+        {
+            "status": "ok",
+            "diagnostics": [
+                {
+                    "path": "app.py",
+                    "line": 3,
+                    "column": 5,
+                    "severity": "error",
+                    "message": "Undefined name",
+                }
+            ],
+        }
+    )
+    ui = JsonUI(JsonLineWriter(io.StringIO()), interactions)
+
+    result = ui.editor_diagnostics("/tmp/project/app.py", wait_for_update=True)
+
+    assert result["status"] == "ok"
+    assert interactions.calls == [
+        (
+            "editor_diagnostics_request",
+            {"path": "/tmp/project/app.py", "wait_for_update": True},
+        )
+    ]

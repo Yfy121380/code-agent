@@ -10,9 +10,10 @@ from datetime import datetime
 from .. import tools as toolkit
 from ..tools.file_state import has_current_file_state, record_file_state
 from .change_preview import build_change_preview, capture_text_snapshot
+from .editor_diagnostics import EditorDiagnosticsMixin, format_editor_diagnostics
 
 
-class ToolExecutionMixin:
+class ToolExecutionMixin(EditorDiagnosticsMixin):
     def shell_analysis_metadata(self):
         analysis = getattr(self, "_last_shell_analysis", None)
         if analysis is None or not hasattr(analysis, "to_metadata"):
@@ -173,16 +174,17 @@ class ToolExecutionMixin:
             self.ui.tool_start(name, args, risk_level=self.tool_risk_level(name, tool))
         edit_path = self.path(args["path"]) if name in {"write_file", "patch_file"} else None
         if edit_path is not None:
+            self._capture_editor_diagnostic_baseline(edit_path)
             self.track_file_edit(edit_path)
         edit_before = capture_text_snapshot(edit_path) if edit_path is not None else None
         try:
             raw_output = toolkit.normalize_tool_output(tool["run"](args))
-            result, truncation_metadata = self.truncate_tool_result(raw_output.content)
+            raw_result = str(raw_output.content)
             content_blocks = list(raw_output.content_blocks or [])
             tool_status = "ok"
             tool_error_code = ""
             if name == "run_shell":
-                match = re.search(r"exit_code:\s*(-?\d+)", result)
+                match = re.search(r"exit_code:\s*(-?\d+)", raw_result)
                 exit_code = int(match.group(1)) if match else 0
                 if exit_code != 0:
                     tool_status = "error"
@@ -207,6 +209,15 @@ class ToolExecutionMixin:
             if tool_status == "ok" and name in {"read_file", "write_file", "patch_file"}:
                 with self._session_lock:
                     record_file_state(self.session, self.root, args["path"])
+            introduced_diagnostics = None
+            if tool_status == "ok" and edit_path is not None:
+                introduced_diagnostics = self._introduced_editor_diagnostics(edit_path)
+                diagnostic_text = format_editor_diagnostics(
+                    introduced_diagnostics or []
+                )
+                if diagnostic_text:
+                    raw_result = f"{raw_result}\n\n{diagnostic_text}"
+            result, truncation_metadata = self.truncate_tool_result(raw_result)
             change_preview = None
             if tool_status == "ok" and edit_path is not None and edit_before is not None:
                 change_preview = build_change_preview(self.root, edit_path, edit_before)
@@ -226,6 +237,11 @@ class ToolExecutionMixin:
             }
             if change_preview is not None:
                 self._last_tool_result_metadata["change_preview"] = change_preview
+            if introduced_diagnostics is not None:
+                self._last_tool_result_metadata["editor_diagnostics_checked"] = True
+                self._last_tool_result_metadata["editor_diagnostics_new_errors"] = len(
+                    introduced_diagnostics
+                )
             return result
         except Exception as exc:
             security_event_type = "path_denied" if "path outside" in str(exc) or "path is sensitive" in str(exc) else ""
