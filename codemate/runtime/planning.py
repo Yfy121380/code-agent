@@ -28,6 +28,8 @@ PLAN_VISIBLE_TOOLS = {
     "todo_list",
     "skill_load",
     "delegate",
+    "memory_index",
+    "memory_read",
     *PLAN_INTERACTION_TOOLS,
 }
 

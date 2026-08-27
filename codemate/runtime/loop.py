@@ -69,24 +69,21 @@ class RuntimeLoopMixin:
         user_message,
         final,
         *,
-        candidate_extracted_this_run,
+        memory_maintained_this_run,
     ):
         """Run optional maintenance without changing an already completed result."""
         operations = [
             ("session_title", lambda: self.maybe_generate_session_title(user_message, final)),
         ]
-        if not candidate_extracted_this_run:
-            operations.append(
-                (
-                    "memory_candidate_extract",
-                    lambda: self.maybe_extract_memory_candidates(
-                        task_state=task_state,
-                        reason="auto",
-                        background=True,
-                    ),
-                )
+        operations.append(
+            (
+                "long_term_memory",
+                lambda: self.memory_backend.after_completion(
+                    task_state,
+                    already_maintained=memory_maintained_this_run,
+                ),
             )
-        operations.append(("memory_dream", lambda: self.schedule_dream_if_needed(task_state)))
+        )
         for operation, callback in operations:
             try:
                 callback()
@@ -353,8 +350,8 @@ class RuntimeLoopMixin:
 
         输入 / 输出：
         - 输入：`user_message`，即用户这一次的任务描述
-        - 输出：字符串形式的最终回答；主 agent 不限制工具步数，delegate/dream
-          这类受控子流程仍会在达到步数上限时返回停止原因
+        - 输出：字符串形式的最终回答；主 agent 不限制工具步数，受控子流程
+          仍会在达到步数上限时返回停止原因
 
         在 agent 链路里的位置：
         它是 CLI 和底层工具/模型之间的核心桥梁。CLI 收到用户输入后基本只做
@@ -365,6 +362,17 @@ class RuntimeLoopMixin:
         """
         # 1. 登记本次 ask：先把用户请求写入 session，再创建 run 工件。
         self._current_conversation_id = self.new_conversation_id()
+        explicit_user_inputs = [
+            str(source_user_request if source_user_request is not None else user_message)
+        ]
+        explicit_user_inputs.extend(
+            str(item.get("comment") or "")
+            for item in (response_annotations or [])
+            if isinstance(item, dict) and str(item.get("comment") or "").strip()
+        )
+        # Core memory may cite composer text and annotation comments, but never
+        # selected assistant text or the annotation-rendering template.
+        self._current_source_user_request = "\n".join(explicit_user_inputs)
         task_state = TaskState.create(
             run_id=self.new_run_id(),
             task_id=self.new_task_id(),
@@ -403,11 +411,11 @@ class RuntimeLoopMixin:
                 dict(item) for item in response_annotations
             ]
         self.record(user_record)
-        self.retrieve_long_term_memory_for_request(user_message, task_state)
+        self.memory_backend.prepare_request(user_message, task_state)
 
         tool_steps = 0
         attempts = 0
-        candidate_extracted_this_run = False
+        memory_maintained_this_run = False
         limit_steps = not (self.runtime_mode == "agent" and self.depth == 0)
         max_attempts = max(self.max_steps * 3, self.max_steps + 4) if limit_steps else None
 
@@ -421,7 +429,11 @@ class RuntimeLoopMixin:
             prompt_metadata["context_budget"] = self.context_budget_status()
             if prompt_metadata["context_budget"].get("compact_needed"):
                 compact_result = self.compact_history(reason="auto", task_state=task_state)
-                candidate_extracted_this_run = bool(compact_result.get("candidate_extraction"))
+                maintenance_result = compact_result.get("memory_maintenance")
+                memory_maintained_this_run = (
+                    isinstance(maintenance_result, dict)
+                    and maintenance_result.get("status") == "ok"
+                )
                 if compact_result.get("status") == "error":
                     final = f"History compaction failed: {compact_result.get('reason', 'unknown error')}"
                     task_state.stop_retry_limit(final)
@@ -616,7 +628,7 @@ class RuntimeLoopMixin:
                     task_state,
                     user_message,
                     final,
-                    candidate_extracted_this_run=candidate_extracted_this_run,
+                    memory_maintained_this_run=memory_maintained_this_run,
                 )
                 return final
 
@@ -650,6 +662,6 @@ class RuntimeLoopMixin:
             task_state,
             user_message,
             final,
-            candidate_extracted_this_run=candidate_extracted_this_run,
+            memory_maintained_this_run=memory_maintained_this_run,
         )
         return final

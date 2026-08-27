@@ -18,11 +18,14 @@ class CodematePaths:
     project_settings: Path
     project_skills: Path
     home_root: Path
+    user_memory_root: Path
+    progressive_core_memory: Path
     user_settings: Path
     user_skills: Path
     project_state_root: Path
     sessions_root: Path
     memory_root: Path
+    progressive_memory_root: Path
 
 
 def codemate_home():
@@ -49,11 +52,14 @@ def codemate_paths(workspace_root, home_root=None):
         project_settings=project_config_root / "settings.json",
         project_skills=project_config_root / "skills",
         home_root=home,
+        user_memory_root=home / "memory",
+        progressive_core_memory=home / "memory" / "progressive" / "core.json",
         user_settings=home / "settings.json",
         user_skills=home / "skills",
         project_state_root=project_state_root,
         sessions_root=project_state_root / "sessions",
         memory_root=project_state_root / "memory",
+        progressive_memory_root=project_state_root / "memory" / "progressive",
     )
 
 
@@ -65,10 +71,13 @@ def ensure_codemate_layout(workspace_root, home_root=None):
         paths.project_config_root,
         paths.project_skills,
         paths.home_root,
+        paths.user_memory_root,
+        paths.progressive_core_memory.parent,
         paths.user_skills,
         paths.project_state_root,
         paths.sessions_root,
         paths.memory_root,
+        paths.progressive_memory_root,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return paths

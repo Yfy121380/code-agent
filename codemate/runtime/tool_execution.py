@@ -38,6 +38,8 @@ class ToolExecutionMixin(EditorDiagnosticsMixin):
             return True
         if name in {"list_files", "read_file", "grep"}:
             return True
+        if name in {"memory_index", "memory_read"}:
+            return True
         if name in {"todo_write", "todo_list", "skill_load", "skill_unload", "delegate", "review"}:
             return True
         if name in toolkit.PLAN_INTERACTION_TOOLS:

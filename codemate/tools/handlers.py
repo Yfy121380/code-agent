@@ -774,6 +774,68 @@ def tool_review(agent, args):
     return run_review(agent, args.get("target", ""))
 
 
+def _render_memory_record(record):
+    return (
+        f"Memory {record.id}\n"
+        f"Title: {record.title}\n"
+        f"Revision: {record.revision}\n"
+        f"Updated: {record.updated_at}\n\n"
+        f"{record.content}"
+    )
+
+
+def tool_memory_index(agent, args):
+    result = agent.memory_backend.index(
+        query=args.get("query", ""),
+        offset=args.get("offset", 0),
+        limit=args.get("limit", 50),
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def tool_memory_read(agent, args):
+    return _render_memory_record(agent.memory_backend.read(args["memory_id"]))
+
+
+def tool_core_memory_update(agent, args):
+    return json.dumps(
+        agent.memory_backend.update_core(
+            args["key"],
+            args["value"],
+            args["reason"],
+            args["explicit_user_statement"],
+        ),
+        ensure_ascii=False,
+    )
+
+
+def tool_core_memory_remove(agent, args):
+    return json.dumps(
+        agent.memory_backend.remove_core(
+            args["key"],
+            args["reason"],
+            args["explicit_user_statement"],
+        ),
+        ensure_ascii=False,
+    )
+
+
+def tool_memory_create(agent, args):
+    record = agent.memory_backend.create(args["title"], args["content"], args["reason"])
+    return f"created {record.id}: {record.title} (revision {record.revision})"
+
+
+def tool_memory_update(agent, args):
+    record = agent.memory_backend.update(
+        args["memory_id"],
+        args["title"],
+        args["content"],
+        args["reason"],
+        args["expected_revision"],
+    )
+    return f"updated {record.id}: {record.title} (revision {record.revision})"
+
+
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
@@ -790,4 +852,10 @@ _TOOL_RUNNERS = {
     "submit_plan": tool_submit_plan,
     "skill_load": tool_skill_load,
     "skill_unload": tool_skill_unload,
+    "memory_index": tool_memory_index,
+    "memory_read": tool_memory_read,
+    "core_memory_update": tool_core_memory_update,
+    "core_memory_remove": tool_core_memory_remove,
+    "memory_create": tool_memory_create,
+    "memory_update": tool_memory_update,
 }

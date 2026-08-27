@@ -48,7 +48,7 @@ CodeMate 是一个本地运行的 coding agent。它面向代码仓库工作，�
 - 上下文分层、预算统计和 history compact
 - 会话持久化、恢复、重命名和切换
 - Skill 加载与卸载
-- 长期记忆：候选提取、dream 整理、相关记忆召回
+- 长期记忆：可选择旧版 Candidate/Dream，或使用 Core + 渐进式项目记忆
 - trace 和 run 记录，便于复盘 agent 的行为
 
 ## 快速开始
@@ -181,9 +181,9 @@ CodeMate 会自动创建项目级和用户级目录。
 /model <name>        Set model from the current provider's allowed model list.
 /budget              Show context section sizes and token budget usage.
 /compact             Compact older conversation history now.
-/remember <text>     Add a high-confidence memory candidate.
-/dream               Run memory consolidation in foreground.
-/dream --background  Run memory consolidation in background.
+/remember <text>     Store explicit memory through the selected backend.
+/dream               Run legacy memory consolidation in foreground.
+/dream --background  Run legacy memory consolidation in background.
 /session             Show current session information.
 /session list        List sessions for this project.
 /session rename      Rename the current session.
@@ -248,11 +248,21 @@ CodeMate 的上下文分层包括：
 
 Todo 和最近调用的 Skill 保存为会话状态，需要时通过工具结果或 compact 恢复消息进入 history。可以使用 `/budget` 查看各层字符量、工具 schema 大小、估算 token 和模型上下文预算。历史过大时可以手动 `/compact`，运行时也会在需要时压缩旧 history。
 
-长期记忆采用三段式流程：
+长期记忆后端通过 `settings.json` 的 `memory.backend` 选择，支持
+`legacy`、`progressive` 和 `disabled`；默认保持 `legacy`。Session 创建后会固定
+后端，恢复旧会话不会因为默认配置变化而切换。
+
+Legacy 后端采用三段式流程：
 
 1. 从会话中定期提取候选记忆。
 2. dream 过程整理、去重、消解冲突，形成长期记忆。
 3. 每轮请求前根据最近上下文召回相关记忆。
+
+Progressive 后端将跨项目的显式用户事实存入 Core Memory，将项目知识按主题保存
+为平等的 Ordinary Memory。每轮按访问次数和 30 天指数半衰期选择分数最高的 25 个
+`ID + title`，其余标题可通过分页 `memory_index` 查询，正文由 `memory_read` 按需加载。
+每 20 个完整用户轮次或 50,000 个新增字符进行一次增量整理，History Compact 前也会
+强制整理尚未处理的完整对话。
 
 ## MCP
 

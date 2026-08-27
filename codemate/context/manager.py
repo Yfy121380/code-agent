@@ -29,7 +29,12 @@ class ContextManager:
         user_message = str(user_message)
         rendered, selected_notes = self._render_sections(user_message)
         prompt = self._assemble_prompt(rendered)
-        metadata = self._metadata(prompt=prompt, rendered=rendered, selected_notes=selected_notes, user_message=user_message)
+        metadata = self._metadata(
+            prompt=prompt,
+            rendered=rendered,
+            selected_notes=selected_notes,
+            user_message=user_message,
+        )
         return prompt, metadata
 
     def build_messages(self, user_message):
@@ -37,10 +42,17 @@ class ContextManager:
         rendered, selected_notes = self._render_sections(user_message)
         system, messages = self._assemble_messages(rendered)
         prompt_view = self._messages_prompt_view(system, messages)
-        metadata = self._metadata(prompt=prompt_view, rendered=rendered, selected_notes=selected_notes, user_message=user_message)
+        metadata = self._metadata(
+            prompt=prompt_view,
+            rendered=rendered,
+            selected_notes=selected_notes,
+            user_message=user_message,
+        )
         metadata["message_count"] = len(messages)
         metadata["system_chars"] = len(system)
-        metadata["messages_chars"] = sum(len(str(message.get("content", ""))) for message in messages)
+        metadata["messages_chars"] = sum(
+            len(str(message.get("content", ""))) for message in messages
+        )
         return MessageBuild(system=system, messages=messages, metadata=metadata)
 
     def _render_sections(self, user_message):
@@ -59,23 +71,60 @@ class ContextManager:
             skills_text = str(self.agent.available_skills_text())
 
         selected_notes = []
-        if relevant_memory_enabled:
-            selected_notes = list(getattr(self.agent, "relevant_long_term_memory", []) or [])[:RELEVANT_MEMORY_LIMIT]
+        memory_context = None
+        backend = getattr(self.agent, "memory_backend", None)
+        if backend is not None and getattr(backend, "name", "legacy") == "progressive":
+            memory_context = backend.context()
+        elif relevant_memory_enabled:
+            selected_notes = list(
+                getattr(self.agent, "relevant_long_term_memory", []) or []
+            )[:RELEVANT_MEMORY_LIMIT]
 
-        relevant_raw, relevant_details = self._format_relevant_memory(selected_notes)
+        if memory_context is not None:
+            core_text = str(memory_context.core or "").strip()
+            project_text = str(memory_context.project or "").strip()
+            relevant_raw = "\n\n".join(
+                item for item in (core_text, project_text) if item
+            )
+            relevant_details = dict(memory_context.details or {})
+            relevant_details["core_chars"] = len(core_text)
+        else:
+            relevant_raw, relevant_details = self._format_relevant_memory(
+                selected_notes
+            )
         history_summary_text = self._history_summary_text()
         history_render = self.history_renderer.render(user_message)
         rendered = {
-            "prefix": SectionRender(raw=str(getattr(self.agent, "prefix", "")), budget=0, rendered=str(getattr(self.agent, "prefix", "")), details={}),
-            "skills": SectionRender(raw=skills_text, budget=0, rendered=skills_text, details=self._skills_details(skills_text)),
+            "prefix": SectionRender(
+                raw=str(getattr(self.agent, "prefix", "")),
+                budget=0,
+                rendered=str(getattr(self.agent, "prefix", "")),
+                details={},
+            ),
+            "skills": SectionRender(
+                raw=skills_text,
+                budget=0,
+                rendered=skills_text,
+                details=self._skills_details(skills_text),
+            ),
             "runtime_context": SectionRender(
                 raw=runtime_context_text,
                 budget=0,
                 rendered=runtime_context_text,
                 details={},
             ),
-            "relevant_memory": SectionRender(raw=relevant_raw, budget=0, rendered=relevant_raw, details=relevant_details),
-            HISTORY_SUMMARY_SECTION: SectionRender(raw=history_summary_text, budget=0, rendered=history_summary_text, details={"has_summary": bool(history_summary_text.strip())}),
+            "relevant_memory": SectionRender(
+                raw=relevant_raw,
+                budget=0,
+                rendered=relevant_raw,
+                details=relevant_details,
+            ),
+            HISTORY_SUMMARY_SECTION: SectionRender(
+                raw=history_summary_text,
+                budget=0,
+                rendered=history_summary_text,
+                details={"has_summary": bool(history_summary_text.strip())},
+            ),
             "history": history_render,
             CURRENT_REQUEST_SECTION: SectionRender(
                 raw=f"Current user request:\n{user_message}",
@@ -87,7 +136,9 @@ class ContextManager:
         return rendered, selected_notes
 
     def _history_summary_text(self):
-        summary = str(getattr(self.agent, "session", {}).get("history_summary", "") or "").strip()
+        summary = str(
+            getattr(self.agent, "session", {}).get("history_summary", "") or ""
+        ).strip()
         if not summary:
             return ""
         if hasattr(self.agent, "wrap_history_summary"):
@@ -115,7 +166,14 @@ class ContextManager:
             reason = str(note.get("reason", "") or "").strip()
             if source not in LONG_TERM_MEMORY_SOURCES or not text:
                 continue
-            note_items.append({"source": source, "created_at": created_at, "text": text, "reason": reason})
+            note_items.append(
+                {
+                    "source": source,
+                    "created_at": created_at,
+                    "text": text,
+                    "reason": reason,
+                }
+            )
 
         grouped = {source: [] for source in LONG_TERM_MEMORY_SOURCES}
         for item in note_items:
@@ -143,7 +201,9 @@ class ContextManager:
             "rendered_notes": rendered_notes,
             "selected_count": len(selected_texts),
             "rendered_count": len(rendered_notes),
-            "group_counts": {source: len(grouped[source]) for source in LONG_TERM_MEMORY_SOURCES},
+            "group_counts": {
+                source: len(grouped[source]) for source in LONG_TERM_MEMORY_SOURCES
+            },
         }
 
     def _assemble_prompt(self, rendered):
@@ -170,7 +230,9 @@ class ContextManager:
         ).strip()
         messages = [{"role": "user", "content": context_content}]
         if rendered[HISTORY_SUMMARY_SECTION].details.get("has_summary"):
-            messages.append({"role": "user", "content": rendered[HISTORY_SUMMARY_SECTION].rendered})
+            messages.append(
+                {"role": "user", "content": rendered[HISTORY_SUMMARY_SECTION].rendered}
+            )
         messages.extend(copy.deepcopy(rendered["history"].details.get("messages", [])))
         return rendered["prefix"].rendered, messages
 
@@ -179,9 +241,13 @@ class ContextManager:
         for message in messages:
             role = message.get("role")
             if role == "assistant" and message.get("tool_calls"):
-                lines.append(f"[assistant:tool_calls] {json.dumps(message.get('tool_calls'), ensure_ascii=False, sort_keys=True)}")
+                lines.append(
+                    f"[assistant:tool_calls] {json.dumps(message.get('tool_calls'), ensure_ascii=False, sort_keys=True)}"
+                )
             elif role == "tool":
-                lines.append(f"[tool:{message.get('name', '')}] {message.get('content', '')}")
+                lines.append(
+                    f"[tool:{message.get('name', '')}] {message.get('content', '')}"
+                )
             else:
                 lines.append(f"[{role}] {message.get('content', '')}")
         return "\n\n".join(lines).strip()
@@ -203,33 +269,75 @@ class ContextManager:
                 "limit": RELEVANT_MEMORY_LIMIT,
                 "selected_count": len(selected_notes),
                 "selected_notes": [note["text"] for note in selected_notes],
-                "selected_created_at": [str(note.get("created_at", "") or "").strip() for note in selected_notes],
-                "selected_reasons": [str(note.get("reason", "") or "").strip() for note in selected_notes],
-                "selected_sources": [str(note.get("source", "")).strip() for note in selected_notes],
-                "selected_kinds": [str(note.get("kind", "long_term")).strip() or "long_term" for note in selected_notes],
-                "retrieval_status": str(getattr(self.agent, "long_term_memory_status", "not_run")),
+                "selected_created_at": [
+                    str(note.get("created_at", "") or "").strip()
+                    for note in selected_notes
+                ],
+                "selected_reasons": [
+                    str(note.get("reason", "") or "").strip() for note in selected_notes
+                ],
+                "selected_sources": [
+                    str(note.get("source", "")).strip() for note in selected_notes
+                ],
+                "selected_kinds": [
+                    str(note.get("kind", "long_term")).strip() or "long_term"
+                    for note in selected_notes
+                ],
+                "retrieval_status": str(
+                    getattr(self.agent, "long_term_memory_status", "not_run")
+                ),
                 "raw_chars": rendered["relevant_memory"].raw_chars,
                 "rendered_chars": rendered["relevant_memory"].rendered_chars,
-                "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),
-                "rendered_count": int(rendered["relevant_memory"].details.get("rendered_count", 0)),
+                "rendered_notes": list(
+                    rendered["relevant_memory"].details.get("rendered_notes", [])
+                ),
+                "rendered_count": int(
+                    rendered["relevant_memory"].details.get("rendered_count", 0)
+                ),
+                "backend": str(
+                    getattr(
+                        getattr(self.agent, "memory_backend", None), "name", "legacy"
+                    )
+                ),
+                "ordinary_count": int(
+                    rendered["relevant_memory"].details.get("ordinary_count", 0)
+                ),
+                "visible_count": int(
+                    rendered["relevant_memory"].details.get("visible_count", 0)
+                ),
+                "core_chars": int(
+                    rendered["relevant_memory"].details.get("core_chars", 0)
+                ),
             },
             "skills": {
                 "raw_chars": rendered["skills"].raw_chars,
                 "rendered_chars": rendered["skills"].rendered_chars,
-                "selected_count": int(rendered["skills"].details.get("selected_count", 0)),
-                "rendered_count": int(rendered["skills"].details.get("rendered_count", 0)),
+                "selected_count": int(
+                    rendered["skills"].details.get("selected_count", 0)
+                ),
+                "rendered_count": int(
+                    rendered["skills"].details.get("rendered_count", 0)
+                ),
                 "description_budget": 0,
             },
             "history_summary": {
                 "raw_chars": rendered[HISTORY_SUMMARY_SECTION].raw_chars,
                 "rendered_chars": rendered[HISTORY_SUMMARY_SECTION].rendered_chars,
-                "has_summary": bool(rendered[HISTORY_SUMMARY_SECTION].details.get("has_summary")),
+                "has_summary": bool(
+                    rendered[HISTORY_SUMMARY_SECTION].details.get("has_summary")
+                ),
             },
             "history": {
                 "raw_chars": rendered["history"].raw_chars,
                 "rendered_chars": rendered["history"].rendered_chars,
-                "collapsed_duplicate_tool_results": int(rendered["history"].details.get("collapsed_duplicate_tool_results", 0)),
-                "cleared_old_tool_results": int(rendered["history"].details.get("cleared_old_tool_results", 0)),
+                "collapsed_duplicate_tool_results": int(
+                    rendered["history"].details.get(
+                        "collapsed_duplicate_tool_results", 0
+                    )
+                ),
+                "cleared_old_tool_results": int(
+                    rendered["history"].details.get("cleared_old_tool_results", 0)
+                ),
             },
             "current_request": {
                 "text": user_message,

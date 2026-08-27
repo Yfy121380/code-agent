@@ -373,6 +373,8 @@ class BridgeServer:
         if name == "remember":
             return self.agent.remember_long_term(str(args.get("text") or ""))
         if name == "dream":
+            if self.agent.memory_backend_name != "legacy":
+                raise ValueError("dream is only available with the legacy memory backend")
             if bool(args.get("background")):
                 return {"started": self.agent.start_dream_background(reason="manual")}
             return self.agent.run_dream_once(reason="manual", foreground=True)
@@ -505,6 +507,11 @@ class BridgeServer:
                 max_new_tokens=max_new_tokens,
                 secret_env_names=secret_env_names,
                 feature_flags=feature_flags,
+                memory_backend=(
+                    str(session.get("memory_backend"))
+                    if isinstance(session, dict) and session.get("memory_backend")
+                    else None
+                ),
                 stream=stream,
                 ui=ui,
             )

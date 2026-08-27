@@ -214,6 +214,7 @@ def build_agent(args, ui=None):
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
             feature_flags=feature_flags,
+            memory_backend=getattr(args, "memory_backend", None),
             stream=args.stream,
             ui=ui,
         )
@@ -226,6 +227,7 @@ def build_agent(args, ui=None):
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
         feature_flags=feature_flags,
+        memory_backend=getattr(args, "memory_backend", None),
         stream=args.stream,
         ui=ui,
     )
@@ -238,6 +240,12 @@ def build_arg_parser():
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    parser.add_argument(
+        "--memory-backend",
+        choices=("legacy", "progressive", "disabled"),
+        default=None,
+        help="Long-term memory implementation for new sessions; resumed sessions keep their original backend.",
+    )
     parser.add_argument("--provider", choices=("ollama", "openai", "anthropic", "deepseek"), default="openai", help="Model backend to use.")
     parser.add_argument(
         "--model",
@@ -257,7 +265,7 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace and task-state redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations for bounded child processes such as delegate and dream.")
+    parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations for bounded child processes.")
     parser.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum model output tokens per step.")
     parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming model output in the terminal.")
     parser.set_defaults(stream=True)
@@ -522,9 +530,15 @@ def run_cli(args, ui, agent_holder):
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 continue
-            print(f"remembered: {result['path']}")
+            if isinstance(result, dict) and result.get("path"):
+                print(f"remembered: {result['path']}")
+            else:
+                print(f"remembered: {result}")
             continue
         if user_input in {"/dream", "/dream --background"}:
+            if agent.memory_backend_name != "legacy":
+                print("dream is only available with the legacy memory backend")
+                continue
             if user_input == "/dream --background":
                 agent.start_dream_background(reason="manual")
                 continue

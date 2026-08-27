@@ -259,7 +259,7 @@ class SessionStore:
         # 不参与用户会话恢复，也不计入项目的人类会话数量。
         sessions = []
         for path in self.root.glob("*/session.json"):
-            if path.parent.name.startswith(("dream-", "delegate-", "review-")):
+            if path.parent.name.startswith(("dream-", "delegate-", "review-", "memory-")):
                 continue
             try:
                 session = self.load(path.parent.name)

@@ -4,7 +4,9 @@
 重点边界：父子目录规则合并、同类规则独立合并、临时规则参与聚合、sandbox 三态配置与旧配置迁移。
 """
 
-from codemate.config.paths import codemate_paths
+import pytest
+
+from codemate.config.paths import codemate_paths, ensure_codemate_layout
 from codemate.config.settings import build_permission_rules, load_codemate_settings
 
 
@@ -111,3 +113,21 @@ def test_sandbox_rejects_mode_and_legacy_enabled_together(tmp_path):
         assert "cannot define both mode and legacy enabled" in str(exc)
     else:
         raise AssertionError("ambiguous sandbox settings were accepted")
+
+
+def test_memory_backend_uses_project_override_and_validates_value(tmp_path):
+    paths = ensure_codemate_layout(tmp_path)
+    paths.user_settings.write_text(
+        '{"memory": {"backend": "legacy"}}\n', encoding="utf-8"
+    )
+    paths.project_settings.write_text(
+        '{"memory": {"backend": "progressive"}}\n', encoding="utf-8"
+    )
+
+    assert load_codemate_settings(paths).memory == {"backend": "progressive"}
+
+    paths.project_settings.write_text(
+        '{"memory": {"backend": "both"}}\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="memory.backend must be one of"):
+        load_codemate_settings(paths)

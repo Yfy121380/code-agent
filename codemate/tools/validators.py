@@ -263,6 +263,71 @@ def validate_tool(agent, name, args):
     # deny 在这里直接抛出；返回值只可能是 allow/ask gate。
     args = args or {}
 
+    if name in {
+        "memory_index",
+        "memory_read",
+        "core_memory_update",
+        "core_memory_remove",
+        "memory_create",
+        "memory_update",
+    }:
+        if getattr(agent, "memory_backend_name", "legacy") != "progressive":
+            raise ToolPolicyError(
+                "progressive memory tools require the progressive memory backend",
+                code="memory_backend_mismatch",
+                security_event_type="memory_backend_mismatch",
+            )
+        if name == "memory_read":
+            if set(args) != {"memory_id"} or not isinstance(args.get("memory_id"), str):
+                raise ValueError(f"{name} only accepts a string memory_id")
+            return ToolGate("allow", "memory_read")
+        if name == "memory_index":
+            if set(args).difference({"query", "offset", "limit"}):
+                raise ValueError("memory_index only accepts query, offset, and limit")
+            if "query" in args and not isinstance(args["query"], str):
+                raise ValueError("query must be a string")
+            offset = args.get("offset", 0)
+            limit = args.get("limit", 50)
+            if (
+                not isinstance(offset, int)
+                or isinstance(offset, bool)
+                or not isinstance(limit, int)
+                or isinstance(limit, bool)
+            ):
+                raise ValueError("offset and limit must be integers")
+            if offset < 0 or not 1 <= limit <= 100:
+                raise ValueError("offset must be >= 0 and limit must be in [1, 100]")
+            return ToolGate("allow", "memory_index")
+        if name == "core_memory_update":
+            if set(args) != {"key", "value", "reason", "explicit_user_statement"}:
+                raise ValueError("core_memory_update requires key, value, reason, and explicit_user_statement")
+            if not all(isinstance(args.get(key), str) for key in args):
+                raise ValueError("core_memory_update fields must be strings")
+            return ToolGate("allow", "core_memory_update")
+        if name == "core_memory_remove":
+            if set(args) != {"key", "reason", "explicit_user_statement"}:
+                raise ValueError("core_memory_remove requires key, reason, and explicit_user_statement")
+            if not all(isinstance(args.get(key), str) for key in args):
+                raise ValueError("core_memory_remove fields must be strings")
+            return ToolGate("allow", "core_memory_remove")
+        if name == "memory_create":
+            if set(args) != {"title", "content", "reason"}:
+                raise ValueError("memory_create requires title, content, and reason")
+            if not all(isinstance(args.get(key), str) for key in args):
+                raise ValueError("memory_create fields must be strings")
+            return ToolGate("allow", "memory_create")
+        if set(args) != {"memory_id", "title", "content", "reason", "expected_revision"}:
+            raise ValueError("memory_update requires memory_id, title, content, reason, and expected_revision")
+        if not all(isinstance(args.get(key), str) for key in ("memory_id", "title", "content", "reason")):
+            raise ValueError("memory_update text fields must be strings")
+        if (
+            not isinstance(args.get("expected_revision"), int)
+            or isinstance(args.get("expected_revision"), bool)
+            or args["expected_revision"] < 1
+        ):
+            raise ValueError("expected_revision must be a positive integer")
+        return ToolGate("allow", "memory_update")
+
     if name in PLAN_INTERACTION_TOOLS:
         if not bool(getattr(agent, "is_plan_mode", lambda: False)()):
             raise ToolPolicyError(

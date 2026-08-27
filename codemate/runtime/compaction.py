@@ -151,14 +151,7 @@ class HistoryCompactionMixin:
             self._emit_compact_trace(task_state, "history_compact", result)
             return result
 
-        candidate_result = {}
-        if hasattr(self, "maybe_extract_memory_candidates"):
-            candidate_result = self.maybe_extract_memory_candidates(
-                task_state=task_state,
-                reason="before_compact",
-                background=False,
-                force=True,
-            )
+        memory_result = self.memory_backend.before_compact(task_state)
 
         self.ui.compact_start(reason=reason)
         original_history = list(self.session.get("history", []))
@@ -191,7 +184,12 @@ class HistoryCompactionMixin:
                 result = {
                     "status": "ok",
                     "reason": reason,
-                    "candidate_extraction": candidate_result,
+                    "memory_maintenance": memory_result,
+                    # Retained for legacy trace consumers while the legacy
+                    # backend remains selectable.
+                    "candidate_extraction": (
+                        memory_result if self.memory_backend_name == "legacy" else {}
+                    ),
                     "history_before_messages": before_messages,
                     "history_after_messages": len(self.session["history"]),
                     "history_compacted_messages": len(history_to_compact),
@@ -207,7 +205,10 @@ class HistoryCompactionMixin:
         result = {
             "status": "error",
             "reason": last_error or "compact_failed",
-            "candidate_extraction": candidate_result,
+            "memory_maintenance": memory_result,
+            "candidate_extraction": (
+                memory_result if self.memory_backend_name == "legacy" else {}
+            ),
             "history_messages": before_messages,
             "attempts": attempts,
             "duration_ms": int((time.monotonic() - started_at) * 1000),

@@ -3,7 +3,7 @@
 CodeMate 是包在模型外面的控制循环：负责组 prompt、解析模型输出、
 校验并执行工具、写 trace、维护会话状态，以及在合适的时候停下来。
 现在主要负责状态管理，调用循环见loop.py、工具在tool_execution.py、
-审批在approvals.py、长期记忆整理在dream.py。
+审批在approvals.py，长期记忆通过可选 backend 隔离旧版 Dream 与渐进式记忆。
 """
 
 import json
@@ -20,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import memory as memorylib
+from ..memory.backend import build_memory_backend
 from ..config import build_permission_rules, ensure_codemate_layout, load_codemate_settings
 from ..context import ContextManager, repair_incomplete_tool_results
 from ..context.token_budget import (
@@ -107,6 +108,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         ui=None,
         allowed_tools=None,
         memory_scope_only=False,
+        memory_backend=None,
         runtime_mode="agent",
         stream=True,
         timezone_name=DEFAULT_LOCAL_TIMEZONE,
@@ -118,9 +120,6 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # session、memory、skills、settings 都从这里获得统一绝对路径。
         self.paths = ensure_codemate_layout(self.root)
         self.settings = load_codemate_settings(self.paths)
-        # Long-term memory has its own on-disk lifecycle; initialize its files
-        # directly instead of relying on the removed short-memory facade.
-        memorylib.ensure_long_term_memory(self.root)
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -144,6 +143,16 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
+        configured_memory_backend = str(
+            memory_backend or self.settings.memory.get("backend", "legacy")
+        )
+        if not self.feature_enabled("long_term_memory"):
+            configured_memory_backend = "disabled"
+        elif session is not None:
+            # Sessions created before selectable backends belong to the legacy
+            # implementation. This prevents a settings change from silently
+            # changing memory semantics when an old session is resumed.
+            configured_memory_backend = str(session.get("memory_backend") or "legacy")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
@@ -155,7 +164,9 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "history_summary": "",
             "workflow_mode": AGENT_MODE,
             "plan": None,
+            "memory_backend": configured_memory_backend,
             "memory_candidate_checkpoint": "",
+            "memory_consolidation_checkpoint": "",
             "read_files": {},
             "todos": [],
             "invoked_skills": [],
@@ -178,6 +189,14 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._latest_change_set = None
         # 补齐字段
         self._ensure_session_shape()
+        self.memory_backend_name = (
+            "disabled"
+            if not self.feature_enabled("long_term_memory")
+            else str(self.session.get("memory_backend") or configured_memory_backend)
+        )
+        if self.memory_backend_name == "legacy":
+            memorylib.ensure_long_term_memory(self.root)
+        self.memory_backend = build_memory_backend(self, self.memory_backend_name)
         # 本会话内临时加入的权限规则，不写回 settings.json。
         # 用户恢复同一 session 后，这些审批过的目录仍然会参与权限聚合。
         self.temporary_permission_settings = self.session["temporary_permissions"]
@@ -238,6 +257,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self._last_review_metadata = {}
         # 后台候选记忆提取运行标记，避免用户快速连续输入时重复启动同一类维护任务。
         self._memory_candidate_extract_running = False
+        self._current_source_user_request = ""
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
         return cls(
@@ -283,6 +303,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("title_slug", "")
         self.session.setdefault("updated_at", self.session.get("created_at", now()))
         self.session.setdefault("memory_candidate_checkpoint", "")
+        self.session.setdefault("memory_backend", "legacy")
+        self.session.setdefault("memory_consolidation_checkpoint", "")
         self.session.setdefault("read_files", {})
         self.session.setdefault("todos", [])
         self.session.setdefault("invoked_skills", [])
@@ -397,6 +419,14 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 tool_signature=self.tool_signature(AGENT_MODE),
             )
 
+        if self.runtime_mode == "memory_consolidation":
+            text = self.memory_backend.prompt_rules(AGENT_MODE)
+            return PromptPrefix(
+                text=text,
+                hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                tool_signature=self.tool_signature(AGENT_MODE),
+            )
+
         tool_use_rules = textwrap.dedent(
             """\
             Tool use:
@@ -491,17 +521,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             - Do not call the review tool repeatedly when the reviewed changes have not materially changed.
             """
         ).strip()
-        memory_rules = textwrap.dedent(
-            """\
-            Memory:
-            - Relevant memory contains long-term project-scoped context selected for the current request.
-            - Treat relevant memory as background facts for this request and take it into account when reasoning, planning, editing, testing, and answering.
-            - user_profile: stable user background, goals, knowledge level, and durable preferences.
-            - feedback_workflow: reusable guidance about how Codemate should plan, code, test, report, and use tools with this user.
-            - project_context: durable project goals, architecture decisions, constraints, storage layout, permission model, and feature direction.
-            - Current tool results and file contents override memory when they conflict.
-            """
-        ).strip()
+        memory_rules = self.memory_backend.prompt_rules(mode)
         answer_rules = textwrap.dedent(
             """\
             Answer rules:
@@ -711,17 +731,37 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
     def runtime_context_text(self):
         local_now = self.local_now()
         current_date = local_now.date().isoformat()
+        lines = [
+            "Runtime context:",
+            f"- current_local_date: {current_date}",
+            f"- timezone: {self.timezone_name}",
+        ]
+        if self.memory_backend_name != "disabled":
+            memory_root = (
+                self.paths.progressive_memory_root
+                if self.memory_backend_name == "progressive"
+                else memorylib.memory_root(self.root)
+            )
+            lines.append(f"- memory_root: {memory_root}")
+        return "\n".join(lines)
+
+    def legacy_memory_prompt_rules(self):
         return textwrap.dedent(
-            f"""\
-            Runtime context:
-            - current_local_date: {current_date}
-            - timezone: {self.timezone_name}
-            - memory_root: {memorylib.memory_root(self.root)}
+            """\
+            Memory:
+            - Relevant memory contains long-term project-scoped context selected for the current request.
+            - Treat relevant memory as background facts and reconcile it with current tool results and repository evidence.
+            - user_profile stores stable user background and durable preferences.
+            - feedback_workflow stores reusable guidance about planning, coding, testing, reporting, and tool use.
+            - project_context stores durable project goals, architecture decisions, constraints, and feature direction.
             """
         ).strip()
 
-    def remember_long_term(self, text):
+    def remember_long_term_legacy(self, text):
         return memorylib.append_manual_candidate(self.root, text)
+
+    def remember_long_term(self, text):
+        return self.memory_backend.remember(text)
 
     def history_text(self):
         history = self.session["history"]
@@ -1035,6 +1075,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
     def _build_messages_and_metadata(self, user_message):
         message_build = self.context_manager.build_messages(user_message)
         metadata = dict(message_build.metadata)
+        effective_system_hash = hashlib.sha256(message_build.system.encode("utf-8")).hexdigest()
         sections = metadata.get("sections", {})
         metadata.update(
             {
@@ -1051,8 +1092,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 "request_chars": len(user_message),
                 "tool_count": len(self.active_tool_names()),
                 "recent_commits": len(self.workspace.recent_commits),
-                "prefix_hash": self.prefix_state.hash,
-                "prompt_cache_key": self.prefix_state.hash,
+                "prefix_hash": effective_system_hash,
+                "prompt_cache_key": effective_system_hash,
                 "workspace_fingerprint": self.workspace.fingerprint(),
                 "tool_signature": self.prefix_state.tool_signature,
                 "prompt_cache_supported": (
@@ -1087,6 +1128,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 self.session["plan"] = None
             self.session["history"] = []
             self.session["history_summary"] = ""
+            self.session["memory_candidate_checkpoint"] = ""
+            self.session["memory_consolidation_checkpoint"] = ""
             self.session["read_files"] = {}
             self.session["todos"] = []
             self.session["invoked_skills"] = []
@@ -1101,7 +1144,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         # 其他长生命周期资源，也可以继续收口在这里。
         self.quiesce_background_session_writes()
         try:
-            toolkit.close_mcp_connections(self)
+            try:
+                self.memory_backend.close()
+            finally:
+                toolkit.close_mcp_connections(self)
         finally:
             for thread in list(self._background_threads):
                 thread.join(timeout=1)

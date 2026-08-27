@@ -47,6 +47,9 @@ SETTINGS_TEMPLATE = {
     "sandbox": {
         "mode": "required",
     },
+    "memory": {
+        "backend": "legacy",
+    },
     "permissions": {
         "read": {
             "allow": [],
@@ -75,6 +78,7 @@ class CodemateSettings:
     merged: dict
     mcp_servers: dict
     sandbox: dict
+    memory: dict
     permission_rules: PermissionRules
 
 
@@ -235,6 +239,30 @@ def _merged_sandbox(user_settings, project_settings):
     return {"mode": mode}
 
 
+def _merged_memory(user_settings, project_settings):
+    """Resolve the default memory backend, with project settings taking precedence."""
+    backend = str(default_settings()["memory"]["backend"])
+    for settings in (user_settings, project_settings):
+        value = settings.get("memory", {})
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError("memory must be an object")
+        if "backend" not in value:
+            continue
+        candidate = value["backend"]
+        if not isinstance(candidate, str) or candidate not in {
+            "legacy",
+            "progressive",
+            "disabled",
+        }:
+            raise ValueError(
+                "memory.backend must be one of: legacy, progressive, disabled"
+            )
+        backend = candidate
+    return {"backend": backend}
+
+
 def load_codemate_settings(paths_or_workspace_root):
     paths = paths_or_workspace_root
     if not isinstance(paths_or_workspace_root, CodematePaths):
@@ -244,6 +272,7 @@ def load_codemate_settings(paths_or_workspace_root):
     merged = default_settings()
     merged["mcp"]["servers"] = _merged_mcp_servers(user_settings, project_settings)
     merged["sandbox"] = _merged_sandbox(user_settings, project_settings)
+    merged["memory"] = _merged_memory(user_settings, project_settings)
     merged["permissions"] = _merged_permissions(user_settings, project_settings)
     return CodemateSettings(
         user=user_settings,
@@ -251,5 +280,6 @@ def load_codemate_settings(paths_or_workspace_root):
         merged=merged,
         mcp_servers=merged["mcp"]["servers"],
         sandbox=merged["sandbox"],
+        memory=merged["memory"],
         permission_rules=build_permission_rules(paths, user_settings, project_settings),
     )

@@ -5,6 +5,11 @@ from functools import partial
 from .handlers import _TOOL_RUNNERS, tool_delegate, tool_review
 from .mcp import build_mcp_tool_registry
 from .specs import BASE_TOOL_SPECS, DELEGATE_TOOL_SPEC, PLAN_TOOL_SPECS, REVIEW_TOOL_SPEC
+from ..memory.progressive.tools import (
+    CONSOLIDATION_MEMORY_TOOLS,
+    MAIN_PROGRESSIVE_MEMORY_TOOLS,
+    PROGRESSIVE_MEMORY_TOOL_SPECS,
+)
 
 
 def build_tool_registry(agent):
@@ -14,6 +19,21 @@ def build_tool_registry(agent):
         name: {**spec, "run": partial(_TOOL_RUNNERS[name], agent)}
         for name, spec in {**BASE_TOOL_SPECS, **PLAN_TOOL_SPECS}.items()
     }
+    if getattr(agent, "memory_backend_name", "legacy") == "progressive":
+        memory_tool_names = (
+            CONSOLIDATION_MEMORY_TOOLS
+            if getattr(agent, "runtime_mode", "agent") == "memory_consolidation"
+            else MAIN_PROGRESSIVE_MEMORY_TOOLS
+        )
+        tools.update(
+            {
+                name: {
+                    **PROGRESSIVE_MEMORY_TOOL_SPECS[name],
+                    "run": partial(_TOOL_RUNNERS[name], agent),
+                }
+                for name in memory_tool_names
+            }
+        )
     # 子 agent 是刻意做成受限能力的：一旦深度耗尽，
     # 就连 delegate 这个工具都不再暴露给模型。
     if agent.depth < agent.max_depth:

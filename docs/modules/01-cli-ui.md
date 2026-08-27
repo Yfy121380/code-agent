@@ -52,9 +52,9 @@ Review 执行期间终端显示 `Reviewing current changes...`，并展示子 ag
 
 - `/budget`：查看各上下文 section 的字符数、工具 schema 字符数、估算 token、最大上下文和当前占比。
 - `/compact`：手动压缩较早的历史上下文。
-- `/remember <text>`：追加一条高置信度候选记忆，后续由 dream 整理进正式长期记忆。
-- `/dream`：前台运行长期记忆整理。
-- `/dream --background`：后台运行长期记忆整理。
+- `/remember <text>`：通过当前选择的后端保存用户明确要求记住的信息。
+- `/dream`：前台运行 Legacy 后端的长期记忆整理；其他后端不提供该命令。
+- `/dream --background`：后台运行 Legacy 后端的长期记忆整理。
 
 这些命令主要用于调试和管理长任务。比如 `/budget` 可以观察上下文是否接近压缩阈值，`/compact` 可以手动触发 history summary，`/remember` 可以直接记录用户希望 agent 记住的信息。
 

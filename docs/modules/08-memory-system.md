@@ -1,10 +1,72 @@
 # 记忆系统模块笔记
 
-## 1. 模块定位
+CodeMate 提供两套互相隔离的长期记忆后端。新会话通过用户级或项目级
+`settings.json` 选择；Session 创建后会固定保存所选后端，恢复会话不会因为
+默认配置变化而切换实现。
 
-记忆系统只负责跨会话仍然有价值的项目级事实。当前任务进度、Todo、文件内容和工具错误不属于长期记忆，它们分别由 history、Todo 状态、文件版本状态和工具结果负责。
+```json
+{
+  "memory": {
+    "backend": "legacy"
+  }
+}
+```
 
-长期记忆采用三阶段流水线：
+- `legacy`：现有 Candidate 提取、Dream 整理和请求前相关记忆召回。
+- `progressive`：用户级 Core Memory 与项目级 Ordinary Memory。
+- `disabled`：不注入长期记忆、不注册记忆工具，也不启动后台维护。
+
+两套后端不能在同一 Session 中同时运行。下文原有的三类 Markdown、Candidate
+JSONL、Dream cursor 和召回流程均属于 Legacy 后端；切换后端不会删除或迁移它们。
+
+## Progressive 后端
+
+本节给出整体定位；完整的执行流程、评分、工具边界和故障处理见
+[Progressive 长期记忆设计笔记](08-progressive-memory-design.md)。
+
+Progressive 后端把记忆分为两层：
+
+- Core Memory：用户级、跨项目，只接受当前用户请求明确表达的稳定身份事实、
+  偏好、安全规则和隐私规则。
+- Ordinary Memory：项目级，按稳定主题保存决策、约束、问题根因、解决方法、
+  兼容要求和项目反馈。
+
+```text
+~/.codemate/memory/progressive/core.json
+
+~/.codemate/projects/<project-id>/memory/progressive/
+  INDEX.json
+  ordinary/M001.md
+  ordinary/M002.md
+```
+
+所有 Ordinary Memory 平等保存，不划分 Active 和 Archive。`INDEX.json` 是可重建
+的轻量元数据索引，正文仍保存在独立 Markdown 文件中。
+
+每轮用户请求开始时，Runtime 使用下面的可见性分数排序：
+
+```text
+score = (1 + ln(1 + access_count)) * 2 ^ (-inactive_days / 30)
+inactive_days = now - max(last_accessed_at, updated_at)
+```
+
+主 Agent 默认只看到分数最高的 25 个 `ID + title`。分数只控制默认可见性，不代表
+记忆是否有效，也不会删除低分记忆。默认索引没有相关主题时，可以通过分页
+`memory_index` 搜索或浏览全部标题，再调用 `memory_read` 获取正文。只有主 Agent
+和 Plan Mode 的正文读取会增加访问次数；标题展示、索引查询和 Consolidation 调查
+不会增加热度。
+
+Ordinary Memory 沿用完整 conversation 与稳定 checkpoint：未处理用户轮次达到
+20，或未处理消息达到 50,000 字符时，在主任务完成后启动后台 Consolidation。
+History Compact 前会同步执行一次。Consolidation 子 Agent 只能调用
+`memory_index`、`memory_read`、`memory_create` 和 `memory_update`。它先检查默认
+25 条，再搜索完整标题集合；只能更新本轮已经读取的记录，成功后才推进 checkpoint。
+
+## 1. Legacy 后端定位
+
+Legacy 记忆负责跨会话仍然有价值的用户事实、工作流反馈和项目事实。当前任务进度、Todo、文件内容和工具错误不属于长期记忆，它们分别由 history、Todo 状态、文件版本状态和工具结果负责。
+
+Legacy 后端采用三阶段流水线：
 
 ```text
 完整对话
@@ -146,6 +208,6 @@ Compact 会改写 history，消息数量不稳定。使用 conversation id 后�
 
 ## 12. 面试复述
 
-Codemate 的长期记忆不是让主模型随手写日志，而是候选提取、Dream 整理和请求时召回三阶段流水线。Runtime 按完整对话增量提取 JSONL 候选，Dream 子 Agent 将长期有效的信息整理成用户画像、工作流反馈和项目背景三类文件，新请求再根据最近消息选择相关事实。
+CodeMate 通过 Session 固定选择互相隔离的记忆后端。Legacy 使用候选提取、Dream 整理和请求时召回三阶段流水线；Progressive 使用跨项目 Core Memory 和按项目主题组织的 Ordinary Memory，常驻简短 Index，正文由 Agent 按需读取，并按完整对话增量更新。
 
-该系统使用 conversation id 保存增量 checkpoint，compact 前会先提取候选；小规模记忆直接使用，大规模记忆才调用召回模型。Todo、Skill、文件版本和工具错误不进入长期记忆，从而避免职责混杂和过期信息污染。
+两套后端都使用 conversation id 保存增量 checkpoint，并在 compact 前处理尚未提取的完整对话。Todo、Skill、文件版本和工具错误不进入长期记忆，从而避免职责混杂和过期信息污染。Legacy 小规模记忆直接使用、大规模记忆调用召回模型；Progressive 则按访问频率和时间衰减选择默认标题，并通过 `memory_index` 和 `memory_read` 渐进加载其他主题。
