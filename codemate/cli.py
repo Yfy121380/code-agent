@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import os
 import sys
 from copy import copy
@@ -57,6 +58,7 @@ BENCHMARK_DISABLED_FEATURES = {
     "memory_candidates": False,
     "memory_dream": False,
     "session_title": False,
+    "skill_evolution": False,
 }
 
 
@@ -512,6 +514,41 @@ def run_cli(args, ui, agent_holder):
             continue
         if user_input == "/budget":
             print(agent.budget_report(provider=current_provider))
+            continue
+        if user_input == "/skill-stats":
+            print(agent.skill_evolution.format_stats())
+            continue
+        if user_input == "/skill-eval":
+            if agent.is_plan_mode():
+                print("skill evaluation is not available in Plan Mode")
+                continue
+            print(agent.skill_evolution.format_evaluation())
+            continue
+        if user_input == "/extract_now" or user_input.startswith("/extract_now "):
+            if agent.is_plan_mode():
+                print("skill extraction is not available in Plan Mode")
+                continue
+            result = agent.skill_evolution.extract_now(
+                user_input[len("/extract_now") :].strip()
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            continue
+        if user_input.startswith("/skill-feedback "):
+            if agent.is_plan_mode():
+                print("skill feedback is not available in Plan Mode")
+                continue
+            parts = user_input[len("/skill-feedback ") :].strip().split(maxsplit=2)
+            if len(parts) < 2:
+                print("usage: /skill-feedback <skill-name> <rating> [note]")
+                continue
+            try:
+                agent.skill_evolution.record_feedback(
+                    parts[0], parts[1], parts[2] if len(parts) > 2 else ""
+                )
+            except ValueError as exc:
+                print(f"skill feedback rejected: {exc}")
+                continue
+            print(f"skill feedback recorded: {parts[0]}")
             continue
         if user_input == "/compact":
             result = agent.compact_history(reason="manual")

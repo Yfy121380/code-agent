@@ -35,11 +35,18 @@ def add_durable_notes(agent, notes):
     agent.long_term_memory_status = "ok"
 
 
-def write_skill(tmp_path, name, description, body="Follow this skill."):
+def write_skill(
+    tmp_path,
+    name,
+    description,
+    body="Follow this skill.",
+    when_to_use="",
+):
     skill_dir = tmp_path / ".codemate" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
+    when_line = f"when-to-use: {when_to_use}\n" if when_to_use else ""
     (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        f"---\nname: {name}\ndescription: {description}\n{when_line}---\n\n{body}\n",
         encoding="utf-8",
     )
 
@@ -149,7 +156,12 @@ def test_context_manager_renders_up_to_twenty_durable_notes(tmp_path):
 
 def test_context_manager_renders_available_skills(tmp_path):
     write_skill(tmp_path, "backend", "Backend workflow " + ("A" * 300))
-    write_skill(tmp_path, "paper", "Paper summary workflow " + ("B" * 120))
+    write_skill(
+        tmp_path,
+        "paper",
+        "Paper summary workflow " + ("B" * 120),
+        when_to_use="When summarizing a paper",
+    )
     agent = build_agent(tmp_path, [])
 
     prompt, metadata = ContextManager(agent).build("inspect skills")
@@ -157,6 +169,7 @@ def test_context_manager_renders_available_skills(tmp_path):
     skills_section = prompt.split("Available skills:\n", 1)[1].split("\n\nRuntime context:", 1)[0]
     assert "- backend:" in skills_section or "- backend" in skills_section
     assert "- paper:" in skills_section or "- paper" in skills_section
+    assert "Use when: When summarizing a paper" in skills_section
     assert metadata["skills"]["selected_count"] == 2
     assert metadata["skills"]["rendered_count"] == 2
     assert len(agent.available_skills()[0]["description"]) <= 250

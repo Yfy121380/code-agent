@@ -450,6 +450,61 @@ def validate_tool(agent, name, args):
             raise ValueError("todo_list does not accept arguments")
         return ToolGate("allow", "session_read")
 
+    if name == "skill_create":
+        allowed = {
+            "name",
+            "description",
+            "instructions",
+            "when_to_use",
+            "target",
+            "context",
+            "user_invocable",
+            "allowed_tools",
+            "evidence",
+        }
+        if set(args).difference(allowed):
+            raise ValueError("skill_create received unsupported arguments")
+        skill_name = agent.skill_evolution.store.validate_name(args.get("name"))
+        for field, limit in (
+            ("description", 1000),
+            ("instructions", 50_000),
+            ("when_to_use", 2000),
+            ("evidence", 4000),
+        ):
+            value = args.get(field, "")
+            if field in {"description", "instructions"} and not str(value or "").strip():
+                raise ValueError(f"{field} must not be empty")
+            if not isinstance(value, str) or len(value) > limit:
+                raise ValueError(f"{field} must be a string of at most {limit} characters")
+        target = str(args.get("target", "project"))
+        if target not in {"project", "user"}:
+            raise ValueError("target must be project or user")
+        if str(args.get("context", "inline")) not in {"inline", "fork"}:
+            raise ValueError("context must be inline or fork")
+        path = agent.skill_evolution.store.skill_path_for_create(skill_name, target)
+        decision = resolve_tool_path(agent, path, access="write")
+        return gate_for_access(agent, "write", [decision])
+
+    if name == "skill_evolve":
+        if set(args).difference({"skill_name", "lesson", "rationale", "target"}):
+            raise ValueError("skill_evolve received unsupported arguments")
+        skill_name = agent.skill_evolution.store.validate_name(args.get("skill_name"))
+        lesson = args.get("lesson")
+        rationale = args.get("rationale", "")
+        if not isinstance(lesson, str) or not lesson.strip() or len(lesson) > 10_000:
+            raise ValueError("lesson must contain 1-10000 characters")
+        if not isinstance(rationale, str) or len(rationale) > 4000:
+            raise ValueError("rationale must be a string of at most 4000 characters")
+        if str(args.get("target", "active")) not in {"active", "project", "user"}:
+            raise ValueError("target must be active, project, or user")
+        path = agent.skill_evolution.store.managed_path(skill_name)
+        if path is None:
+            raise ValueError(
+                f"skill is not managed by CodeMate or was modified externally: {skill_name}"
+            )
+        decision = resolve_tool_path(agent, path, access="write")
+        return gate_for_access(agent, "write", [decision])
+
     if name == "skill_load":
         skill_name = agent.normalize_skill_name(args.get("name"))
         if not agent.skill_file(skill_name).is_file():

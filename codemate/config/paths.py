@@ -26,6 +26,7 @@ class CodematePaths:
     sessions_root: Path
     memory_root: Path
     progressive_memory_root: Path
+    skill_evolution_root: Path
 
 
 def codemate_home():
@@ -60,6 +61,7 @@ def codemate_paths(workspace_root, home_root=None):
         sessions_root=project_state_root / "sessions",
         memory_root=project_state_root / "memory",
         progressive_memory_root=project_state_root / "memory" / "progressive",
+        skill_evolution_root=project_state_root / "skill-evolution",
     )
 
 
@@ -78,6 +80,7 @@ def ensure_codemate_layout(workspace_root, home_root=None):
         paths.sessions_root,
         paths.memory_root,
         paths.progressive_memory_root,
+        paths.skill_evolution_root,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     return paths

@@ -19,6 +19,9 @@ def build_tool_registry(agent):
         name: {**spec, "run": partial(_TOOL_RUNNERS[name], agent)}
         for name, spec in {**BASE_TOOL_SPECS, **PLAN_TOOL_SPECS}.items()
     }
+    if not getattr(getattr(agent, "skill_evolution", None), "enabled", False):
+        tools.pop("skill_create", None)
+        tools.pop("skill_evolve", None)
     if getattr(agent, "memory_backend_name", "legacy") == "progressive":
         memory_tool_names = (
             CONSOLIDATION_MEMORY_TOOLS

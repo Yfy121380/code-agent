@@ -31,6 +31,7 @@ from ..context.token_budget import (
     usage_from_metadata,
 )
 from ..storage import RunStore
+from ..skill_evolution import SkillEvolutionRuntime
 from ..ui import NullUI
 from .. import tools as toolkit
 from ..workspace import MAX_HISTORY, clip, now
@@ -66,6 +67,7 @@ DEFAULT_FEATURE_FLAGS = {
     "memory_dream": True,
     "session_title": True,
     "prompt_cache": True,
+    "skill_evolution": True,
 }
 
 
@@ -171,6 +173,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "todos": [],
             "invoked_skills": [],
             "change_sets": [],
+            "skill_evolution_pending": None,
             "temporary_permissions": default_temporary_permissions(),
         }
         # 用于保存单次 ask() 的运行状态。默认放在当前 session 目录下，
@@ -207,6 +210,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             self.settings.project,
             self.temporary_permission_settings,
         )
+        # Skill evolution is an optional main-runtime service. Its retrieval,
+        # background model calls, lineage store, and ownership checks remain
+        # outside the core Agent Loop.
+        self.skill_evolution = SkillEvolutionRuntime(self)
         # 工具描述 {"name": {"schema":"", "risky":"", "description":"", "run":""}}
         self.tools = self.build_tools()
         self.model_tool_specs_by_mode = {
@@ -309,6 +316,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.session.setdefault("todos", [])
         self.session.setdefault("invoked_skills", [])
         self.session.setdefault("change_sets", [])
+        self.session.setdefault("skill_evolution_pending", None)
         temporary_permissions = self.session.setdefault("temporary_permissions", default_temporary_permissions())
         permissions = temporary_permissions.setdefault("permissions", {})
         for access in ("read", "write"):
@@ -522,6 +530,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             """
         ).strip()
         memory_rules = self.memory_backend.prompt_rules(mode)
+        skill_evolution_rules = self.skill_evolution.prompt_rules(mode)
         answer_rules = textwrap.dedent(
             """\
             Answer rules:
@@ -569,6 +578,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                 {workflow_rules}
 
                 {memory_rules}
+
+                {skill_evolution_rules}
 
                 {answer_rules}
 
@@ -645,6 +656,11 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
                     "description": description,
                     "root": str(item.resolve(strict=False)),
                     "scope": scope,
+                    "when_to_use": str(
+                        metadata.get("when-to-use")
+                        or metadata.get("when_to_use")
+                        or ""
+                    ),
                 }
         return [discovered[name] for name in sorted(discovered)]
 
@@ -655,7 +671,10 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             lines.append("- none")
             return "\n".join(lines)
         for skill in skills:
-            lines.append(f"- {skill['name']}: {skill['description']}")
+            line = f"- {skill['name']}: {skill['description']}"
+            if skill.get("when_to_use"):
+                line += f" Use when: {skill['when_to_use']}"
+            lines.append(line)
         return "\n".join(lines)
 
     def invoked_skill_names(self):
@@ -694,9 +713,14 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             "name": name,
             "root": skill_info["root"],
             "scope": skill_info.get("scope", ""),
+            "description": str(metadata.get("description") or ""),
+            "when_to_use": str(
+                metadata.get("when-to-use") or metadata.get("when_to_use") or ""
+            ),
             "content": content,
             "loaded_at": now(),
         }
+        self.skill_evolution.record_invocation(skill)
         # Keep only the three most recently invoked skills. Their full instructions
         # are restored after history compaction when no recent skill_load remains.
         with self._session_lock:
@@ -1133,6 +1157,8 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
             self.session["read_files"] = {}
             self.session["todos"] = []
             self.session["invoked_skills"] = []
+            self.session["skill_evolution_pending"] = None
+            self.skill_evolution.current_loaded_skills = []
             self.session["updated_at"] = now()
             self.session_store.save(self.session)
             self.session_store.clear_transcript(self.session["id"])

@@ -319,6 +319,7 @@ class DreamMixin:
                         "long_term_memory": False,
                         "relevant_memory": False,
                         "memory_dream": False,
+                        "skill_evolution": False,
                     },
                     allowed_tools={
                         "list_files",

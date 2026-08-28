@@ -562,6 +562,35 @@ def tool_skill_unload(agent, args):
     return f"skill unloaded: {removed['name']}" + (f" ({reason})" if reason else "")
 
 
+def tool_skill_create(agent, args):
+    """Create a Skill and register it for later automatic evolution."""
+    result = agent.skill_evolution.create_skill(
+        name=args["name"],
+        description=args["description"],
+        instructions=args["instructions"],
+        when_to_use=args.get("when_to_use", ""),
+        target=args.get("target", "project"),
+        context=args.get("context", "inline"),
+        user_invocable=bool(args.get("user_invocable", False)),
+        allowed_tools=args.get("allowed_tools"),
+        evidence=args.get("evidence", ""),
+        actor="agent",
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def tool_skill_evolve(agent, args):
+    """Evolve only a Skill owned by CodeMate's managed registry."""
+    result = agent.skill_evolution.evolve_skill(
+        name=args["skill_name"],
+        lesson=args["lesson"],
+        rationale=args.get("rationale", ""),
+        target=args.get("target", "active"),
+        actor="agent",
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 DELEGATE_ALLOWED_TOOLS = {
     "list_files",
     "read_file",
@@ -852,6 +881,8 @@ _TOOL_RUNNERS = {
     "submit_plan": tool_submit_plan,
     "skill_load": tool_skill_load,
     "skill_unload": tool_skill_unload,
+    "skill_create": tool_skill_create,
+    "skill_evolve": tool_skill_evolve,
     "memory_index": tool_memory_index,
     "memory_read": tool_memory_read,
     "core_memory_update": tool_core_memory_update,

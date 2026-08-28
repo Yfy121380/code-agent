@@ -74,6 +74,12 @@ class RuntimeLoopMixin:
         """Run optional maintenance without changing an already completed result."""
         operations = [
             ("session_title", lambda: self.maybe_generate_session_title(user_message, final)),
+            (
+                "skill_evolution",
+                lambda: self.skill_evolution.after_completion(
+                    task_state, user_message, final
+                ),
+            ),
         ]
         operations.append(
             (
@@ -390,6 +396,10 @@ class RuntimeLoopMixin:
                 "user_request": clip(user_message, 300),
             },
         )
+        # Pop the previous pending window only after the run lifecycle exists,
+        # so a persistence failure is attributed to this run. Retrieval still
+        # happens before the clean user message is recorded.
+        self.skill_evolution.prepare_request(user_message)
         if str(editor_context or "").strip():
             self.record(
                 {

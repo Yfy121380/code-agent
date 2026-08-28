@@ -70,11 +70,18 @@ def build_agent(tmp_path, outputs, **kwargs):
     )
 
 
-def write_skill(tmp_path, name="backend", description="Backend workflow", body="Follow backend rules."):
+def write_skill(
+    tmp_path,
+    name="backend",
+    description="Backend workflow",
+    body="Follow backend rules.",
+    when_to_use="",
+):
     skill_dir = tmp_path / ".codemate" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
+    when_line = f"when-to-use: {when_to_use}\n" if when_to_use else ""
     (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        f"---\nname: {name}\ndescription: {description}\n{when_line}---\n\n{body}\n",
         encoding="utf-8",
     )
     return skill_dir

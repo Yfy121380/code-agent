@@ -35,6 +35,10 @@ SLASH_COMMANDS = [
     ("/model claude-opus-4-8", "/model claude-opus-4-8", "Use claude-opus-4-8."),
     ("/model deepseek-v4-pro", "/model deepseek-v4-pro", "Use deepseek-v4-pro."),
     ("/budget", "/budget", "Show context section sizes and token budget usage."),
+    ("/skill-stats", "/skill-stats", "Show Skill usage and evolution statistics."),
+    ("/skill-eval", "/skill-eval", "Evaluate online Skill evolution quality."),
+    ("/extract_now", "/extract_now [hint]", "Extract the current pending Skill window."),
+    ("/skill-feedback ", "/skill-feedback <skill> <rating> [note]", "Record feedback for a Skill."),
     ("/compact", "/compact", "Compact older conversation history now."),
     ("/remember ", "/remember <text>", "Add a high-confidence memory candidate."),
     ("/dream", "/dream", "Run dream memory consolidation in foreground."),
@@ -61,6 +65,10 @@ HELP_DETAILS = textwrap.dedent(
     /model               Show current model and available models.
     /model <name>        Set model from the current provider's allowed model list.
     /budget              Show context section sizes and token budget usage.
+    /skill-stats         Show Skill usage and evolution statistics.
+    /skill-eval          Evaluate online Skill evolution quality.
+    /extract_now [hint]  Extract the current pending Skill window.
+    /skill-feedback      Record feedback: <skill> <rating> [note].
     /compact             Compact older conversation history now.
     /remember <text>     Add a high-confidence memory candidate.
     /dream               Run dream memory consolidation in foreground.

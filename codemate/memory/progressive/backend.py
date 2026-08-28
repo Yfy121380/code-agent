@@ -238,7 +238,11 @@ class ProgressiveMemoryBackend:
             max_depth=0,
             shell_env_allowlist=self.agent.shell_env_allowlist,
             secret_env_names=self.agent.secret_env_names,
-            feature_flags={**self.agent.feature_flags, "session_title": False},
+            feature_flags={
+                **self.agent.feature_flags,
+                "session_title": False,
+                "skill_evolution": False,
+            },
             allowed_tools={
                 "memory_index",
                 "memory_read",

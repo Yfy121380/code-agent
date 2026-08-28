@@ -16,6 +16,8 @@ const HELP_TEXT = `Available commands:
 /provider [name]
 /model [name]
 /budget | /compact
+/skill-stats | /skill-eval | /extract_now [hint]
+/skill-feedback <skill> <rating> [note]
 /remember <text>
 /dream [--background]
 /session | /session list | /session rename <title> | /session resume <id> | /session new
@@ -408,6 +410,13 @@ function parseSlashCommand(input: string): ParsedCommand | undefined {
   if (text === '/model') return { name: 'model', args: {} };
   if (text.startsWith('/model ')) return { name: 'model', args: { model: text.slice(7).trim() } };
   if (text === '/budget') return { name: 'budget', args: {} };
+  if (text === '/skill-stats') return { name: 'skill_stats', args: {} };
+  if (text === '/skill-eval') return { name: 'skill_eval', args: {} };
+  if (text === '/extract_now' || text.startsWith('/extract_now ')) return { name: 'skill_extract', args: { hint: text.slice(12).trim() } };
+  if (text.startsWith('/skill-feedback ')) {
+    const [skill = '', rating = '', ...note] = text.slice(16).trim().split(/\s+/);
+    return { name: 'skill_feedback', args: { skill, rating, note: note.join(' ') } };
+  }
   if (text === '/compact') return { name: 'compact', args: {} };
   if (text.startsWith('/remember ')) return { name: 'remember', args: { text: text.slice(10).trim() } };
   if (text === '/dream') return { name: 'dream', args: {} };

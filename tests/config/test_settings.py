@@ -131,3 +131,29 @@ def test_memory_backend_uses_project_override_and_validates_value(tmp_path):
     )
     with pytest.raises(ValueError, match="memory.backend must be one of"):
         load_codemate_settings(paths)
+
+
+def test_skill_evolution_settings_merge_and_validate_types(tmp_path):
+    paths = ensure_codemate_layout(tmp_path)
+    paths.user_settings.write_text(
+        '{"skill_evolution": {"enabled": false, "target": "user"}}\n',
+        encoding="utf-8",
+    )
+    paths.project_settings.write_text(
+        '{"skill_evolution": {"enabled": true, "prune_min_retrieved": 12}}\n',
+        encoding="utf-8",
+    )
+
+    settings = load_codemate_settings(paths).skill_evolution
+    assert settings == {
+        "enabled": True,
+        "target": "user",
+        "prune_min_retrieved": 12,
+        "prune_max_used": 0,
+    }
+
+    paths.project_settings.write_text(
+        '{"skill_evolution": {"target": ["project"]}}\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="target must be project or user"):
+        load_codemate_settings(paths)

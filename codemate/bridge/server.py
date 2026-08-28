@@ -368,6 +368,27 @@ class BridgeServer:
             return {"exited": self.agent.exit_plan_mode()}
         if name == "budget":
             return {"report": self.agent.budget_report(provider=self.args.provider)}
+        if name == "skill_stats":
+            return {"report": self.agent.skill_evolution.format_stats()}
+        if name == "skill_eval":
+            if self.agent.is_plan_mode():
+                raise ValueError("skill evaluation is not available in Plan Mode")
+            return {"report": self.agent.skill_evolution.format_evaluation()}
+        if name == "skill_extract":
+            if self.agent.is_plan_mode():
+                raise ValueError("skill extraction is not available in Plan Mode")
+            return self.agent.skill_evolution.extract_now(
+                str(args.get("hint") or "")
+            )
+        if name == "skill_feedback":
+            if self.agent.is_plan_mode():
+                raise ValueError("skill feedback is not available in Plan Mode")
+            self.agent.skill_evolution.record_feedback(
+                str(args.get("skill") or ""),
+                str(args.get("rating") or ""),
+                str(args.get("note") or ""),
+            )
+            return {"recorded": True}
         if name == "compact":
             return self.agent.compact_history(reason="manual")
         if name == "remember":

@@ -404,6 +404,7 @@ def run_review(agent, target=""):
                 "memory_candidates": False,
                 "memory_dream": False,
                 "session_title": False,
+                "skill_evolution": False,
             },
             ui=_ReviewChildUI(agent),
             allowed_tools=REVIEW_ALLOWED_TOOLS,

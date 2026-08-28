@@ -563,6 +563,53 @@ Available skills may come from the project skill root or the user skill root.
 The result includes the skill's absolute root and full instructions. Relative resources such as scripts/, references/, examples/, and templates/ are located under that root.
 """.strip(),
     },
+    "skill_evolve": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "The registered skill name to evolve"},
+                "lesson": {"type": "string", "description": "Durable reusable rule to add to the skill"},
+                "rationale": {"type": "string", "description": "Why this lesson should affect future similar tasks"},
+                "target": {
+                    "type": "string",
+                    "enum": ["active", "project", "user"],
+                    "description": "Which skill file to update. Defaults to active.",
+                },
+            },
+            "required": ["skill_name", "lesson"],
+            "additionalProperties": False,
+        },
+        "risky": True,
+        "description": "Persist an explicit reusable user correction or workflow preference into an existing skill. Creates a version snapshot before editing the skill.",
+    },
+    "skill_create": {
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Concise reusable skill name"},
+                "description": {"type": "string", "description": "One-sentence description of what the skill does and when to use it"},
+                "instructions": {"type": "string", "description": "Reusable SKILL.md body. Focus on durable method, constraints, and workflow, not one-off task content."},
+                "when_to_use": {"type": "string", "description": "Trigger condition for auto-invocation"},
+                "target": {
+                    "type": "string",
+                    "enum": ["project", "user"],
+                    "description": "Where to create the skill. Defaults to project.",
+                },
+                "context": {
+                    "type": "string",
+                    "enum": ["inline", "fork"],
+                    "description": "Skill execution mode. Defaults to inline.",
+                },
+                "user_invocable": {"type": "boolean", "description": "Whether users can invoke it manually with /<skill>. Defaults to false."},
+                "allowed_tools": {"type": "string", "description": "Optional comma-separated allowed tools for fork mode"},
+                "evidence": {"type": "string", "description": "Short user-provided evidence showing why this is reusable"},
+            },
+            "required": ["name", "description", "instructions"],
+            "additionalProperties": False,
+        },
+        "risky": True,
+        "description": "Create a new reusable skill from explicit durable workflow guidance when no suitable existing skill exists.",
+    },
 }
 
 PLAN_TOOL_SPECS = {

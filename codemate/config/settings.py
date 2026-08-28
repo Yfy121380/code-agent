@@ -50,6 +50,12 @@ SETTINGS_TEMPLATE = {
     "memory": {
         "backend": "legacy",
     },
+    "skill_evolution": {
+        "enabled": True,
+        "target": "project",
+        "prune_min_retrieved": 40,
+        "prune_max_used": 0,
+    },
     "permissions": {
         "read": {
             "allow": [],
@@ -79,6 +85,7 @@ class CodemateSettings:
     mcp_servers: dict
     sandbox: dict
     memory: dict
+    skill_evolution: dict
     permission_rules: PermissionRules
 
 
@@ -263,6 +270,34 @@ def _merged_memory(user_settings, project_settings):
     return {"backend": backend}
 
 
+def _merged_skill_evolution(user_settings, project_settings):
+    """Merge the small, bounded configuration surface for online Skill evolution."""
+    merged = copy.deepcopy(default_settings()["skill_evolution"])
+    for settings in (user_settings, project_settings):
+        value = settings.get("skill_evolution", {})
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError("skill_evolution must be an object")
+        unknown = set(value).difference(merged)
+        if unknown:
+            raise ValueError(
+                "unknown skill_evolution settings: " + ", ".join(sorted(unknown))
+            )
+        merged.update(copy.deepcopy(value))
+    if not isinstance(merged["enabled"], bool):
+        raise ValueError("skill_evolution.enabled must be a boolean")
+    if not isinstance(merged["target"], str) or merged["target"] not in {
+        "project",
+        "user",
+    }:
+        raise ValueError("skill_evolution.target must be project or user")
+    for field in ("prune_min_retrieved", "prune_max_used"):
+        if not isinstance(merged[field], int) or merged[field] < 0:
+            raise ValueError(f"skill_evolution.{field} must be a non-negative integer")
+    return merged
+
+
 def load_codemate_settings(paths_or_workspace_root):
     paths = paths_or_workspace_root
     if not isinstance(paths_or_workspace_root, CodematePaths):
@@ -273,6 +308,7 @@ def load_codemate_settings(paths_or_workspace_root):
     merged["mcp"]["servers"] = _merged_mcp_servers(user_settings, project_settings)
     merged["sandbox"] = _merged_sandbox(user_settings, project_settings)
     merged["memory"] = _merged_memory(user_settings, project_settings)
+    merged["skill_evolution"] = _merged_skill_evolution(user_settings, project_settings)
     merged["permissions"] = _merged_permissions(user_settings, project_settings)
     return CodemateSettings(
         user=user_settings,
@@ -281,5 +317,6 @@ def load_codemate_settings(paths_or_workspace_root):
         mcp_servers=merged["mcp"]["servers"],
         sandbox=merged["sandbox"],
         memory=merged["memory"],
+        skill_evolution=merged["skill_evolution"],
         permission_rules=build_permission_rules(paths, user_settings, project_settings),
     )
