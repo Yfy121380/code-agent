@@ -192,7 +192,11 @@ def build_agent(args, ui=None):
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(paths.sessions_root)
     model = _build_model_client(args)
-    feature_flags = dict(BENCHMARK_DISABLED_FEATURES) if getattr(args, "benchmark", False) else None
+    feature_flags = (
+        dict(BENCHMARK_DISABLED_FEATURES)
+        if getattr(args, "benchmark", False)
+        else None
+    )
     session_id = args.resume
     if session_id == RESUME_SELECT:
         selected = ui.session_menu(store.list_sessions()) if ui is not None else None
@@ -217,6 +221,7 @@ def build_agent(args, ui=None):
             secret_env_names=configured_secret_names,
             feature_flags=feature_flags,
             memory_backend=getattr(args, "memory_backend", None),
+            skill_evolution_enabled=getattr(args, "skill_evolution", None),
             stream=args.stream,
             ui=ui,
         )
@@ -230,6 +235,7 @@ def build_agent(args, ui=None):
         secret_env_names=configured_secret_names,
         feature_flags=feature_flags,
         memory_backend=getattr(args, "memory_backend", None),
+        skill_evolution_enabled=getattr(args, "skill_evolution", None),
         stream=args.stream,
         ui=ui,
     )
@@ -247,6 +253,19 @@ def build_arg_parser():
         choices=("legacy", "progressive", "disabled"),
         default=None,
         help="Long-term memory implementation for new sessions; resumed sessions keep their original backend.",
+    )
+    skill_evolution_group = parser.add_mutually_exclusive_group()
+    skill_evolution_group.add_argument(
+        "--skill-evolution",
+        dest="skill_evolution",
+        action="store_true",
+        help="Enable Skill self-evolution, overriding the configured setting.",
+    )
+    skill_evolution_group.add_argument(
+        "--no-skill-evolution",
+        dest="skill_evolution",
+        action="store_false",
+        help="Disable Skill self-evolution for this process.",
     )
     parser.add_argument("--provider", choices=("ollama", "openai", "anthropic", "deepseek"), default="openai", help="Model backend to use.")
     parser.add_argument(
@@ -270,7 +289,7 @@ def build_arg_parser():
     parser.add_argument("--max-steps", type=int, default=50, help="Maximum tool/model iterations for bounded child processes.")
     parser.add_argument("--max-new-tokens", type=int, default=8192, help="Maximum model output tokens per step.")
     parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming model output in the terminal.")
-    parser.set_defaults(stream=True)
+    parser.set_defaults(stream=True, skill_evolution=None)
     parser.add_argument(
         "--benchmark",
         action="store_true",

@@ -114,6 +114,7 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         runtime_mode="agent",
         stream=True,
         timezone_name=DEFAULT_LOCAL_TIMEZONE,
+        skill_evolution_enabled=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -131,6 +132,12 @@ class CodeMate(RuntimeLoopMixin, ToolExecutionMixin, ApprovalMixin, DreamMixin, 
         self.max_depth = max_depth
         self.allowed_tools = None if allowed_tools is None else {str(name) for name in allowed_tools}
         self.memory_scope_only = bool(memory_scope_only)
+        # None 使用 settings.json；布尔值由 CLI 等入口显式覆盖本次进程。
+        self.skill_evolution_enabled = (
+            None
+            if skill_evolution_enabled is None
+            else bool(skill_evolution_enabled)
+        )
         self.runtime_mode = str(runtime_mode or "agent")
         # 流式输出只影响 UI 展示；history/trace 仍在完整 response 结束后写入。
         self.stream = bool(stream)

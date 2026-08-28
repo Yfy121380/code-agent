@@ -405,6 +405,7 @@ class SkillEvolutionStore:
         action,
         result=None,
         messages=None,
+        window=None,
         loaded_skill_references=None,
         decision=None,
         error="",
@@ -418,6 +419,13 @@ class SkillEvolutionStore:
             compact_messages.append(
                 {"role": item["role"], "content": _preview(item.get("content"), 4000)}
             )
+        window = dict(window or {})
+        focus = dict(window.get("focus_conversation") or {})
+        supporting = [
+            str(item.get("id") or "")
+            for item in window.get("supporting_conversations") or []
+            if isinstance(item, dict) and str(item.get("id") or "")
+        ]
         row = {
             "event": "online_ingest",
             "time": now(),
@@ -426,6 +434,12 @@ class SkillEvolutionStore:
             "ok": bool(result.get("ok", not error)),
             "result": result,
             "messages": compact_messages,
+            "focus_conversation_id": str(focus.get("id") or ""),
+            "supporting_conversation_ids": supporting,
+            "next_user_feedback": _preview(
+                window.get("next_user_feedback"), 4000
+            ),
+            "source_char_count": int(window.get("source_char_count") or 0),
             "loaded_skill_references": list(loaded_skill_references or []),
             "decision": decision or {},
             "error": _preview(error),

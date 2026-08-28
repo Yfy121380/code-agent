@@ -13,6 +13,7 @@ from .evaluation import evaluate_online_skills, format_online_skill_eval
 from .online import MAX_MANAGER_SKILLS, online_ingest
 from .prompts import SKILL_EVOLUTION_PROMPT_RULES
 from .store import SkillEvolutionStore
+from .windows import build_pending_window
 
 
 class SkillEvolutionRuntime:
@@ -21,11 +22,16 @@ class SkillEvolutionRuntime:
     def __init__(self, agent):
         self.agent = agent
         settings = dict(getattr(agent.settings, "skill_evolution", {}) or {})
+        configured_enabled = bool(settings.get("enabled", True))
+        explicit_enabled = getattr(agent, "skill_evolution_enabled", None)
+        requested_enabled = (
+            configured_enabled if explicit_enabled is None else bool(explicit_enabled)
+        )
         self.enabled = bool(
             agent.feature_enabled("skill_evolution")
             and agent.depth == 0
             and agent.runtime_mode == "agent"
-            and settings.get("enabled", True)
+            and requested_enabled
         )
         self.target = str(settings.get("target", "project") or "project")
         self.current_loaded_skills = []
@@ -49,30 +55,34 @@ class SkillEvolutionRuntime:
         if not self.enabled or self.agent.is_plan_mode():
             return
         with self.agent._session_lock:
-            pending = self.agent.session.get("skill_evolution_pending")
-            self.agent.session["skill_evolution_pending"] = None
-            self.agent.session["updated_at"] = now()
+            pending = copy.deepcopy(
+                self.agent.session.get("skill_evolution_pending")
+            )
         if isinstance(pending, dict):
-            messages = list(pending.get("messages") or [])
             feedback = str(user_message or "").strip()
-            if feedback:
-                messages.append({"role": "user", "content": feedback})
-            pending = dict(pending)
-            pending["messages"] = messages[-10:]
-            pending["next_user_feedback"] = feedback
-            self._ready_window = pending
+            if feedback and not str(pending.get("next_user_feedback") or "").strip():
+                pending["next_user_feedback"] = feedback
+                with self.agent._session_lock:
+                    self.agent.session["skill_evolution_pending"] = copy.deepcopy(
+                        pending
+                    )
+                    self.agent.session["updated_at"] = now()
+            if str(pending.get("next_user_feedback") or "").strip():
+                self._ready_window = pending
 
     def after_completion(self, task_state, user_message, assistant_text):
         """Save the current window and schedule candidate extraction when ready."""
+        del user_message, assistant_text
         if not self.enabled or self.agent.is_plan_mode():
             return
-        pending = {
-            "messages": self._recent_dialog_messages(max_messages=8),
-            "latest_user": str(user_message or ""),
-            "latest_assistant": str(assistant_text or ""),
-            "loaded_skill_references": copy.deepcopy(self.current_loaded_skills),
-            "session_id": str(self.agent.session.get("id") or ""),
-        }
+        session_id = str(self.agent.session.get("id") or "")
+        pending = build_pending_window(
+            self.agent.session_store.load_transcript(session_id),
+            self.agent._current_conversation_id,
+            available_skills=self.agent.available_skills(),
+            current_loaded_skills=copy.deepcopy(self.current_loaded_skills),
+            session_id=session_id,
+        )
         with self.agent._session_lock:
             if self.agent._closed:
                 return
@@ -89,17 +99,6 @@ class SkillEvolutionRuntime:
                 lambda: self._run_online(window, interactive=False),
                 task_state,
             )
-
-    def _recent_dialog_messages(self, *, max_messages):
-        messages = []
-        for item in self.agent.session.get("history", []):
-            role = str(item.get("role") or "")
-            kind = str(item.get("kind") or "")
-            content = str(item.get("content") or "").strip()
-            if role not in {"user", "assistant"} or kind.endswith("_context") or not content:
-                continue
-            messages.append({"role": role, "content": content})
-        return messages[-max(2, int(max_messages)) :]
 
     def _schedule(self, operation, callback, task_state):
         def worker():
@@ -177,9 +176,8 @@ class SkillEvolutionRuntime:
         return online_ingest(
             self.agent,
             self.store,
-            list(window.get("messages") or []),
+            window,
             self._side_query,
-            loaded_skill_references=list(window.get("loaded_skill_references") or []),
             hint=str(window.get("hint") or ""),
             target=self.target,
             confirm_write=(

@@ -4,12 +4,55 @@
 重点边界：命令行 secret、默认 secret、项目 .env、环境变量兼容配置、切换 provider/model。
 """
 
+import json
 import os
-
 from unittest.mock import patch
+
+import pytest
 
 from codemate import cli as mini_cli
 from tests.helpers import isolated_env
+
+
+def test_cli_skill_evolution_override_is_tri_state():
+    parser = mini_cli.build_arg_parser()
+
+    assert parser.parse_args([]).skill_evolution is None
+    assert parser.parse_args(["--skill-evolution"]).skill_evolution is True
+    assert parser.parse_args(["--no-skill-evolution"]).skill_evolution is False
+
+
+@pytest.mark.parametrize(
+    ("configured_enabled", "cli_options", "expected_enabled"),
+    [
+        (False, ["--skill-evolution"], True),
+        (True, ["--no-skill-evolution"], False),
+        (True, ["--skill-evolution", "--benchmark"], False),
+    ],
+)
+def test_cli_skill_evolution_override_precedence(
+    tmp_path, configured_enabled, cli_options, expected_enabled
+):
+    class DummyModelClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    settings_dir = tmp_path / ".codemate"
+    settings_dir.mkdir(exist_ok=True)
+    (settings_dir / "settings.json").write_text(
+        json.dumps({"skill_evolution": {"enabled": configured_enabled}}) + "\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, isolated_env(tmp_path), clear=True), patch(
+        "codemate.cli.OllamaModelClient", DummyModelClient
+    ):
+        args = mini_cli.build_arg_parser().parse_args(
+            ["--cwd", str(tmp_path), *cli_options]
+        )
+        agent = mini_cli.build_agent(args)
+
+    assert agent.skill_evolution.enabled is expected_enabled
 
 
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):

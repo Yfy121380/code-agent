@@ -24,9 +24,23 @@ from codemate.skill_evolution.store import SkillEvolutionStore
 from tests.helpers import build_agent, write_skill
 
 
+def extraction_window(messages, *, loaded_skill_references=None, feedback=""):
+    return {
+        "focus_conversation": {
+            "id": "turn-focus",
+            "messages": messages,
+            "tool_events": [],
+        },
+        "supporting_conversations": [],
+        "next_user_feedback": feedback,
+        "loaded_skill_references": list(loaded_skill_references or []),
+        "source_char_count": sum(len(str(item.get("content") or "")) for item in messages),
+    }
+
+
 def test_skill_evolution_prompt_snapshots_remain_reviewed():
     expected = {
-        EXTRACTOR_SYSTEM_PROMPT: "852e6b3b3054120059b7e5eed80f3cf6e69bbf640aa3c1830ca1111cc8ea8aec",
+        EXTRACTOR_SYSTEM_PROMPT: "2c292d8a16d1f0ba6e3d83693e2dc5af5b2bfcff8b1623631ef9b6246de0e85b",
         MANAGER_SYSTEM_PROMPT: "2e8df59092b5ef7a9781fc560b5eb35096710e925a020dd83bb7c75cf97d74a7",
         USAGE_JUDGE_SYSTEM_PROMPT: "ead3c8c1c339b2fcf7a9c4a5652e52d3c938e74f661fb2563064992009d4dbff",
         EVAL_JUDGE_SYSTEM_PROMPT: "82e610f98f05bc2251a41d7dadfcb40167cc33e63afb2580c7e075f834b9ae2a",
@@ -46,22 +60,18 @@ def test_pending_window_receives_next_user_feedback_without_request_retrieval(tm
         body="Use pytest for focused Python validation.",
     )
     agent = build_agent(tmp_path, [])
-    agent.session["skill_evolution_pending"] = {
-        "messages": [
+    agent.session["skill_evolution_pending"] = extraction_window(
+        [
             {"role": "user", "content": "Run tests"},
             {"role": "assistant", "content": "I ran syntax checks"},
-        ],
-        "loaded_skill_references": [],
-    }
+        ]
+    )
 
     agent.skill_evolution.prepare_request("Use pytest instead")
 
-    assert agent.skill_evolution._ready_window["messages"][-1] == {
-        "role": "user",
-        "content": "Use pytest instead",
-    }
+    assert agent.skill_evolution._ready_window["next_user_feedback"] == "Use pytest instead"
     assert "retrieved_skills" not in agent.runtime_context_text()
-    assert agent.session["skill_evolution_pending"] is None
+    assert agent.session["skill_evolution_pending"]["next_user_feedback"] == "Use pytest instead"
 
 
 def test_loaded_skills_are_saved_as_next_window_identity_references(tmp_path):
@@ -74,12 +84,34 @@ def test_loaded_skills_are_saved_as_next_window_identity_references(tmp_path):
     )
     agent = build_agent(tmp_path, [])
     agent.skill_evolution.prepare_request("Validate this change")
-
-    agent.run_tool("skill_load", {"name": "python-testing"})
-    agent.session["history"] = [
-        {"role": "user", "content": "Validate this change"},
-        {"role": "assistant", "content": "Validation complete"},
-    ]
+    agent._current_conversation_id = "turn-validation"
+    agent.record({"role": "user", "content": "Validate this change"})
+    agent.record(
+        {
+            "role": "assistant",
+            "kind": "tool_calls",
+            "content": "I will load the testing workflow.",
+            "tool_calls": [
+                {
+                    "id": "call-skill",
+                    "name": "skill_load",
+                    "args": {"name": "python-testing"},
+                }
+            ],
+        }
+    )
+    result = agent.run_tool("skill_load", {"name": "python-testing"})
+    agent.record(
+        {
+            "role": "tool",
+            "tool_call_id": "call-skill",
+            "name": "skill_load",
+            "content": result,
+        }
+    )
+    agent.record(
+        {"role": "assistant", "kind": "final", "content": "Validation complete"}
+    )
     agent.skill_evolution.after_completion(
         None, "Validate this change", "Validation complete"
     )
@@ -87,6 +119,7 @@ def test_loaded_skills_are_saved_as_next_window_identity_references(tmp_path):
     references = agent.session["skill_evolution_pending"]["loaded_skill_references"]
     assert references == [
         {
+            "conversation_id": "turn-validation",
             "name": "python-testing",
             "description": "Run focused Python tests",
             "when_to_use": "When validating Python changes",
@@ -104,16 +137,19 @@ def test_extractor_receives_loaded_skill_identity_without_full_body():
         return '{"skills": []}'
 
     candidate = extract_candidate(
-        [{"role": "user", "content": "Use focused tests"}],
+        extraction_window(
+            [{"role": "user", "content": "Use focused tests"}],
+            loaded_skill_references=[
+                {
+                    "conversation_id": "turn-focus",
+                    "name": "python-testing",
+                    "description": "Run focused Python tests",
+                    "when_to_use": "When validating Python changes",
+                    "source": "project",
+                }
+            ],
+        ),
         side_query,
-        loaded_skill_references=[
-            {
-                "name": "python-testing",
-                "description": "Run focused Python tests",
-                "when_to_use": "When validating Python changes",
-                "source": "project",
-            }
-        ],
     )
 
     assert candidate is None
@@ -179,17 +215,18 @@ def test_online_add_then_merge_updates_only_managed_skill(tmp_path):
         {"role": "assistant", "content": "Done"},
         {"role": "user", "content": "Also run related tests"},
     ]
+    window = extraction_window(messages)
     added = online_ingest(
         agent,
         agent.skill_evolution.store,
-        messages,
+        window,
         side_query,
         confirm_write=lambda *_args: True,
     )
     merged = online_ingest(
         agent,
         agent.skill_evolution.store,
-        messages,
+        window,
         side_query,
         confirm_write=lambda *_args: True,
     )

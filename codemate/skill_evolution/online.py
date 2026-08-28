@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .prompts import EXTRACTOR_SYSTEM_PROMPT, MANAGER_SYSTEM_PROMPT, USAGE_JUDGE_SYSTEM_PROMPT
 from .store import parse_skill_document
+from .windows import flatten_window_messages
 
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]{1,2}")
@@ -174,11 +175,17 @@ def _coerce_candidate(value):
     )
 
 
-def extract_candidate(messages, side_query, *, loaded_skill_references=None, hint=""):
+def extract_candidate(window, side_query, *, hint=""):
     payload = {
-        "messages": messages,
+        "focus_conversation": dict(window.get("focus_conversation") or {}),
+        "supporting_conversations": list(
+            window.get("supporting_conversations") or []
+        ),
+        "next_user_feedback": str(window.get("next_user_feedback") or ""),
+        "loaded_skill_references": list(
+            window.get("loaded_skill_references") or []
+        ),
         "hint": hint,
-        "loaded_skill_references": list(loaded_skill_references or []),
     }
     parsed = _parse_json_object(
         side_query(EXTRACTOR_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False), 2200)
@@ -358,20 +365,19 @@ def maintain_candidate(
 def online_ingest(
     agent,
     store,
-    messages,
+    window,
     side_query,
     *,
-    loaded_skill_references=None,
     hint="",
     target="project",
     confirm_write=None,
 ):
+    loaded_skill_references = list(window.get("loaded_skill_references") or [])
     candidate = None
     try:
         candidate = extract_candidate(
-            messages,
+            window,
             side_query,
-            loaded_skill_references=loaded_skill_references,
             hint=hint,
         )
         if candidate is None:
@@ -396,7 +402,8 @@ def online_ingest(
     store.record_provenance(
         action=result.get("action", "none"),
         result=result,
-        messages=messages,
+        messages=flatten_window_messages(window),
+        window=window,
         loaded_skill_references=loaded_skill_references,
         decision=result.get("decision") if isinstance(result.get("decision"), dict) else None,
         error="" if result.get("ok") else result.get("error", ""),
