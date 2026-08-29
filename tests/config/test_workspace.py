@@ -4,6 +4,7 @@
 重点边界：运行时间使用 Asia/Shanghai 时区，保证 trace/session 时间可读。
 """
 
+import subprocess
 from datetime import datetime
 
 from codemate.workspace import WorkspaceContext, now
@@ -35,3 +36,15 @@ def test_workspace_prompt_text_only_contains_stable_paths(tmp_path):
     assert "default_branch" not in text
     assert "status:" not in text
     assert "abc123" not in text
+
+
+def test_workspace_build_does_not_inherit_parent_git_root(tmp_path):
+    parent = tmp_path / "repository"
+    child = parent / "nested" / "task"
+    child.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(parent)], check=True)
+
+    workspace = WorkspaceContext.build(child)
+
+    assert workspace.cwd == str(child.resolve())
+    assert workspace.repo_root == str(child.resolve())

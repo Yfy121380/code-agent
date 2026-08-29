@@ -1,0 +1,35 @@
+{
+  "id": "web-research-evidence-report",
+  "category": "web_research",
+  "skill_target": "基于受控来源提取事实、建立结论到证据的对应关系并明确报告限制",
+  "learned_preferences": [
+    "调研报告使用“结论、证据、限制”三个标题"
+  ],
+  "induction": {
+    "workspace": "induction/workspace",
+    "verifier": "induction/verifier.py",
+    "request": "阅读 sources 中的资料，为小型 Python 服务写一份构建可复现性建议到 report.md。只使用给定资料，事实后用 [S1]、[S2]、[S3] 标注来源，并在最终答复中概括结果。",
+    "max_work_rounds": 4,
+    "pass_feedback": "报告的关键事实和引用已经满足要求。以后做类似调研时，请区分事实、建议和信息边界，确保每项关键结论能追溯到来源，并使用“结论、证据、限制”三个标题组织报告。",
+    "fail_feedback": "报告仍存在关键事实遗漏或证据对应不清的问题。以后需要逐项核对结论与来源，避免补充资料中没有的事实，并使用“结论、证据、限制”三个标题组织报告。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 30, "priority": 10, "agent_feedback": "报告遗漏了资料中关于依赖、隔离构建或产物验证的关键建议。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 20, "priority": 10, "agent_feedback": "请保留来源文件，并将报告写入指定的 report.md。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 25, "priority": 20, "agent_feedback": "部分关键结论没有和正确来源建立清晰对应，请逐项检查引用。"},
+      {"id": "QUALITY-002", "category": "quality", "required": false, "weight": 10, "priority": 25, "agent_feedback": "报告加入了给定资料无法支持的具体事实，请收紧到已有证据。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 15, "priority": 30, "agent_feedback": "调研报告请按“结论、证据、限制”组织。"}
+    ]
+  },
+  "transfer": {
+    "workspace": "transfer/workspace",
+    "verifier": "transfer/verifier.py",
+    "request": "阅读 sources 中的资料，为这个服务写一份生产可观测性建议到 report.md。只使用给定资料，事实后用 [S1]、[S2]、[S3] 标注来源，并在最终答复中概括结果。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 30, "priority": 10, "agent_feedback": "报告遗漏了日志、指标或追踪方面的关键建议。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 20, "priority": 10, "agent_feedback": "来源文件或报告位置不符合要求。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 25, "priority": 20, "agent_feedback": "关键结论与来源对应不清。"},
+      {"id": "QUALITY-002", "category": "quality", "required": false, "weight": 10, "priority": 25, "agent_feedback": "报告包含来源无法支持的具体事实。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 15, "priority": 30, "agent_feedback": "报告未遵循已学习的组织格式。"}
+    ]
+  }
+}

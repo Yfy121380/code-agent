@@ -24,6 +24,7 @@ htmlcov/
 !.vscode/launch.json
 !.vscode/tasks.json
 docs/case_records
+runs/
 
 # Temporary files
 claude-code-vs-codex-default-prompts.md

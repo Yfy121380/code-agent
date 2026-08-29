@@ -1,0 +1,37 @@
+{
+  "id": "code-modification-runtime-validation",
+  "category": "code_modification",
+  "skill_target": "修改跨层运行时选项时追踪默认值解析与副作用边界，区分缺省值和非法 falsy 值，并验证相邻执行分支",
+  "learned_preferences": [
+    "代码任务最终使用“修改内容、验证结果、剩余风险”三个标题汇报"
+  ],
+  "induction": {
+    "workspace": "induction/workspace",
+    "verifier": "induction/verifier.py",
+    "request": "修复 bulk_apply 中显式 batch_size=0 会被默认批大小吞掉的问题。请调查参数从公共入口到批处理执行器的完整路径，遵循 README 中的参数契约，同时保持 None 默认行为、正常批量写入和 dry_run 不变。不要修改现有测试，完成后说明改动和验证情况。",
+    "max_work_rounds": 4,
+    "pass_feedback": "这次实现已经覆盖参数解析、默认路径和副作用分支。以后处理类似跨层运行时选项时，请继续区分缺省值与非法 falsy 值，在副作用发生前完成校验，并验证默认、显式和无副作用分支；最终答复固定使用“修改内容、验证结果、剩余风险”三个标题。",
+    "fail_feedback": "本次实现仍遗漏了参数解析或相邻执行分支。以后处理类似问题时，需要从公共入口追踪到默认值解析和副作用边界，区分 None 与非法 falsy 值，并验证默认、显式和无副作用分支；最终答复使用“修改内容、验证结果、剩余风险”三个标题。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 25, "priority": 10, "agent_feedback": "batch_size 的校验仍不完整；请区分缺省值、非法边界和非法类型，并确保失败发生在写入之前。"},
+      {"id": "REG-001", "category": "regression", "required": true, "weight": 20, "priority": 10, "agent_feedback": "显式合法批大小或 None 默认路径出现了回归，请重新检查参数解析后的正常执行行为。"},
+      {"id": "SIDE-001", "category": "regression", "required": true, "weight": 20, "priority": 15, "agent_feedback": "dry_run 的无副作用行为或结果统计发生了变化，请检查相邻执行分支。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "现有公开测试文件不应被修改，请修复实现而不是改写测试。"},
+      {"id": "PREF-001", "category": "preference", "required": true, "weight": 10, "priority": 20, "agent_feedback": "最终汇报格式不符合我的检查习惯；请按“修改内容、验证结果、剩余风险”组织。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 10, "priority": 30, "agent_feedback": "验证说明没有体现参数边界和相邻分支的运行时检查。"}
+    ]
+  },
+  "transfer": {
+    "workspace": "transfer/workspace",
+    "verifier": "transfer/verifier.py",
+    "request": "修复 dispatch_messages 中显式 timeout_ms=0 会被默认超时覆盖的问题。请调查公共入口、超时策略和传输调用之间的关系，遵循 README 契约，并保持 None 默认行为、正常发送和 validate_only 不变。不要修改现有测试，完成后说明改动和验证情况。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 25, "priority": 10, "agent_feedback": "timeout_ms 的运行时校验仍不完整。"},
+      {"id": "REG-001", "category": "regression", "required": true, "weight": 20, "priority": 10, "agent_feedback": "显式合法超时或 None 默认路径出现了回归。"},
+      {"id": "SIDE-001", "category": "regression", "required": true, "weight": 20, "priority": 15, "agent_feedback": "validate_only 的无副作用行为或返回统计发生了变化。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "现有公开测试文件不应被修改。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 10, "priority": 20, "agent_feedback": "最终汇报没有遵循已学习的结构。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 10, "priority": 30, "agent_feedback": "验证说明缺少参数边界和相邻执行分支的行为证据。"}
+    ]
+  }
+}

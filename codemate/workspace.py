@@ -14,7 +14,15 @@ from zoneinfo import ZoneInfo
 
 MAX_TOOL_OUTPUT = 20000
 MAX_HISTORY = 48000
-IGNORED_PATH_NAMES = {".git", ".codemate", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+IGNORED_PATH_NAMES = {
+    ".git",
+    ".codemate",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+}
 TRACE_TIMEZONE = "Asia/Shanghai"
 
 
@@ -58,6 +66,12 @@ class WorkspaceContext:
     @classmethod
     def build(cls, cwd, repo_root_override=None):
         cwd = Path(cwd).resolve()
+        # Agent 工作区由启动目录确定，不再向上继承父级 Git 仓库。
+        repo_root = (
+            Path(repo_root_override).resolve()
+            if repo_root_override is not None
+            else cwd
+        )
 
         def git(args, fallback=""):
             try:
@@ -73,20 +87,25 @@ class WorkspaceContext:
             except Exception:
                 return fallback
 
-        repo_root = (
-            Path(repo_root_override).resolve()
-            if repo_root_override is not None
-            else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
-        )
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
             default_branch=(
-                lambda branch: branch[len("origin/") :] if branch.startswith("origin/") else branch
-            )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
+                lambda branch: (
+                    branch[len("origin/") :] if branch.startswith("origin/") else branch
+                )
+            )(
+                git(
+                    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    "origin/main",
+                )
+                or "origin/main"
+            ),
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
+            recent_commits=[
+                line for line in git(["log", "--oneline", "-5"]).splitlines() if line
+            ],
         )
 
     def text(self):
@@ -110,4 +129,6 @@ class WorkspaceContext:
             "status": self.status,
             "recent_commits": list(self.recent_commits),
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()

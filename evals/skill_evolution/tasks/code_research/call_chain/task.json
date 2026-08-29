@@ -1,0 +1,37 @@
+{
+  "id": "code-research-call-chain",
+  "category": "code_research",
+  "skill_target": "在包含装配、条件分支和异常转换的代码库中识别真实入口，追踪数据与配置流，并用跨模块代码证据说明正常和失败路径",
+  "learned_preferences": [
+    "代码调研报告使用“入口与装配、核心调用与分支、错误传播”组织关键结论"
+  ],
+  "induction": {
+    "workspace": "induction/workspace",
+    "verifier": "induction/verifier.py",
+    "request": "请调查当前 document preview 服务：说明一次 preview_document 请求如何完成上下文和依赖装配，缓存命中与未命中分别经过哪些路径，租户、配置、locale 和脱敏策略在哪里进入流程；同时解释文档不存在与底层存储超时最终如何映射为 API 错误。仓库中存在旧实现，请确认真实调用路径。请基于代码给出可定位证据，不要修改文件。",
+    "max_work_rounds": 4,
+    "pass_feedback": "这次调研已经覆盖真实入口、装配、条件分支和异常转换。以后分析类似代码库时，请先排除同名旧路径，再追踪上下文、配置、缓存或幂等分支、数据层和错误传播，并用准确代码位置支撑结论；报告固定使用“入口与装配、核心调用与分支、错误传播”组织。",
+    "fail_feedback": "这次调研仍遗漏了真实入口、条件分支、配置流或异常转换。以后不要沿第一个同名函数直接下结论，应确认装配关系，继续追踪上下文、缓存或幂等分支、数据层和错误传播，并用准确代码位置支撑结论；报告使用“入口与装配、核心调用与分支、错误传播”组织。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 25, "priority": 10, "agent_feedback": "真实请求链仍有遗漏，请确认 active 入口，并继续追踪上下文、装配、控制器、服务、仓储和渲染。"},
+      {"id": "FUNC-002", "category": "functional", "required": true, "weight": 20, "priority": 15, "agent_feedback": "缓存命中/未命中、租户策略或配置数据流说明不完整，请调查相邻条件分支。"},
+      {"id": "FUNC-003", "category": "functional", "required": true, "weight": 20, "priority": 15, "agent_feedback": "错误传播说明不完整，请追踪缺失结果和底层超时如何逐层转换为 API 状态。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "这是只读调研任务，不应修改被调查源码。"},
+      {"id": "QUALITY-001", "category": "quality", "required": true, "weight": 10, "priority": 20, "agent_feedback": "关键子系统缺少可定位代码证据，请为入口、装配、上下文、控制器、服务和仓储提供准确相对路径与行号。"},
+      {"id": "PREF-001", "category": "preference", "required": true, "weight": 10, "priority": 30, "agent_feedback": "报告不符合我的调研阅读习惯，请按“入口与装配、核心调用与分支、错误传播”组织。"}
+    ]
+  },
+  "transfer": {
+    "workspace": "transfer/workspace",
+    "verifier": "transfer/verifier.py",
+    "request": "请调查当前 event publishing 服务：说明一次 publish_event 请求如何完成上下文和依赖装配，首次请求与重复 request_id 分别经过哪些路径，租户和 outbox 配置如何传递；同时解释未知 topic、handler 参数错误和 outbox 连接失败最终如何映射为 API 错误。仓库中存在旧实现，请确认真实调用路径。请基于代码给出可定位证据，不要修改文件。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 25, "priority": 10, "agent_feedback": "真实事件发布链存在关键遗漏。"},
+      {"id": "FUNC-002", "category": "functional", "required": true, "weight": 20, "priority": 15, "agent_feedback": "重复请求分支、租户上下文、handler 或 outbox 配置流说明不完整。"},
+      {"id": "FUNC-003", "category": "functional", "required": true, "weight": 20, "priority": 15, "agent_feedback": "未知 topic、无效 payload 或 outbox 失败的错误传播说明不完整。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "只读调研任务修改了源码。"},
+      {"id": "QUALITY-001", "category": "quality", "required": true, "weight": 10, "priority": 20, "agent_feedback": "关键子系统缺少可定位代码证据。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 10, "priority": 30, "agent_feedback": "报告未遵循已学习的组织方式。"}
+    ]
+  }
+}

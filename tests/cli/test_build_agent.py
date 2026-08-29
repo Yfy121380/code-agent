@@ -27,7 +27,7 @@ def test_cli_skill_evolution_override_is_tri_state():
     [
         (False, ["--skill-evolution"], True),
         (True, ["--no-skill-evolution"], False),
-        (True, ["--skill-evolution", "--benchmark"], False),
+        (True, ["--skill-evolution", "--benchmark"], True),
     ],
 )
 def test_cli_skill_evolution_override_precedence(

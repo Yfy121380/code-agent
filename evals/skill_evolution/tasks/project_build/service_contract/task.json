@@ -1,0 +1,35 @@
+{
+  "id": "project-build-service-contract",
+  "category": "project_build",
+  "skill_target": "从公开契约实现完整小型模块，覆盖正常路径、失败行为、状态隔离和可执行验证",
+  "learned_preferences": [
+    "实现任务最终使用“实现、验证、限制”三个标题汇报"
+  ],
+  "induction": {
+    "workspace": "induction/workspace",
+    "verifier": "induction/verifier.py",
+    "request": "请根据 README.md 的公开契约实现这个笔记服务。保持依赖最小，并自行运行有意义的验证。",
+    "max_work_rounds": 4,
+    "pass_feedback": "实现已经满足公开契约。以后从头实现类似小模块时，请系统覆盖正常行为、输入边界、失败语义和返回值隔离，并在最终答复中使用“实现、验证、限制”三个标题。",
+    "fail_feedback": "实现仍未完整满足公开契约。类似任务需要先整理接口与失败语义，再覆盖正常行为、边界和状态隔离；最终答复使用“实现、验证、限制”三个标题。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 30, "priority": 10, "agent_feedback": "核心服务接口或正常状态变化仍未完整实现，请重新核对公开契约。"},
+      {"id": "REG-001", "category": "regression", "required": true, "weight": 20, "priority": 15, "agent_feedback": "失败语义或返回值隔离不符合契约，请检查重复、缺失和外部修改场景。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "实现应保持标准库依赖并且不要改写公开契约。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 20, "priority": 20, "agent_feedback": "缺少覆盖真实接口行为的可执行验证说明。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 15, "priority": 30, "agent_feedback": "最终答复请按“实现、验证、限制”组织。"}
+    ]
+  },
+  "transfer": {
+    "workspace": "transfer/workspace",
+    "verifier": "transfer/verifier.py",
+    "request": "请根据 README.md 的公开契约实现库存服务。保持依赖最小，并自行运行有意义的验证。",
+    "checks": [
+      {"id": "FUNC-001", "category": "functional", "required": true, "weight": 30, "priority": 10, "agent_feedback": "核心库存接口不完整。"},
+      {"id": "REG-001", "category": "regression", "required": true, "weight": 20, "priority": 15, "agent_feedback": "失败语义或状态隔离不符合契约。"},
+      {"id": "INSTR-001", "category": "instruction", "required": true, "weight": 15, "priority": 10, "agent_feedback": "实现违反了依赖或契约文件约束。"},
+      {"id": "QUALITY-001", "category": "quality", "required": false, "weight": 20, "priority": 20, "agent_feedback": "缺少行为层验证说明。"},
+      {"id": "PREF-001", "category": "preference", "required": false, "weight": 15, "priority": 30, "agent_feedback": "最终答复未遵循已学习格式。"}
+    ]
+  }
+}

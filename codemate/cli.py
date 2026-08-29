@@ -197,6 +197,11 @@ def build_agent(args, ui=None):
         if getattr(args, "benchmark", False)
         else None
     )
+    if feature_flags is not None and getattr(args, "skill_evolution", None) is True:
+        # End-to-end Skill evaluations need benchmark isolation and online
+        # evolution at the same time. An explicit CLI override wins over the
+        # benchmark default without re-enabling memory or session maintenance.
+        feature_flags["skill_evolution"] = True
     session_id = args.resume
     if session_id == RESUME_SELECT:
         selected = ui.session_menu(store.list_sessions()) if ui is not None else None
